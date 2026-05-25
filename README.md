@@ -4,11 +4,11 @@
 
 ccpatch injects scripts into Claude Code's `cli.js` to alter behavior that MCP and external wrappers cannot reach:
 
-- **Modify the tool list** before it is sent to the API — add, remove, or reshape tools without Claude knowing
-- **Flip internal feature flags** (`loop_dynamic`, `durable_cron`, `extended_thinking`) that are boolean checks hardcoded in the bundle — no proxy or wrapper can reach these
-- **Intercept user input** at the submit level, before the harness processes it — add native slash commands indistinguishable from built-ins
-- **Access internal conversation state** — the agent loop, turn history, and module-scope variables that are never serialized or exposed
-- **Poke holes in the module boundary** — `expose_tool_dispatch`, `expose_api_client`, `expose_submit_input` let external scripts call into the running CLI process
+- **Modify the tool list** before it is sent to the API — add, remove, or reshape tools
+- **Flip internal feature flags** (`loop_dynamic`, `durable_cron`, `extended_thinking`) that are boolean checks hardcoded in the bundle
+- **Intercept user input** at the submit level, before the harness processes it — add native slash commands
+- **Access internal conversation state** — the agent loop, turn history, and module-scope variables
+- **Expose internal APIs** — `expose_tool_dispatch`, `expose_api_client`, `expose_submit_input` let external scripts call into the running CLI process
 - **Patch the UI** — React/Ink component tree, input bar rendering, terminal output
 
 ccpatch is not a fork. It ships **no Anthropic code**. It transforms a copy of the Claude Code CLI that is already installed on your machine.
