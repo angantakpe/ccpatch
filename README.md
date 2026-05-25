@@ -2,7 +2,7 @@
 
 # ccpatch
 
-ccpatch injects scripts into Claude Code's `cli.js` to alter behavior that MCP and external wrappers cannot reach:
+ccpatch injects scripts into Claude Code's `cli.js` to extend and alter its behavior from within the process:
 
 - **Modify the tool list** before it is sent to the API — add, remove, or reshape tools
 - **Flip internal feature flags** (`loop_dynamic`, `durable_cron`, `extended_thinking`) that are boolean checks hardcoded in the bundle
