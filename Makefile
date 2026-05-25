@@ -4,7 +4,10 @@ export
 include scripts/mk/vars.mk
 include scripts/mk/cli.mk
 
-.PHONY: help refmap refmap-check
+.PHONY: help refmap refmap-check smoke-bridge
+smoke-bridge: ## Smoke-test the headless_bridge NDJSON protocol (no patched CLI needed)
+	@node tests/smoke_bridge.mjs
+
 help: ## Show this help
 	@echo "Usage: make <target> [VERSION=x.y.z]"
 	@echo ""
