@@ -76,9 +76,18 @@ globalThis.__ccpAuth = {
 };
 globalThis.__ccpSubmitInput = async (prompt) => {
   bus.emit('turn.start', { id: 't1' });
+  // A tool call from the root agent.
   bus.emit('tool.call',   { id: 'tc1', agent_path: 'root', name: 'Read', input: {} });
   bus.emit('tool.result', { id: 'tc1', agent_path: 'root', name: 'Read', ok: true, bytes: 4 });
-  bus.emit('turn.end',    { id: 't1', usage: { in: 1, out: 1 } });
+  // Simulate a subagent spawn that itself runs a tool — the tool.call must
+  // carry the child's agent_path, not 'root'. This exercises the same
+  // threading expose_agent_tool stamps onto globalThis.__ccp_path.
+  const child_id = 'agent-smoke-1';
+  bus.emit('agent.spawn',  { parent_id: 'root', child_id, prompt: 'sub-task' });
+  bus.emit('tool.call',    { id: 'tc2', agent_path: 'root/' + child_id, name: 'Grep', input: {} });
+  bus.emit('tool.result',  { id: 'tc2', agent_path: 'root/' + child_id, name: 'Grep', ok: true, bytes: 8 });
+  bus.emit('agent.exit',   { id: child_id, ok: true, usage: { in: 2, out: 2 } });
+  bus.emit('turn.end',     { id: 't1', usage: { in: 3, out: 3 } });
   return { final: 'PONG:' + prompt };
 };
 globalThis.__ccpInvokeTool = async (name, input) => ({ tool: name, echoed: input });
@@ -112,7 +121,13 @@ const runClient = () => new Promise((resolve, reject) => {
     send({ id, op, ...extra });
   });
 
-  const seen = { turnStart: false, toolCall: false, toolResult: false, turnEnd: false };
+  const seen = {
+    turnStart: false, turnEnd: false,
+    toolCallRoot: false, toolCallSub: false,
+    toolResult: false,
+    agentSpawn: false, agentExit: false,
+  };
+  let subAgentPath = null;
   const timer = setTimeout(() => { sock.destroy(); reject(new Error('timeout')); }, TIMEOUT_MS);
 
   rl.on('line', (line) => {
@@ -120,9 +135,18 @@ const runClient = () => new Promise((resolve, reject) => {
     try { msg = JSON.parse(line); } catch { return; }
     if (msg.kind === 'event') {
       if (msg.event === 'turn.start')  seen.turnStart = true;
-      if (msg.event === 'tool.call')   seen.toolCall = true;
-      if (msg.event === 'tool.result') seen.toolResult = true;
       if (msg.event === 'turn.end')    seen.turnEnd = true;
+      if (msg.event === 'tool.result') seen.toolResult = true;
+      if (msg.event === 'agent.spawn') seen.agentSpawn = true;
+      if (msg.event === 'agent.exit')  seen.agentExit = true;
+      if (msg.event === 'tool.call') {
+        const ap = msg.payload && msg.payload.agent_path;
+        if (ap === 'root') seen.toolCallRoot = true;
+        else if (typeof ap === 'string' && ap.startsWith('root/agent-')) {
+          seen.toolCallSub = true;
+          subAgentPath = ap;
+        }
+      }
       return;
     }
     if (!msg.id) return;
@@ -138,7 +162,9 @@ const runClient = () => new Promise((resolve, reject) => {
 
   (async () => {
     await call('hello', { token: TOKEN }, true);
-    await call('subscribe', { topics: ['turn.start','turn.end','tool.call','tool.result'] }, true);
+    await call('subscribe', {
+      topics: ['turn.start','turn.end','tool.call','tool.result','agent.spawn','agent.exit'],
+    }, true);
     const r = await call('submit', { prompt: 'hello' });
     if (!r.result || r.result.final !== 'PONG:hello') {
       clearTimeout(timer); sock.destroy(); return reject(new Error('submit result mismatch: ' + JSON.stringify(r)));
@@ -150,6 +176,9 @@ const runClient = () => new Promise((resolve, reject) => {
     setTimeout(() => {
       const missing = Object.entries(seen).filter(([, v]) => !v).map(([k]) => k);
       if (missing.length) return reject(new Error('missing events: ' + missing.join(',')));
+      if (!subAgentPath || !subAgentPath.includes('/agent-')) {
+        return reject(new Error('subagent tool.call did not carry expected agent_path (got ' + subAgentPath + ')'));
+      }
       resolve();
     }, 50);
   })().catch(reject);
@@ -162,7 +191,7 @@ process.on('exit', cleanup);
   try {
     await waitForSocket();
     await runClient();
-    console.log('OK: hello + subscribe + submit + bus events + bye');
+    console.log('OK: hello + subscribe + submit + bus events (incl. agent.spawn/exit + agent_path threading) + bye');
     process.exit(0);
   } catch (e) {
     die(e.message);

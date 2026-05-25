@@ -237,9 +237,19 @@ export default {
           'if(!ctx)throw new Error("[ccpInvokeTool] toolUseContext not stashed yet");' +
           'if(signal)ctx.abortController=Object.assign(Object.create(null),ctx.abortController,{signal:signal});' +
           'var toolUseId="ccp-"+Date.now()+"-"+Math.random().toString(36).slice(2);' +
+          // Bus emit: tool.call (best-effort; bus may not be loaded)
+          'var __ccp_path=globalThis.__ccp_path||"root";' +
+          'try{globalThis.__ccpBus&&globalThis.__ccpBus.emit("tool.call",{id:toolUseId,agent_path:__ccp_path,name:name,input:input});}catch(_ccpEmitC_){}' +
           // Signature from bundle: async call(input, toolUseContext, toolUseId, extra, progressCb)
-          'var result=await tool.call(input,ctx,toolUseId,void 0,void 0);' +
-          'return result;' +
+          'try{' +
+            'var result=await tool.call(input,ctx,toolUseId,void 0,void 0);' +
+            'var __ccp_bytes=0;try{__ccp_bytes=(typeof result==="string"?result.length:JSON.stringify(result||"").length);}catch(_ccpSz_){}' +
+            'try{globalThis.__ccpBus&&globalThis.__ccpBus.emit("tool.result",{id:toolUseId,agent_path:__ccp_path,name:name,ok:true,bytes:__ccp_bytes});}catch(_ccpEmitR_){}' +
+            'return result;' +
+          '}catch(__ccp_te){' +
+            'try{globalThis.__ccpBus&&globalThis.__ccpBus.emit("tool.result",{id:toolUseId,agent_path:__ccp_path,name:name,ok:false,bytes:0});}catch(_ccpEmitE_){}' +
+            'throw __ccp_te;' +
+          '}' +
         '};' +
         // ── Contract registration ────────────────────────────────────────
         // Single "toolDispatch" contract exposes the four helpers as one

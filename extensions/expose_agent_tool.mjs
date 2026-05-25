@@ -185,6 +185,20 @@ try {
             : Date.now().toString(36) + Math.random().toString(36).slice(2);
           const startMs = Date.now();
           const abortCtrl = new AbortController();
+          // ── ccpatch bus: agent.spawn + agent_path threading ────────────────
+          // Stamp the global path so any tool.call emitted inside the subagent's
+          // execution carries the right agent_path. Restored in both then/catch.
+          const __ccp_parent_path = globalThis.__ccp_path || 'root';
+          const __ccp_child_id = 'agent-' + runId;
+          const __ccp_prev_path = globalThis.__ccp_path;
+          globalThis.__ccp_path = __ccp_parent_path + '/' + __ccp_child_id;
+          try {
+            globalThis.__ccpBus && globalThis.__ccpBus.emit('agent.spawn', {
+              parent_id: __ccp_parent_path,
+              child_id: __ccp_child_id,
+              prompt: prompt,
+            });
+          } catch (_ccpAS_) {}
           const timer = setTimeout(() => {
             abortCtrl.abort();
             reject(Object.assign(new Error('AgentTool invoke timed out after ' + timeoutMs + 'ms'), { code: 'timeout', ms: timeoutMs }));
@@ -325,10 +339,28 @@ try {
                   globalThis.__ccpSubagent.emit('subagent:result', { result: text, messages: [], defaultLabel: description });
                 }
               } catch (_ccpE_) {}
+              // ── ccpatch bus: agent.exit (ok) + restore path ────────────────
+              try {
+                globalThis.__ccpBus && globalThis.__ccpBus.emit('agent.exit', {
+                  id: __ccp_child_id,
+                  ok: true,
+                  usage: (result && result.usage) || null,
+                });
+              } catch (_ccpAE_) {}
+              globalThis.__ccp_path = __ccp_prev_path;
               resolve({ text, durationMs: Date.now() - startMs, agentType: subagent_type, runId });
             })
             .catch((err) => {
               clearTimeout(timer);
+              // ── ccpatch bus: agent.exit (fail) + restore path ──────────────
+              try {
+                globalThis.__ccpBus && globalThis.__ccpBus.emit('agent.exit', {
+                  id: __ccp_child_id,
+                  ok: false,
+                  usage: null,
+                });
+              } catch (_ccpAEx_) {}
+              globalThis.__ccp_path = __ccp_prev_path;
               if (abortCtrl.signal.aborted) return; // already rejected via timeout
               // Preserve err.stack so the dispatcher's outbox finding shows the
               // real failure site instead of just the message.
