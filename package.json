@@ -25,7 +25,12 @@
   "scripts": {
     "test:patches": "node --test tests/patch-verification.test.mjs",
     "test:boot": "node --test tests/boot-smoke.test.mjs",
-    "test:all": "node --test tests/*.test.mjs"
+    "test:all": "node --test tests/*.test.mjs",
+    "lint:dead": "node scripts/lint-dead.mjs",
+    "lint:unused": "knip",
+    "lint:unused:fix": "knip --fix",
+    "lint:unused:prod": "knip --production --strict",
+    "lint": "npm run lint:dead && npm run lint:unused"
   },
   "dependencies": {
     "acorn": "^8.14.0",
@@ -38,7 +43,10 @@
     "source-map": "^0.7.4"
   },
   "devDependencies": {
+    "@types/node": "^22.10.0",
+    "knip": "^5.39.0",
     "lebab": "^3.2.9",
-    "prettier": "^3.8.3"
+    "prettier": "^3.8.3",
+    "typescript": "^5.7.0"
   }
 }

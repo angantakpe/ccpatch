@@ -1,0 +1,39 @@
+{
+  "$schema": "https://unpkg.com/knip@5/schema.json",
+  "entry": [
+    "bin/extract-from-binary.mjs",
+    "bin/repack-bundle.mjs",
+    "bin/scaffold-patch.mjs",
+    "runner/cli.mjs",
+    "tools/ccpatch-bridge.mjs",
+    "tools/anchor-doctor.mjs",
+    "tools/bench-align.mjs",
+    "tools/build-refmap.mjs",
+    "tools/repl.mjs",
+    "tools/repl-child.mjs",
+    "tools/tweakcc-anchors.mjs",
+    "tests/**/*.test.mjs",
+    "tests/smoke_bridge.mjs",
+    "core/**/*.mjs",
+    "extensions/**/*.mjs"
+  ],
+  "project": [
+    "core/**/*.mjs",
+    "extensions/**/*.mjs",
+    "runner/**/*.mjs",
+    "tools/**/*.mjs",
+    "tests/**/*.mjs",
+    "bin/**/*.mjs",
+    "scripts/**/*.mjs"
+  ],
+  "ignore": [
+    "tools/reconstructor/**",
+    "**/fixtures/**"
+  ],
+  "ignoreDependencies": [
+    "ink",
+    "react",
+    "source-map"
+  ],
+  "ignoreExportsUsedInFile": true
+}

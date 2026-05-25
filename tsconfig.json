@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "_": "tsc --noEmit acts as a JS dead-code linter. No TypeScript at runtime; the project stays pure .mjs. Run via `npm run lint:dead` or `make lint-dead`.",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "strict": false,
+    "noImplicitAny": false,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "types": ["node"],
+    "lib": ["ES2022"]
+  },
+  "include": [
+    "core/**/*.mjs",
+    "extensions/**/*.mjs",
+    "runner/**/*.mjs",
+    "tools/**/*.mjs",
+    "tests/**/*.mjs",
+    "scripts/**/*.mjs"
+  ],
+  "exclude": [
+    "node_modules",
+    "releases",
+    "storage",
+    "refmaps",
+    "**/fixtures/**",
+    "tools/bun-decompiler/**",
+    "tools/reconstructor/**"
+  ]
+}
