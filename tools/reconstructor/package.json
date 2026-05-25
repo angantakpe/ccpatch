@@ -1,0 +1,17 @@
+{
+  "name": "bundle-reconstructor",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Règle de trois — reconstruct Claude Code source from new bundles using a known bundle↔source mapping",
+  "bin": {
+    "cc-re": "main.mjs"
+  },
+  "dependencies": {
+    "acorn": "^8.14.0",
+    "acorn-walk": "^8.3.4",
+    "diff": "^7.0.0",
+    "lebab": "^3.2.9",
+    "prettier": "^3.8.1",
+    "source-map": "^0.7.4"
+  }
+}

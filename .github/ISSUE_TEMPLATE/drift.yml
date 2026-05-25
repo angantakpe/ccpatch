@@ -1,0 +1,41 @@
+name: Anchor drift
+description: A patch's anchor no longer matches an upstream Claude Code release.
+labels: ["drift"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template when `make patch-claude-code` reports `missing` or
+        `drift` against a new Claude Code version, or when the nightly
+        drift-check workflow fires.
+  - type: input
+    id: cc-version
+    attributes:
+      label: Upstream Claude Code version
+      placeholder: "2.1.151"
+    validations:
+      required: true
+  - type: input
+    id: prev-version
+    attributes:
+      label: Last version where the anchor still matched
+      placeholder: "2.1.150"
+  - type: input
+    id: patch-name
+    attributes:
+      label: Affected patch(es)
+      placeholder: "fix_message_normalizer, expose_tool_dispatch"
+    validations:
+      required: true
+  - type: textarea
+    id: doctor-output
+    attributes:
+      label: Doctor output for the affected patch(es)
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: candidates
+    attributes:
+      label: Fuzzy candidates (from `storage/outputs/anchor-drift.jsonl`)
+      render: json

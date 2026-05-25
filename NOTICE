@@ -1,0 +1,30 @@
+ccpatch (also known as ccpatch)
+Copyright (c) the ccpatch contributors.
+Licensed under the MIT License. See LICENSE for the full text.
+
+ccpatch is an independent open-source project. It is not affiliated
+with, sponsored by, or endorsed by Anthropic, PBC.
+
+ccpatch distributes no Anthropic source code. The framework operates
+exclusively on a copy of the Claude Code CLI that the user has already
+installed on their own machine (typically via `npm install -g
+@anthropic-ai/claude-code` or by downloading an official release).
+ccpatch reads that user-owned copy, applies declarative patches to it,
+and writes the result back to a path the user controls.
+
+"Anthropic", "Claude", and "Claude Code" are trademarks of Anthropic,
+PBC. Use of those names in this project is nominative — to identify the
+upstream software that ccpatch transforms — and does not imply any
+endorsement or affiliation.
+
+The user is solely responsible for ensuring that their use of ccpatch
+and of any patched Claude Code build complies with the applicable
+Anthropic terms of service, usage policies, and any other agreements
+between the user and Anthropic. Running a patched build may alter
+behavior in ways that affect that compliance; review the patches you
+enable in ccpatch.yml and consult THREAT_MODEL.md before use.
+
+ccpatch ships no telemetry, performs no network calls from the patcher
+itself, and has no auto-update mechanism. See THREAT_MODEL.md for a
+per-patch breakdown of what each enabled patch reads, writes, and
+sends.

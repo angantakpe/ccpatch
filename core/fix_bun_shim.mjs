@@ -1,0 +1,436 @@
+// Patch: fix_bun_shim
+// Injects a globalThis.Bun polyfill so the extracted CJS bundle can run under
+// Node.js. Bun-compiled bundles call Bun.* APIs without typeof guards. This shim
+// provides Node.js equivalents for every Bun API the bundle actually invokes.
+
+export default {
+  category: 'fix',
+  required: true,
+
+  description: 'Inject globalThis.Bun shim so bundle runs under Node.js without Bun installed',
+  capabilities: ["env","network"],
+  verify: {
+    present: '__ccpBunShim',
+    // Shim source contains '__ccpBunShim' exactly 3 times: function name,
+    // catch err var declaration, and the warn() reference.
+    count: { present: 3 },
+  },
+  apply: (code) => {
+    // Anchor: the shebang line is always the first line of the CJS bundle.
+    // We inject the shim immediately after it, before any bundle code executes.
+    // NOTE: use includes() not startsWith() — earlier patches (e.g. fetch_interceptor)
+    // may have prepended code before the CJS-IIFE, so startsWith() would miss it.
+    const SHEBANG = '#!/usr/bin/env node';
+    const CJS_IIFE = '(function(exports, require, module, __filename, __dirname)';
+    const hasShebang = code.includes(SHEBANG);
+    const hasCjsIife = code.includes(CJS_IIFE);
+    if (!hasShebang && !hasCjsIife) {
+      console.warn('  [!] fix_bun_shim: neither shebang nor CJS-IIFE anchor found — skipping');
+      return code;
+    }
+
+    // Only inject if Bun is not already defined (idempotent).
+    // For shebang sources: inject after the shebang line.
+    // For CJS-IIFE sources (extracted from Bun binary): inject before the IIFE
+    // so the shim runs before any bundle code that calls Bun.*. The ESM compat
+    // shim (applied later) will insert its ESM imports after line 1.
+    const shim = `
+// ═══════════════════════════════════════════════════════════════════════════
+// [PATCH] Bun polyfill — makes Bun-compiled CJS bundle run under Node.js
+// ═══════════════════════════════════════════════════════════════════════════
+if (typeof globalThis.Bun === 'undefined') {
+  try {
+    (function __ccpBunShim() {
+      // __hm_nativeRequire is defined by the ESM compat shim; __ccp_nativeRequire is
+      // an alias used in some builds. Fall back to require (CJS context) or throw.
+      var _req = (typeof __hm_nativeRequire !== 'undefined' ? __hm_nativeRequire
+                  : typeof __ccp_nativeRequire !== 'undefined' ? __ccp_nativeRequire
+                  : typeof require !== 'undefined' ? require
+                  : function(id) { throw new Error('no require: ' + id); });
+      var _childProcess = _req('child_process');
+      var _path = _req('path');
+      var _semver; try { _semver = _req('semver'); } catch(_) { _semver = null; }
+
+      // ── Bun.stringWidth ──────────────────────────────────────────────────
+      // Returns the visible terminal width of a string (handles wide/emoji chars).
+      // Falls back to a best-effort approximation: strip ANSI codes, count codepoints.
+      var _stripAnsiRe = /\x1B\[[0-9;]*[mGKHF]|\x1B\][^\x07]*\x07|\x1B[PX^_][^\x1B]*\x1B\\|\x9B[0-9;]*[mGKHF]|\x1B[()][A-D0-9]/g;
+      function _stripAnsi(s) {
+        return typeof s === 'string' ? s.replace(_stripAnsiRe, '') : String(s || '');
+      }
+      function _stringWidth(s, _opts) {
+        if (typeof s !== 'string') return 0;
+        s = _stripAnsi(s);
+        if (s.length === 0) return 0;
+        var w = 0;
+        for (var i = 0; i < s.length; ) {
+          var code = s.codePointAt(i);
+          if (code === undefined) break;
+          // Wide characters (CJK, fullwidth, etc.)
+          if (
+            (code >= 0x1100 && code <= 0x115F) ||
+            code === 0x2329 || code === 0x232A ||
+            (code >= 0x2E80 && code <= 0x3247 && code !== 0x303F) ||
+            (code >= 0x3250 && code <= 0x4DBF) ||
+            (code >= 0x4E00 && code <= 0xA4C6) ||
+            (code >= 0xA960 && code <= 0xA97C) ||
+            (code >= 0xAC00 && code <= 0xD7A3) ||
+            (code >= 0xF900 && code <= 0xFAFF) ||
+            (code >= 0xFE10 && code <= 0xFE19) ||
+            (code >= 0xFF01 && code <= 0xFF60) ||
+            (code >= 0xFFE0 && code <= 0xFFE6) ||
+            (code >= 0x1B000 && code <= 0x1B001) ||
+            (code >= 0x1F300 && code <= 0x1F64F) ||
+            (code >= 0x1F900 && code <= 0x1F9FF) ||
+            (code >= 0x20000 && code <= 0x2FFFD) ||
+            (code >= 0x30000 && code <= 0x3FFFD)
+          ) {
+            w += 2;
+          } else if (code !== 0 && code !== 0xFEFF) {
+            w += 1;
+          }
+          i += code > 0xFFFF ? 2 : 1;
+        }
+        return w;
+      }
+
+      // ── Bun.hash ─────────────────────────────────────────────────────────
+      // Bun.hash() returns a BigInt; Bun.hash(str, seed) uses seed as a uint64.
+      // We use a fast Fowler-Noll-Vo FNV-1a 32-bit approximation. The bundle
+      // only uses .toString() / .toString(36) on the result, so numeric type
+      // and bit-for-bit accuracy don't matter — uniqueness does.
+      function _hash(input, seed) {
+        var s = typeof input === 'string' ? input : String(input);
+        var h = (seed !== undefined ? (Number(seed) | 0) : 0x811c9dc5) >>> 0;
+        for (var i = 0; i < s.length; i++) {
+          h ^= s.charCodeAt(i);
+          h = Math.imul(h, 0x01000193) >>> 0;
+        }
+        // Return a BigInt-like object that has a numeric value and toString()
+        var n = h;
+        var result = Object.create(null);
+        result.valueOf = function() { return BigInt(n); };
+        result.toString = function(radix) { return n.toString(radix || 10); };
+        // Also coerce correctly when used as BigInt in K2H: Number($&0xffffffffn)
+        // — the BigInt coercion path. We return an actual BigInt here.
+        return BigInt(n);
+      }
+
+      // ── Bun.which ────────────────────────────────────────────────────────
+      function _which(cmd) {
+        try {
+          var r = _childProcess.spawnSync('which', [cmd], {
+            encoding: 'utf8',
+            stdio: ['ignore', 'pipe', 'ignore'],
+            timeout: 1000,
+          });
+          if (r.status === 0 && r.stdout) return r.stdout.trim() || null;
+        } catch (_) {}
+        return null;
+      }
+
+      // ── Bun.wrapAnsi ─────────────────────────────────────────────────────
+      // Wrap a string to a given column width, preserving ANSI codes.
+      // Minimal implementation: insert \\n when visible width exceeds limit.
+      function _wrapAnsi(str, width, _opts) {
+        if (!str || width <= 0) return str;
+        var lines = str.split('\\n');
+        var result = [];
+        for (var i = 0; i < lines.length; i++) {
+          var line = lines[i];
+          if (_stringWidth(line) <= width) {
+            result.push(line);
+            continue;
+          }
+          var current = '';
+          var currentWidth = 0;
+          var j = 0;
+          while (j < line.length) {
+            // Consume an ANSI escape sequence without counting its width
+            var ansiMatch = line.slice(j).match(/^\x1B\[[0-9;]*[mGKHF]/);
+            if (ansiMatch) {
+              current += ansiMatch[0];
+              j += ansiMatch[0].length;
+              continue;
+            }
+            var cp = line.codePointAt(j);
+            var ch = String.fromCodePoint(cp);
+            var cw = _stringWidth(ch);
+            if (currentWidth + cw > width) {
+              result.push(current);
+              current = '';
+              currentWidth = 0;
+            }
+            current += ch;
+            currentWidth += cw;
+            j += cp > 0xFFFF ? 2 : 1;
+          }
+          if (current) result.push(current);
+        }
+        return result.join('\\n');
+      }
+
+      // ── Bun.semver ───────────────────────────────────────────────────────
+      // The bundle uses: Bun.semver.order(a, b) and Bun.semver.satisfies(v, r)
+      // order returns -1 | 0 | 1; satisfies returns boolean.
+      var _semverShim = {
+        order: function(a, b) {
+          if (_semver) { try { return _semver.compare(a, b); } catch (_) {} }
+          // Minimal fallback without semver package
+          try {
+            var pa = String(a).split('.').map(Number);
+            var pb = String(b).split('.').map(Number);
+            for (var _i = 0; _i < 3; _i++) {
+              var diff = (pa[_i] || 0) - (pb[_i] || 0);
+              if (diff !== 0) return diff > 0 ? 1 : -1;
+            }
+          } catch (_) {}
+          return 0;
+        },
+        satisfies: function(v, r) {
+          if (_semver) { try { return _semver.satisfies(v, r); } catch (_) {} }
+          return false;
+        },
+      };
+
+      // ── Bun.stripANSI ────────────────────────────────────────────────────
+      var _stripANSI = _stripAnsi;
+
+      // ── Bun.embeddedFiles ─────────────────────────────────────────────────
+      // Under Node.js there are no embedded files. Return empty array so that
+      // mz() = Array.isArray(Bun.embeddedFiles) && Bun.embeddedFiles.length > 0
+      // evaluates to false.
+      var _embeddedFiles = [];
+
+      // ── Bun.gc ───────────────────────────────────────────────────────────
+      // No-op — Node.js has its own GC. setInterval(Bun.gc, 1000) becomes a
+      // no-op timer (it won't call --expose-gc's gc() since that's separate).
+      function _gc(_full) { /* no-op */ }
+
+      // ── Bun.JSONL ────────────────────────────────────────────────────────
+      // The bundle calls Bun.JSONL?.parseChunk (optional chain) — returning
+      // undefined is fine; the caller falls back to its own parser.
+      var _JSONL = undefined;
+
+      // ── Bun.YAML ─────────────────────────────────────────────────────────
+      // The bundle calls Bun.YAML.parse(s) and Bun.YAML.stringify(v, null, 2).
+      // Use js-yaml if available; otherwise fall back to JSON.
+      var _YAML;
+      try {
+        var _jsYaml = _req('js-yaml');
+        _YAML = {
+          parse: function(s) { return _jsYaml.load(s); },
+          stringify: function(v, _r, _indent) { return _jsYaml.dump(v, { indent: 2 }); },
+        };
+      } catch (_) {
+        _YAML = {
+          parse: function(s) {
+            // Very minimal YAML fallback: try JSON first, else return raw string
+            try { return JSON.parse(s); } catch (_e) { return s; }
+          },
+          stringify: function(v, _r, _indent) {
+            return JSON.stringify(v, null, 2);
+          },
+        };
+      }
+
+      // ── Bun.spawn ────────────────────────────────────────────────────────
+      // The bundle uses Bun.spawn for:
+      //   1. Checking command --version (stdout pipe + exited promise)
+      //   2. PTY subprocess host (in tengu/bg-pty path, which is Bun-only)
+      // We implement the version-check shape. PTY shape throws with a message
+      // so the caller's try/catch triggers the "Bun.Terminal unavailable" path.
+      function _spawn(args, opts) {
+        var cmd = args[0];
+        var cmdArgs = args.slice(1);
+        var spawnOpts = {
+          cwd: (opts && opts.cwd) || process.cwd(),
+          env: (opts && opts.env) || process.env,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        };
+        var child;
+        try {
+          child = _childProcess.spawnSync(cmd, cmdArgs, Object.assign({ encoding: 'buffer', timeout: 5000 }, spawnOpts));
+        } catch (e) {
+          // Return a shaped object that matches Bun.spawn contract
+          return {
+            stdout: { text: function() { return Promise.resolve(''); } },
+            stderr: { text: function() { return Promise.resolve(''); } },
+            exited: Promise.resolve(1),
+            kill: function() {},
+          };
+        }
+        var stdoutBuf = child.stdout || Buffer.alloc(0);
+        var stderrBuf = child.stderr || Buffer.alloc(0);
+        return {
+          stdout: { text: function() { return Promise.resolve(stdoutBuf.toString('utf8')); } },
+          stderr: { text: function() { return Promise.resolve(stderrBuf.toString('utf8')); } },
+          exited: Promise.resolve(child.status !== null ? child.status : 1),
+          kill: function() {},
+          write: function() {},
+        };
+      }
+
+      // ── Bun.listen ───────────────────────────────────────────────────────
+      // Used for egress-gateway TCP relay. Under Node.js we use net.createServer.
+      // The socket contract Bun.listen expects: open(socket), data(socket, buf),
+      // close(socket), error(socket, err), drain(socket).
+      function _listen(opts) {
+        var _net = _req('net');
+        var _sockets = new Set();
+        var port = 0;
+        var server = _net.createServer(function(socket) {
+          // Wrap the node socket into a Bun-shaped socket object
+          var bunSocket = {
+            data: null,
+            _nodeSocket: socket,
+            write: function(chunk) {
+              try {
+                var written = socket.write(typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk);
+                return written ? chunk.length : 0;
+              } catch (_) { return 0; }
+            },
+            end: function() { try { socket.end(); } catch (_) {} },
+            terminate: function() { try { socket.destroy(); } catch (_) {} },
+            destroy: function() { try { socket.destroy(); } catch (_) {} },
+          };
+          _sockets.add(bunSocket);
+          if (opts.socket && opts.socket.open) {
+            try { opts.socket.open(bunSocket); } catch (_) {}
+          }
+          socket.on('data', function(chunk) {
+            if (opts.socket && opts.socket.data) {
+              try { opts.socket.data(bunSocket, chunk); } catch (_) {}
+            }
+          });
+          socket.on('drain', function() {
+            if (opts.socket && opts.socket.drain) {
+              try { opts.socket.drain(bunSocket); } catch (_) {}
+            }
+          });
+          socket.on('close', function() {
+            _sockets.delete(bunSocket);
+            if (opts.socket && opts.socket.close) {
+              try { opts.socket.close(bunSocket); } catch (_) {}
+            }
+          });
+          socket.on('error', function(err) {
+            if (opts.socket && opts.socket.error) {
+              try { opts.socket.error(bunSocket, err); } catch (_) {}
+            }
+          });
+        });
+        server.listen(opts.port || 0, opts.hostname || '127.0.0.1', function() {
+          port = server.address().port;
+        });
+        return {
+          get port() { return port || (server.address() ? server.address().port : 0); },
+          stop: function(closeActive) {
+            server.close();
+            if (closeActive) _sockets.forEach(function(s) { s.destroy(); });
+          },
+        };
+      }
+
+      // ── Bun.Terminal ─────────────────────────────────────────────────────
+      // PTY terminal emulator — not implementable in pure Node without native
+      // bindings. Throw so the bundle's try/catch triggers the Node fallback path:
+      //   this.patch({state:"crashed",detail:"Bun.Terminal unavailable (running under Node?)"})
+      function _Terminal() {
+        throw new Error('Bun.Terminal unavailable (running under Node.js — use bg-pty-host)');
+      }
+
+      // ── Bun.Transpiler ───────────────────────────────────────────────────
+      // Used in REPL mode. Minimal shim: transformSync returns the input unchanged.
+      function _Transpiler(_opts) {
+        this.transformSync = function(src) { return src; };
+        this.transform = function(src) { return Promise.resolve(src); };
+      }
+
+      // ── Bun.generateHeapSnapshot ─────────────────────────────────────────
+      // No-op — returns empty buffer.
+      function _generateHeapSnapshot(_format, _encoding) { return Buffer.alloc(0); }
+
+      // ── Compose the globalThis.Bun shim object ───────────────────────────
+      globalThis.Bun = {
+        // Version info — reported as a stub so version-checks don't error
+        version: '0.0.0-node-shim',
+        revision: 'node-shim',
+
+        // String utilities
+        stringWidth:          _stringWidth,
+        wrapAnsi:             _wrapAnsi,
+        stripANSI:            _stripANSI,
+
+        // Hashing
+        hash:                 _hash,
+
+        // Filesystem / process
+        which:                _which,
+        spawn:                _spawn,
+        listen:               _listen,
+        gc:                   _gc,
+        generateHeapSnapshot: _generateHeapSnapshot,
+
+        // Data types
+        semver:               _semverShim,
+        JSONL:                _JSONL,
+        YAML:                 _YAML,
+        embeddedFiles:        _embeddedFiles,
+
+        // Runtimes
+        Terminal:             _Terminal,
+        Transpiler:           _Transpiler,
+
+        // Misc APIs the bundle may reference
+        env:                  process.env,
+        argv:                 process.argv,
+        main:                 process.argv[1] || '',
+        stdin:                process.stdin,
+        stdout:               process.stdout,
+        stderr:               process.stderr,
+        cwd:                  function() { return process.cwd(); },
+        exit:                 function(code) { process.exit(code); },
+        sleep:                function(ms) { return new Promise(function(r) { setTimeout(r, ms); }); },
+        file:                 function(p) {
+          var _fs = _req('fs');
+          return {
+            text:       function() { return Promise.resolve(_fs.readFileSync(p, 'utf8')); },
+            arrayBuffer:function() { return Promise.resolve(_fs.readFileSync(p).buffer); },
+            stream:     function() { return _fs.createReadStream(p); },
+            exists:     function() { return Promise.resolve(_fs.existsSync(p)); },
+          };
+        },
+        write:                function(dest, data) {
+          var _fs = _req('fs');
+          var buf = typeof data === 'string' ? Buffer.from(data, 'utf8') : Buffer.from(data);
+          _fs.writeFileSync(dest, buf);
+          return Promise.resolve(buf.length);
+        },
+        // Plugin API — no-op; used by some bundler-oriented code paths
+        plugin:               function() {},
+      };
+
+      console.log('  [fix_bun_shim] globalThis.Bun polyfill installed (Node.js runtime)');
+    })();
+  } catch (__ccpBunShimErr) {
+    // Non-fatal: if the shim itself fails, warn and continue. The bundle may
+    // still crash later, but this prevents a silent failure.
+    console.warn('  [fix_bun_shim] WARNING: Bun polyfill setup failed:', __ccpBunShimErr.message);
+  }
+}
+
+`;
+
+    if (hasShebang) {
+      // Shebang present: inject after the shebang line
+      const shebangEnd = code.indexOf(SHEBANG) + SHEBANG.length;
+      const afterShebang = code.indexOf('\n', shebangEnd) + 1;
+      return code.slice(0, afterShebang) + shim + code.slice(afterShebang);
+    }
+    // CJS IIFE: inject immediately before the IIFE so the shim runs first.
+    // Use function replacement to prevent $& and other $-patterns in the shim
+    // (e.g. the "Number($&0xffffffffn)" comment) from being expanded by replace().
+    return code.replace(CJS_IIFE, () => shim + CJS_IIFE);
+  },
+};

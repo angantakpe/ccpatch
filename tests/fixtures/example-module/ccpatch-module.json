@@ -1,0 +1,8 @@
+{
+  "name": "@ccpatch-test/example-module",
+  "version": "1.0.0",
+  "author": "ccpatch tests",
+  "description": "Fixture module used by tests/module.test.mjs.",
+  "signature": null,
+  "patches": ["hello", "risky"]
+}

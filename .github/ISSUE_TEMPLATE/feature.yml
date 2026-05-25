@@ -1,0 +1,31 @@
+name: Feature / patch proposal
+description: Propose a new patch or a change to the framework.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: What problem are you trying to solve? Why does this belong in ccpatch rather than a fork or a personal overlay?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What would the patch (or framework change) do? Which anchor would it target? Which `capabilities` would it declare?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: I've read CONTRIBUTING.md.
+          required: true
+        - label: I've checked THREAT_MODEL.md and listed the capabilities this would require.
+          required: true

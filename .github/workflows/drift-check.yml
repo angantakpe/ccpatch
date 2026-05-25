@@ -1,0 +1,164 @@
+name: drift-check
+
+on:
+  schedule:
+    # Nightly at 06:00 UTC
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: drift-check
+  cancel-in-progress: true
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install latest Claude Code CLI
+        run: |
+          npm i -g @anthropic-ai/claude-code@latest
+          CC_VERSION="$(npm ls -g @anthropic-ai/claude-code --depth=0 --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);process.stdout.write(j.dependencies["@anthropic-ai/claude-code"].version)})')"
+          echo "CC_VERSION=${CC_VERSION}" >> "$GITHUB_ENV"
+          echo "Installed claude-code version: ${CC_VERSION}"
+
+      - name: Locate installed claude-code bundle
+        run: |
+          CC_BIN="$(npm root -g)/@anthropic-ai/claude-code"
+          if [ -f "${CC_BIN}/cli.js" ]; then
+            echo "CC_BUNDLE=${CC_BIN}/cli.js" >> "$GITHUB_ENV"
+          elif [ -f "${CC_BIN}/cli.mjs" ]; then
+            echo "CC_BUNDLE=${CC_BIN}/cli.mjs" >> "$GITHUB_ENV"
+          else
+            echo "::warning::cli.js/cli.mjs not found under ${CC_BIN}; extracting from native binary"
+            make extract-from-binary VERSION="${CC_VERSION}"
+            echo "CC_BUNDLE=storage/archives/claude-code-v${CC_VERSION}/cli.v${CC_VERSION}.cjs" >> "$GITHUB_ENV"
+          fi
+
+      - name: Run patch verification tests
+        run: npm run test:patches
+
+      - name: Run doctor against installed claude-code
+        run: node bin/patch-cli.mjs doctor "$CC_BUNDLE" --version "$CC_VERSION"
+
+      - name: Strict apply (capability gate)
+        # Fails if any enabled patch declares high-risk capabilities the
+        # allowlist doesn't acknowledge. The allowlist below covers what
+        # ccpatch.yml ships enabled by default (network for fetch_interceptor /
+        # tool_result_error_content, env for fix_bun_shim). If a future change
+        # turns on a patch that needs `tools`, `exec`, or `telemetry` by
+        # default, this step will fail — that's the intended forcing function
+        # for an explicit review.
+        run: |
+          node bin/patch-cli.mjs "$CC_BUNDLE" /tmp/cli.strict.mjs \
+            --version "$CC_VERSION" \
+            --strict \
+            --allow-capabilities=network,env
+
+      - name: Upload anchor-drift log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: anchor-drift-${{ env.CC_VERSION }}
+          path: storage/outputs/anchor-drift.jsonl
+          if-no-files-found: ignore
+
+      - name: Report drift via GitHub issue
+        if: failure()
+        uses: actions/github-script@v7
+        env:
+          CC_VERSION: ${{ env.CC_VERSION }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          script: |
+            const fs = require('fs');
+            const version = process.env.CC_VERSION || 'unknown';
+            const runUrl = process.env.RUN_URL;
+            const titlePrefix = 'Drift detected against claude-code';
+            const title = `${titlePrefix} ${version}`;
+
+            // Pull the most recent drift entries from anchor-drift.jsonl so the
+            // issue body names the specific patches + closest candidates.
+            let driftBlock = '';
+            try {
+              const raw = fs.readFileSync('storage/outputs/anchor-drift.jsonl', 'utf8');
+              const lines = raw.trim().split('\n').filter(Boolean).map(l => {
+                try { return JSON.parse(l); } catch { return null; }
+              }).filter(Boolean);
+              const recent = lines.filter(e => e.source === 'doctor' && e.version === version);
+              const byPatch = new Map();
+              for (const e of recent) byPatch.set(e.patch, e);
+              if (byPatch.size > 0) {
+                const out = ['', '### Drifted patches', ''];
+                for (const e of byPatch.values()) {
+                  out.push(`**\`${e.patch}\`** — ${e.status}${e.detail ? `: ${e.detail}` : ''}`);
+                  if (e.verify_failed?.length) {
+                    for (const f of e.verify_failed.slice(0, 3)) out.push(`- ${f}`);
+                  }
+                  if (e.candidates?.length) {
+                    const c = e.candidates[0];
+                    out.push(`- Top candidate (score ${c.score.toFixed(2)}, from ${c.source}) @ offset ${c.offset}:`);
+                    out.push('  ```');
+                    out.push('  ' + (c.snippet || '').replace(/`/g, "'"));
+                    out.push('  ```');
+                  }
+                  out.push('');
+                }
+                driftBlock = out.join('\n');
+              }
+            } catch { /* no jsonl — fall through */ }
+
+            const body = [
+              `Drift check failed on commit \`${context.sha}\`.`,
+              ``,
+              `- claude-code version: \`${version}\``,
+              `- Failing run: ${runUrl}`,
+              driftBlock,
+              ``,
+              `Full \`anchor-drift.jsonl\` is attached to the workflow run as an artifact.`,
+              `This was generated automatically by \`.github/workflows/drift-check.yml\`.`,
+            ].join('\n');
+
+            const { owner, repo } = context.repo;
+            const existing = await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: 'open',
+              per_page: 100,
+            });
+            const match = existing.find(i => !i.pull_request && i.title.startsWith(titlePrefix));
+
+            if (match) {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: match.number,
+                body,
+              });
+              core.info(`Commented on existing issue #${match.number}`);
+            } else {
+              const created = await github.rest.issues.create({
+                owner,
+                repo,
+                title,
+                body,
+              });
+              core.info(`Opened new issue #${created.data.number}`);
+            }

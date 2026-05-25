@@ -1,0 +1,63 @@
+name: Bug report
+description: A patch misbehaves at runtime, the patcher crashes, or the patched CLI breaks.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. For anchor drift after an upstream release,
+        please use the **Anchor drift** template instead.
+        For security issues, see [SECURITY.md](../SECURITY.md) — do not file here.
+  - type: input
+    id: cc-version
+    attributes:
+      label: Claude Code version
+      placeholder: "2.1.150 (output of `claude --version`)"
+    validations:
+      required: true
+  - type: input
+    id: ccpatch-commit
+    attributes:
+      label: ccpatch commit
+      placeholder: "git rev-parse --short HEAD"
+    validations:
+      required: true
+  - type: input
+    id: bundle-sha
+    attributes:
+      label: Input bundle sha256
+      description: "Run `shasum -a 256 <cli.js>` on the bundle you patched."
+      placeholder: "46848f48de3ab84379..."
+  - type: textarea
+    id: enabled-patches
+    attributes:
+      label: Enabled patches
+      description: Paste the relevant section of your `ccpatch.yml` or the `PATCH=` list you passed.
+      render: yaml
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. make clean
+        2. make patch-claude-code
+        3. make start CLI_ARGS='...'
+        4. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: |
+        Include the doctor output, the patcher output, and any contents of
+        `storage/outputs/anchor-drift.jsonl`. Redact API keys.
+      render: shell

@@ -1,0 +1,220 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# ccpatch.yml — Patch feature flags
+#
+# Patch directories:
+#   core/          Core patches — bug fixes + minimal infrastructure
+#   extensions/    Features, observability, expose-internals
+#
+# Shorthand:    name: true     — enabled
+#               name: false    — disabled (opt-in)
+# Long form:    name:
+#                 enabled: true
+#                 env: [CC_FOO]
+#
+# make override (bypasses this file entirely):
+#   make patch-claude-code PATCH=fetch_interceptor,fix_bun_shim,...
+#
+# Strict mode (CI/release):
+#   pass --strict to patch-cli.mjs or set CCPATCH_STRICT=1 — fails the build
+#   on no-change, verify-fail, apply errors, or manifest violations.
+# ──────────────────────────────────────────────────────────────────────────────
+version: 1
+
+patches:
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # CORE  (core/)
+  # Non-opinionated. Required for any patched build to work correctly.
+  # ════════════════════════════════════════════════════════════════════════════
+
+  # ── Infrastructure ──────────────────────────────────────────────────────────
+  react_singleton: true           # required (phase:pre) — unify bundled React with host React
+  esm_compat: true                # required (phase:post) — wrap CJS-IIFE for ESM, pre-load react+ink
+  contracts: true                 # typed __ccp* registry — __ccpProvide / __ccpRequire with runtime version + shape checks
+  coverage_kernel: false          # runtime hit counter for instrumented patches (off by default — diagnostics only)
+  overlay_loader: true            # required (phase:pre) — single anchor that loads ./ccpatch-overlay.mjs
+  fetch_interceptor: true         # fan-out fetch tee — required by tool_result_error_content and extensions
+
+  # ── Bug Fixes ───────────────────────────────────────────────────────────────
+  fix_bun_shim: true              # required — Bun polyfill so bundle runs in Node.js
+  fix_stdin_da1_leak: true        # strip DA1/DA2 escape sequences from stdin
+  fix_message_normalizer: true    # guard display-item type crashes
+  fix_project_root: true          # projectRoot fallback so .cc/commands/ loads
+  tool_result_error_content: true # Anthropic API requires non-empty content on is_error blocks
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # EXTENSIONS  (extensions/)
+  # ════════════════════════════════════════════════════════════════════════════
+
+  # ── Fixes (opinionated) ─────────────────────────────────────────────────────
+  dotenv_loader: false       # load .env before any patch runs
+  hook_noise_mute: false     # suppress known-noisy hook stderr chatter
+  fix_cache_ttl: false       # always 1h prompt-cache TTL (disables telemetry downgrade)
+  fix_grep_shadow: false     # disable grep/find shadow injection (ugrep compat)
+  rate_limit: false          # skip retries on subscription limits, cap Retry-After at 30s
+  large_content_guard: false # truncate oversized system-message content before terminal crash
+  recap_strip_hint: false    # remove "(disable recaps in /config)" hint from recaps
+
+  # ── Command System ───────────────────────────────────────────────────────────
+  custom_commands: false     # slash-command registry (/costs, /stats, /export, /clear-cache)
+  slash_dispatch: false      # route /commands typed into the prompt bar
+  subagent_hooks_stub: false # no-op subagent event bus (contract publisher for expose_agent_tool)
+
+  # ── Feature Unlocks ─────────────────────────────────────────────────────────
+  durable_cron: false        # force isDurableCronEnabled() → true
+  loop_dynamic: false        # unlock self-pacing loop + richer loop prompts
+  plan_mode_interview: false # unlock plan-mode interview phase
+  unhide_features: false     # expose client-side gated features (bedrock, web-setup, etc.)
+  extended_thinking: false   # inject thinking/effort via CC_THINKING + CC_EFFORT_LEVEL
+  force_thinking: false      # force thinking in interactive sessions when CC_THINKING is set
+  mcp_lazy: false            # serve cached tools/list immediately, refresh in background
+
+  # ── Observability ───────────────────────────────────────────────────────────
+  cost_tracker: false         # token usage + estimated cost in status bar
+  context_budget_warn: false  # inject context-full warning at 85% of 200k limit
+  tool_result_trim: false     # truncate oversized tool_result blocks before API send
+  tools_log: false            # log all tool calls and results via SSE subscriber
+  boost_project_commands: false # boost loadedFrom:commands_DEPRECATED to top of autocomplete
+
+  # ── Expose Internals ────────────────────────────────────────────────────────
+  expose_tool_dispatch: false     # MCP tool registry + health probe + invoker
+  expose_api_client: false        # Anthropic SDK client via __ccpApiClient
+  expose_submit_input: false      # React submit callback via __ccpSubmitInput
+  expose_agent_tool: false        # native AgentTool via __ccpAgentTool
+  prime_agent_tool_on_boot: false # prime AgentTool at React mount (no user input needed)
+  capture_interactive_request: false # capture first /v1/messages shape for reuse
+
+  # ── Optional (opt-in via env or flag) ───────────────────────────────────────
+  model:                          # change default model
+    enabled: false
+    env: [CC_MODEL]
+
+  block_tools:                    # block specific tools from use
+    enabled: false
+    env: [CC_BLOCKED_TOOLS]
+
+  debug:                          # verbose API + tool debug logging
+    enabled: false
+    env: [CLAUDE_DEBUG]
+
+  save_conversations:             # auto-save all conversations to JSON
+    enabled: false
+    env: [CC_SAVE_CONVERSATIONS]
+
+  session_timer:                  # track session time and warn on long sessions
+    enabled: false
+
+  webhook:                        # send webhook on key events
+    enabled: false
+    env: [CC_WEBHOOK_URL]
+
+  cache_responses:                # cache API responses (dev/testing only)
+    enabled: false
+    env: [CC_CACHE_RESPONSES]
+
+  input_bar_color: false          # color the prompt input bar border green
+  _overlay_example: false         # example: publish a value via the sibling overlay file (no bundle anchor)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Profiles — curated subsets selected via `--profile <name>` (or `-p`).
+# When --profile is absent, behaviour is unchanged: every patch enabled above
+# is applied. When set, only patches listed here are applied (other ccpatch.yml
+# flags are ignored for that run).
+#
+# Naming must match patch names exactly (filename stems in core/ + extensions/).
+# Order in this list does NOT affect patch ordering; runner phases/topoSort
+# still own ordering.
+# ──────────────────────────────────────────────────────────────────────────────
+profiles:
+  minimal:
+    # Bug fixes + the minimum infra those fixes need to run.
+    - react_singleton
+    - esm_compat
+    - contracts
+    - overlay_loader
+    - fetch_interceptor
+    - fix_bun_shim
+    - fix_stdin_da1_leak
+    - fix_message_normalizer
+    - fix_project_root
+    - tool_result_error_content
+    - subagent_hooks_stub
+
+  standard:
+    # minimal + quality-of-life features.
+    - react_singleton
+    - esm_compat
+    - contracts
+    - overlay_loader
+    - fetch_interceptor
+    - fix_bun_shim
+    - fix_stdin_da1_leak
+    - fix_message_normalizer
+    - fix_project_root
+    - tool_result_error_content
+    - subagent_hooks_stub
+    - input_bar_color
+    - model
+    - custom_commands
+    - slash_dispatch
+    - context_budget_warn
+    - recap_strip_hint
+    - unhide_features
+    - extended_thinking
+    - force_thinking
+    - plan_mode_interview
+    - tool_result_trim
+    - large_content_guard
+    - hook_noise_mute
+    - mcp_lazy
+    - dotenv_loader
+    - block_tools
+
+  power:
+    # Every patch currently listed under `patches:` above.
+    - react_singleton
+    - esm_compat
+    - contracts
+    - overlay_loader
+    - fetch_interceptor
+    - fix_bun_shim
+    - fix_stdin_da1_leak
+    - fix_message_normalizer
+    - fix_project_root
+    - tool_result_error_content
+    - dotenv_loader
+    - hook_noise_mute
+    - fix_cache_ttl
+    - fix_grep_shadow
+    - rate_limit
+    - large_content_guard
+    - recap_strip_hint
+    - custom_commands
+    - slash_dispatch
+    - subagent_hooks_stub
+    - durable_cron
+    - loop_dynamic
+    - plan_mode_interview
+    - unhide_features
+    - extended_thinking
+    - force_thinking
+    - mcp_lazy
+    - cost_tracker
+    - context_budget_warn
+    - tool_result_trim
+    - tools_log
+    - boost_project_commands
+    - expose_tool_dispatch
+    - expose_api_client
+    - expose_submit_input
+    - expose_agent_tool
+    - prime_agent_tool_on_boot
+    - capture_interactive_request
+    - model
+    - block_tools
+    - debug
+    - save_conversations
+    - session_timer
+    - webhook
+    - cache_responses
+    - input_bar_color

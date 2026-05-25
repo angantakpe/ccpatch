@@ -1,0 +1,165 @@
+name: version-matrix
+
+# Runs the patch suite + doctor across the last 3 published upstream
+# Claude Code versions on every PR. Catches regressions before they ship.
+#
+# - `missing` on any matrix cell → PR fails.
+# - `drift` on any matrix cell → PR comments but does not fail (drift is a
+#   signal to re-anchor, not a blocker).
+#
+# Nightly `drift-check.yml` remains the leading indicator against `@latest`;
+# this workflow is the lagging guard that PRs don't regress supported versions.
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: version-matrix-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  resolve-versions:
+    runs-on: ubuntu-latest
+    outputs:
+      versions: ${{ steps.list.outputs.versions }}
+    steps:
+      - id: list
+        name: List last 3 upstream versions
+        run: |
+          # `npm view <pkg> versions --json` returns the full version array;
+          # take the last 3 stable (non-prerelease) entries.
+          ALL_JSON=$(npm view @anthropic-ai/claude-code versions --json)
+          LAST3=$(node -e "
+            const all = JSON.parse(process.argv[1]);
+            const stable = all.filter(v => !/[-+]/.test(v));
+            const last3 = stable.slice(-3);
+            process.stdout.write(JSON.stringify(last3));
+          " "$ALL_JSON")
+          echo "Resolved: $LAST3"
+          echo "versions=$LAST3" >> "$GITHUB_OUTPUT"
+
+  matrix:
+    needs: resolve-versions
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.resolve-versions.outputs.versions) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Cache upstream bundle for v${{ matrix.version }}
+        id: cache-bundle
+        uses: actions/cache@v4
+        with:
+          path: storage/archives/claude-code-v${{ matrix.version }}
+          key: cc-bundle-${{ matrix.version }}
+
+      - name: Download upstream bundle (cache miss)
+        if: steps.cache-bundle.outputs.cache-hit != 'true'
+        run: make download VERSION=${{ matrix.version }}
+
+      - name: Locate bundle path
+        id: locate
+        run: |
+          DIR="storage/archives/claude-code-v${{ matrix.version }}"
+          if [ -f "$DIR/cli.js" ]; then
+            echo "BUNDLE=$DIR/cli.js" >> "$GITHUB_ENV"
+          elif [ -f "$DIR/cli.v${{ matrix.version }}.cjs" ]; then
+            echo "BUNDLE=$DIR/cli.v${{ matrix.version }}.cjs" >> "$GITHUB_ENV"
+          else
+            echo "::warning::no JS bundle for v${{ matrix.version }}, attempting native-binary extract"
+            make extract-from-binary VERSION=${{ matrix.version }}
+            echo "BUNDLE=$DIR/cli.v${{ matrix.version }}.cjs" >> "$GITHUB_ENV"
+          fi
+
+      - name: Run patch verification tests
+        run: npm run test:patches
+
+      - name: Run doctor against v${{ matrix.version }}
+        id: doctor
+        run: |
+          set +e
+          node bin/patch-cli.mjs doctor "$BUNDLE" --version "${{ matrix.version }}" > /tmp/doctor.out 2>&1
+          STATUS=$?
+          cat /tmp/doctor.out
+          echo "STATUS=$STATUS" >> "$GITHUB_OUTPUT"
+          DRIFT_COUNT=$(grep -c "^  DRIFT" /tmp/doctor.out || true)
+          MISSING_COUNT=$(grep -c "^  MISSING" /tmp/doctor.out || true)
+          echo "DRIFT_COUNT=$DRIFT_COUNT" >> "$GITHUB_OUTPUT"
+          echo "MISSING_COUNT=$MISSING_COUNT" >> "$GITHUB_OUTPUT"
+          # Doctor exits 1 only on missing; drift is non-fatal.
+          exit $STATUS
+
+      - name: Upload anchor-drift log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: anchor-drift-v${{ matrix.version }}
+          path: storage/outputs/anchor-drift.jsonl
+          if-no-files-found: ignore
+
+      - name: Comment drift on PR
+        if: always() && github.event_name == 'pull_request' && (steps.doctor.outputs.DRIFT_COUNT != '0' || steps.doctor.outputs.MISSING_COUNT != '0')
+        uses: actions/github-script@v7
+        env:
+          MATRIX_VERSION: ${{ matrix.version }}
+          DRIFT_COUNT: ${{ steps.doctor.outputs.DRIFT_COUNT }}
+          MISSING_COUNT: ${{ steps.doctor.outputs.MISSING_COUNT }}
+        with:
+          script: |
+            const fs = require('fs');
+            const version = process.env.MATRIX_VERSION;
+            const drift = process.env.DRIFT_COUNT || '0';
+            const missing = process.env.MISSING_COUNT || '0';
+            let driftBlock = '';
+            try {
+              const raw = fs.readFileSync('storage/outputs/anchor-drift.jsonl', 'utf8');
+              const lines = raw.trim().split('\n').filter(Boolean).map(l => {
+                try { return JSON.parse(l); } catch { return null; }
+              }).filter(Boolean);
+              const recent = lines.filter(e => e.source === 'doctor' && e.version === version);
+              const byPatch = new Map();
+              for (const e of recent) byPatch.set(e.patch, e);
+              if (byPatch.size > 0) {
+                const out = [];
+                for (const e of byPatch.values()) {
+                  out.push(`- **\`${e.patch}\`** — ${e.status}${e.detail ? `: ${e.detail}` : ''}`);
+                  if (e.candidates?.length) {
+                    const c = e.candidates[0];
+                    out.push(`  - top candidate (score ${c.score.toFixed(2)}, from ${c.source}) @ offset ${c.offset}`);
+                  }
+                }
+                driftBlock = out.join('\n');
+              }
+            } catch { /* no jsonl */ }
+            const body = [
+              `### version-matrix: v${version}`,
+              ``,
+              `- missing: \`${missing}\` (blocks merge)`,
+              `- drift: \`${drift}\` (non-blocking — re-anchor at your convenience)`,
+              ``,
+              driftBlock || '_No detailed drift entries — see workflow logs._',
+            ].join('\n');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });

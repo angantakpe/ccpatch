@@ -1,0 +1,29 @@
+{
+  "version": "2.1.142",
+  "source_sha256": "76b7ee7aa5a2a5210f4dd6b3abcfb0a6f2593d2ffe985d57ddb834e5c38a69b5",
+  "anchors": {
+    "anchor1_structural": {
+      "description": "Five semantic arg names co-located in Promise.all+map+formatter: getToolPermissionContext, agents, allowedAgentTypes, model, deferLoading",
+      "pattern": "await Promise.all(\\w+.map((\\w+)=>\\w+(\\w+,{getToolPermissionContext:\\w+.getToolPermissionContext,tools:\\w+,agents:\\w+.agents,allowedAgentTypes:\\w+.allowedAgentTypes,model:\\w+.model,deferLoading:\\w+(\\w+)}))));if(",
+      "offset": 12317404,
+      "cardinality": 1,
+      "stability": "high — five semantic arg names are stable across minification"
+    },
+    "anchor2_tengu_proximity": {
+      "description": "tengu-off-switch string literal is unique and 1276 chars before the injection site",
+      "landmark": "tengu-off-switch",
+      "landmark_offset": 12316128,
+      "delta_to_injection": 1276,
+      "cardinality": 1,
+      "stability": "high — feature flag string is stable; delta may drift ±200 chars across releases"
+    },
+    "anchor3_arg_pair": {
+      "description": "allowedAgentTypes + deferLoading co-location in same Promise.all map — permissive fallback",
+      "pattern": "await Promise.all(\\w+.map((\\w+)=>\\w+(\\w+,{[^}]*allowedAgentTypes:\\w+.allowedAgentTypes[^}]*deferLoading:\\w+(\\w+)}))));if(",
+      "cardinality": 1,
+      "stability": "medium — relies on arg ordering; if bundle reorders, may need update"
+    }
+  },
+  "injection_point": "immediately after the Promise.all tool-format call closes, before ;if(j){ continuation",
+  "notes": "If SHA changes on next version bump, run: node tools/anchor-doctor.mjs <path-to-bundle.cjs>"
+}

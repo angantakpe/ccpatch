@@ -1,0 +1,541 @@
+/**
+ * Patch manifest validator.
+ * Usage: validateManifest(mod, filename) → { ok, errors, normalized }
+ *
+ * Required fields:
+ *   description  string    One-line description shown in build output.
+ *   apply        function  (code: string, opts?) => string  (unless applyMode='runtime')
+ *
+ * Recommended fields:
+ *   category     string    One of: infrastructure | fix | feature | observe | expose | optional
+ *   enabled      boolean   Default enabled state hint (YAML ccpatch.yml is authoritative).
+ *
+ * Required:
+ *   verify       object    { present?: string|string[],
+ *                            absent?:  string|string[],
+ *                            count?:   number | { present?: number, absent?: number } }
+ *                          Post-apply assertion. At least one of present/absent/count required.
+ *                          - present: substrings that MUST exist post-apply.
+ *                          - absent:  substrings that MUST NOT exist post-apply (catches
+ *                                     no-op apply + double-apply).
+ *                          - count:   exact occurrence totals. Shorthand number => present count.
+ *                                     Object => fine-grained { present, absent } counts.
+ *
+ * Optional fields:
+ *   name         string    Must match the filename stem if provided.
+ *   version      string    Semver e.g. "1.0.0" (default "0.0.0").
+ *   applyMode    string    'build' | 'either'  (default 'build').
+ *   anchor       object    { literal: string, byteOffset?: number }
+ *   dependsOn    string[]  Other patch names this must run after.
+ *   phase        string    'pre' | 'main' | 'post' (default 'main'). Phases run in order:
+ *                          pre → main → post. Within a phase, topoSort by dependsOn applies.
+ *                          A patch's dependsOn must point to same-or-earlier phase, else error.
+ *   env          string[]  Env vars this patch reads (documentation only).
+ *   capabilities string[]  Declared runtime powers. Allowed values:
+ *                            network | fs | prompt | tools | env | exec | telemetry
+ *                          Empty/missing = purely cosmetic. See THREAT_MODEL.md.
+ *   tags         string[]  Searchable tags for filtering.
+ *   preload      boolean   When true, this patch can run as a --require preload (no bundle mod).
+ *   preloadCode  string    Raw JS string injected by the preload builder (required if preload=true).
+ *   required     boolean   When true, no-change / verify-fail / apply-error makes the build fail
+ *                          (same effect as global --strict, but scoped to this patch). Set on
+ *                          patches whose absence would produce a broken or misleading bundle.
+ *   fallbackDiff object    Stored unified diff applied when apply() returns no
+ *                          change (anchor likely drifted). Shape:
+ *                            { patch: string, capturedAgainst: string, fuzz?: number }
+ *                          - patch:           unified-diff text (patch-package style)
+ *                          - capturedAgainst: CC version captured against (informational)
+ *                          - fuzz:            applyPatch fuzzFactor (default 3)
+ *                          Skipped when patchOptions.disableFallback is true (--no-fallback).
+ *   onBeforeApply function  Lifecycle hook (sync or async) called before
+ *                            resolveAt/compileKind/apply. Receives a per-patch
+ *                            ctx { name, phase, code, appliedCode, opts,
+ *                            verify, attempt, logger }. May mutate ctx.opts or
+ *                            ctx.code. Errors throw → patch fails. See
+ *                            CONTRIBUTING.md "Patch lifecycle hooks".
+ *   onAfterApply  function  Lifecycle hook called after apply() (and any
+ *                            fallback-diff). May mutate ctx.appliedCode for
+ *                            last-mile fixups. Errors throw → patch fails.
+ *   onVerifyFail  function  Lifecycle hook called when verify finds issues.
+ *                            Return a string to retry verify against that code
+ *                            (max 1 retry); anything else gives up.
+ *   coverageMarker string  Opt-in runtime coverage. When set, the runner auto-injects a
+ *                          `__ccpCovHit('<marker>')` call into the patched code at apply time
+ *                          (best-effort). Cross-referenced by `ccpatch coverage` to detect
+ *                          patches that applied but never executed (DEAD). See CONTRIBUTING.md
+ *                          "Coverage — apply-time + runtime instrumentation".
+ *   revisit      object    Marker for forensic patches that target a specific upstream regression
+ *                          and should be re-evaluated as upstream evolves. Shape:
+ *                            { note: string, addedIn?: string, until?: string }
+ *                          - note:    required, one-line reason this patch exists
+ *                          - addedIn: CC version this patch was first needed for (e.g. "2.1.131")
+ *                          - until:   CC version at/after which to re-check whether upstream fixed
+ *                                     the issue. When the build runs against a CC version >= until,
+ *                                     the runner emits a [revisit] warning.
+ */
+
+import { parseVariantStem } from './version-resolver.mjs';
+import { AT_KINDS } from './at-selector.mjs';
+import { KINDS } from './patch-kinds.mjs';
+
+const APPLY_MODES = new Set(['build', 'either']);
+const AT_KIND_SET = new Set(AT_KINDS);
+const CATEGORIES  = new Set(['infrastructure', 'fix', 'feature', 'observe', 'expose', 'optional']);
+const PHASES      = new Set(['pre', 'main', 'post']);
+const KIND_SET    = new Set(KINDS);
+
+/**
+ * Capability vocabulary — see THREAT_MODEL.md.
+ * Each value documents a power the runtime patch can exercise inside the
+ * patched bundle. Listed honestly by the patch author so users can audit
+ * what an enabled patch is allowed to do.
+ */
+export const CAPABILITIES = Object.freeze([
+  'network',    // patch intercepts fetch / makes outbound requests
+  'fs',         // patch reads/writes files outside the bundle
+  'prompt',     // patch modifies system or user prompt content
+  'tools',      // patch alters tool dispatch or tool definitions
+  'env',        // patch reads env vars (beyond documented `env` field)
+  'exec',       // patch can execute subprocesses
+  'telemetry',  // patch sends data to external sinks (webhook, logging service)
+]);
+const CAPABILITY_SET = new Set(CAPABILITIES);
+
+const MEDIUM_RISK = new Set(['prompt', 'fs', 'env']);
+const HIGH_RISK   = new Set(['network', 'tools', 'exec', 'telemetry']);
+
+/**
+ * Classify a capability array as low / medium / high risk.
+ *   - 0 caps                                 → low
+ *   - any of {network,tools,exec,telemetry}  → high
+ *   - otherwise (any of {prompt,fs,env})     → medium
+ */
+export function classifyRisk(caps) {
+  const list = Array.isArray(caps) ? caps : [];
+  if (list.length === 0) return 'low';
+  for (const c of list) if (HIGH_RISK.has(c)) return 'high';
+  for (const c of list) if (MEDIUM_RISK.has(c)) return 'medium';
+  return 'low';
+}
+
+/**
+ * @param {object} mod - the default export of a patch module
+ * @param {string} filename - basename of the patch file, e.g. "hook_noise_mute.mjs"
+ * @param {object} [ctx] - resolution context. ctx.variant is 'default' or a
+ *                         variant stem like "2.1.148" / ">=2.1.150". When
+ *                         variant !== 'default', testedAgainst must be present
+ *                         and consistent with the stem.
+ * @returns {{ ok: boolean, errors: string[], normalized: object }}
+ */
+export function validateManifest(mod, filename, ctx = {}) {
+  const errors = [];
+  const stem = filename.replace(/\.mjs$/, '');
+  const variant = ctx.variant ?? 'default';
+
+  // Required: description
+  if (!mod.description || typeof mod.description !== 'string') {
+    errors.push('missing required field: description (string)');
+  }
+
+  // verify is required. At least one of present/absent/count must be specified.
+  if (!mod.verify || typeof mod.verify !== 'object') {
+    errors.push(`patch ${stem}: missing required 'verify' export — see CONTRIBUTING.md`);
+  } else {
+    const v = mod.verify;
+    const hasPresent = v.present !== undefined && v.present !== null
+      && (Array.isArray(v.present) ? v.present.length > 0 : true);
+    const hasAbsent = v.absent !== undefined && v.absent !== null
+      && (Array.isArray(v.absent) ? v.absent.length > 0 : true);
+    const hasCount = v.count !== undefined && v.count !== null;
+    if (!hasPresent && !hasAbsent && !hasCount) {
+      errors.push(`patch ${stem}: 'verify' must specify at least one of present/absent/count — see CONTRIBUTING.md`);
+    }
+    if (hasCount) {
+      const c = v.count;
+      if (typeof c === 'number') {
+        if (!Number.isFinite(c) || c < 0) errors.push(`verify.count (number) must be a non-negative integer`);
+      } else if (typeof c === 'object') {
+        if (c.present !== undefined && (!Number.isFinite(c.present) || c.present < 0)) {
+          errors.push(`verify.count.present must be a non-negative integer`);
+        }
+        if (c.absent !== undefined && (!Number.isFinite(c.absent) || c.absent < 0)) {
+          errors.push(`verify.count.absent must be a non-negative integer`);
+        }
+      } else {
+        errors.push(`verify.count must be a number or { present?, absent? }`);
+      }
+    }
+  }
+  if (mod.verifyExempt !== undefined) {
+    errors.push(`patch ${stem}: 'verifyExempt' is no longer supported — provide a real verify block (see CONTRIBUTING.md)`);
+  }
+
+  // overlay (Magisk-style sibling-file shim, see runner/overlay-builder.mjs).
+  // Optional. When present, both fields are required and non-empty strings.
+  if (mod.overlay !== undefined) {
+    if (!mod.overlay || typeof mod.overlay !== 'object' || Array.isArray(mod.overlay)) {
+      errors.push('overlay must be an object: { register: string, code: string }');
+    } else {
+      if (typeof mod.overlay.register !== 'string' || mod.overlay.register.length === 0) {
+        errors.push('overlay.register is required and must be a non-empty string');
+      }
+      if (typeof mod.overlay.code !== 'string' || mod.overlay.code.length === 0) {
+        errors.push('overlay.code is required and must be a non-empty string');
+      }
+    }
+  }
+
+  // preload consistency
+  if (mod.preload === true && !mod.preloadCode) {
+    errors.push('preload:true requires a preloadCode string');
+  }
+  if (mod.preloadCode && mod.preload !== true) {
+    errors.push('preloadCode is set but preload:true is missing');
+  }
+
+  // Optional category
+  if (mod.category !== undefined) {
+    if (!CATEGORIES.has(mod.category)) {
+      errors.push(`category must be one of: ${[...CATEGORIES].join(', ')} (got "${mod.category}")`);
+    }
+  }
+
+  // Optional enabled hint (ccpatch.yml is authoritative; this is documentation)
+  if (mod.enabled !== undefined && typeof mod.enabled !== 'boolean') {
+    errors.push('enabled must be a boolean');
+  }
+
+  // Optional required flag — promotes failures to fatal even outside --strict.
+  if (mod.required !== undefined && typeof mod.required !== 'boolean') {
+    errors.push('required must be a boolean');
+  }
+
+  // Optional name — if present, must match stem
+  if (mod.name !== undefined) {
+    if (typeof mod.name !== 'string') {
+      errors.push('name must be a string');
+    } else if (mod.name !== stem) {
+      errors.push(`name mismatch: manifest says "${mod.name}", filename stem is "${stem}"`);
+    }
+  }
+
+  // Optional applyMode — must be enum if present
+  const applyMode = mod.applyMode ?? 'build';
+  if (!APPLY_MODES.has(applyMode)) {
+    errors.push(`applyMode must be one of: ${[...APPLY_MODES].join(', ')} (got "${applyMode}")`);
+  }
+
+  // kind — declarative patch shape (default 'free' = the apply() escape hatch).
+  const kind = mod.kind ?? 'free';
+  if (!KIND_SET.has(kind)) {
+    errors.push(`kind must be one of: ${[...KIND_SET].join(', ')} (got "${kind}")`);
+  }
+
+  if (kind === 'free') {
+    // apply() required for free kind.
+    if (typeof mod.apply !== 'function') {
+      errors.push(`apply must be a function when applyMode is "${applyMode}"`);
+    }
+  } else {
+    // Non-free kinds synthesize apply() from declarative fields. A user-supplied
+    // apply() is rejected to avoid two sources of truth.
+    if (mod.apply !== undefined) {
+      errors.push(`kind="${kind}" patches must not export apply() — the runner synthesizes apply from kind/target/code`);
+    }
+    if (!mod.target || typeof mod.target !== 'object' || !mod.target.function) {
+      errors.push(`kind="${kind}" requires target.function (either { literal: 'STR' } or a function name)`);
+    }
+    if (kind === 'prefix' || kind === 'postfix') {
+      if (typeof mod.code !== 'string') {
+        errors.push(`kind="${kind}" requires code: string (verbatim JS to inject)`);
+      }
+    }
+    if (kind === 'transpiler') {
+      if (typeof mod.transform !== 'function') {
+        errors.push(`kind="transpiler" requires transform: (functionBody, opts) => string`);
+      }
+    }
+  }
+
+  // anchor — if present, must have literal string
+  if (mod.anchor !== undefined) {
+    if (!mod.anchor || typeof mod.anchor.literal !== 'string') {
+      errors.push('anchor must be { literal: string, byteOffset?: number }');
+    }
+  }
+
+  // @At selector — declarative anchor. See runner/at-selector.mjs.
+  let at = null;
+  if (mod.at !== undefined) {
+    if (!mod.at || typeof mod.at !== 'object' || Array.isArray(mod.at)) {
+      errors.push('at must be an object: { kind, target }');
+    } else if (!AT_KIND_SET.has(mod.at.kind)) {
+      errors.push(`at.kind must be one of: ${[...AT_KIND_SET].join(', ')} (got "${mod.at.kind}")`);
+    } else if (!mod.at.target || typeof mod.at.target !== 'object') {
+      errors.push('at.target is required and must be an object');
+    } else {
+      const k = mod.at.kind;
+      const t = mod.at.target;
+      const isFnSpec = (v) => typeof v === 'string'
+        || (v && typeof v === 'object' && typeof v.literal === 'string');
+      if (k === 'HEAD' || k === 'RETURN') {
+        if (!isFnSpec(t.function)) {
+          errors.push(`at.target.function is required for ${k}: 'NAME' or { literal: 'STR' }`);
+        }
+      } else if (k === 'INVOKE') {
+        if (!isFnSpec(t.call)) {
+          errors.push(`at.target.call is required for INVOKE: 'NAME' or { literal: 'STR' }`);
+        }
+        if (t.occurrence !== undefined && (!Number.isInteger(t.occurrence) || t.occurrence < 1)) {
+          errors.push(`at.target.occurrence must be a positive integer`);
+        }
+        if (t.in !== undefined && !isFnSpec(t.in)) {
+          errors.push(`at.target.in (when set) must be 'NAME' or { literal: 'STR' }`);
+        }
+      } else if (k === 'BEFORE' || k === 'AFTER') {
+        if (typeof t.literal !== 'string' || t.literal.length === 0) {
+          errors.push(`at.target.literal is required for ${k} and must be a non-empty string`);
+        }
+        if (t.occurrence !== undefined && (!Number.isInteger(t.occurrence) || t.occurrence < 1)) {
+          errors.push(`at.target.occurrence must be a positive integer`);
+        }
+      }
+      at = mod.at;
+    }
+    // Contract: an `at` selector requires apply() to consume the sites.
+    if (at && typeof mod.apply !== 'function') {
+      errors.push('at: selector is set but apply() is missing — apply must consume atSites');
+    }
+  }
+
+  // dependsOn — default []
+  const dependsOn = mod.dependsOn ?? [];
+  if (!Array.isArray(dependsOn)) {
+    errors.push('dependsOn must be an array');
+  }
+
+  // phase — default 'main'
+  const phase = mod.phase ?? 'main';
+  if (!PHASES.has(phase)) {
+    errors.push(`phase must be one of: ${[...PHASES].join(', ')} (got "${phase}")`);
+  }
+
+  // Optional priority — lower runs first within a phase, breaks topo ties.
+  // dependsOn is still authoritative; priority only orders peers that have no
+  // dependency relationship. Default 1000.
+  let priority = 1000;
+  if (mod.priority !== undefined) {
+    if (typeof mod.priority !== 'number' || !Number.isFinite(mod.priority) || !Number.isInteger(mod.priority)) {
+      errors.push('priority must be a finite integer (lower runs first within a phase; default 1000)');
+    } else {
+      priority = mod.priority;
+    }
+  }
+
+  // Optional allowOverlapWith — acknowledged overlapping peers.
+  // See "Priority and overlap detection" in CONTRIBUTING.md.
+  let allowOverlapWith = [];
+  if (mod.allowOverlapWith !== undefined) {
+    if (!Array.isArray(mod.allowOverlapWith)
+        || mod.allowOverlapWith.some(x => typeof x !== 'string' || !x.trim())) {
+      errors.push('allowOverlapWith must be an array of non-empty strings (patch names)');
+    } else {
+      allowOverlapWith = [...new Set(mod.allowOverlapWith.map(s => s.trim()))];
+    }
+  }
+
+  // Optional capabilities — patch's declared powers (see THREAT_MODEL.md).
+  let capabilities = [];
+  if (mod.capabilities !== undefined) {
+    if (!Array.isArray(mod.capabilities)) {
+      errors.push('capabilities must be an array of strings');
+    } else {
+      const bad = mod.capabilities.filter(c => !CAPABILITY_SET.has(c));
+      if (bad.length > 0) {
+        errors.push(
+          `capabilities contains unknown value(s): ${bad.join(', ')}. ` +
+          `Allowed: ${CAPABILITIES.join(', ')}`
+        );
+      }
+      // Dedupe while preserving declared order.
+      capabilities = [...new Set(mod.capabilities.filter(c => CAPABILITY_SET.has(c)))];
+    }
+  }
+
+  // Optional fallbackDiff — patch-package-style unified diff used when apply()
+  // produces no change (anchor likely drifted). See CONTRIBUTING.md.
+  let fallbackDiff = null;
+  if (mod.fallbackDiff !== undefined) {
+    if (!mod.fallbackDiff || typeof mod.fallbackDiff !== 'object' || Array.isArray(mod.fallbackDiff)) {
+      errors.push('fallbackDiff must be an object: { patch: string, capturedAgainst: string, fuzz?: number }');
+    } else {
+      const fd = mod.fallbackDiff;
+      if (typeof fd.patch !== 'string' || !fd.patch.trim()) {
+        errors.push('fallbackDiff.patch is required and must be a non-empty unified-diff string');
+      }
+      if (typeof fd.capturedAgainst !== 'string' || !fd.capturedAgainst.trim()) {
+        errors.push('fallbackDiff.capturedAgainst is required and must be a non-empty string (CC version it was captured against)');
+      }
+      if (fd.fuzz !== undefined) {
+        if (typeof fd.fuzz !== 'number' || !Number.isFinite(fd.fuzz) || fd.fuzz < 0 || !Number.isInteger(fd.fuzz)) {
+          errors.push('fallbackDiff.fuzz must be a non-negative integer');
+        }
+      }
+      if (typeof fd.patch === 'string' && typeof fd.capturedAgainst === 'string') {
+        fallbackDiff = {
+          patch: fd.patch,
+          capturedAgainst: fd.capturedAgainst,
+          fuzz: typeof fd.fuzz === 'number' ? fd.fuzz : 3,
+        };
+      }
+    }
+  }
+
+  // Optional lifecycle hooks — each must be a function (sync or async) if set.
+  for (const hookName of ['onBeforeApply', 'onAfterApply', 'onVerifyFail']) {
+    if (mod[hookName] !== undefined && typeof mod[hookName] !== 'function') {
+      errors.push(`${hookName} must be a function (sync or async) if defined`);
+    }
+  }
+
+  // Optional forbiddenAfterPatch — substrings that must NOT appear in the
+  // patched bundle. Checked by dry-run / shadow mode (see runner/shadow.mjs).
+  // Defense against accidentally injecting common debug strings (console.log,
+  // debugger, etc.). Validated as a non-empty array of non-empty strings.
+  let forbiddenAfterPatch = [];
+  if (mod.forbiddenAfterPatch !== undefined) {
+    if (!Array.isArray(mod.forbiddenAfterPatch)
+        || mod.forbiddenAfterPatch.some(s => typeof s !== 'string' || s.length === 0)) {
+      errors.push('forbiddenAfterPatch must be an array of non-empty strings');
+    } else {
+      forbiddenAfterPatch = [...mod.forbiddenAfterPatch];
+    }
+  }
+
+  // Optional coverageMarker — opts the patch into runtime coverage tracking.
+  // When set, the runner injects a `__ccpRequire('cov').hit('<marker>')` call
+  // into the patched code (best-effort; see runner.mjs). The `ccpatch coverage`
+  // command later cross-references hits with apply-time results.
+  let coverageMarker = null;
+  if (mod.coverageMarker !== undefined) {
+    if (typeof mod.coverageMarker !== 'string' || mod.coverageMarker.trim().length === 0) {
+      errors.push('coverageMarker must be a non-empty string');
+    } else {
+      coverageMarker = mod.coverageMarker.trim();
+    }
+  }
+
+  // Optional revisit — forensic-patch metadata
+  if (mod.revisit !== undefined) {
+    if (!mod.revisit || typeof mod.revisit !== 'object' || Array.isArray(mod.revisit)) {
+      errors.push('revisit must be an object: { note: string, addedIn?: string, until?: string }');
+    } else {
+      if (typeof mod.revisit.note !== 'string' || !mod.revisit.note.trim()) {
+        errors.push('revisit.note is required and must be a non-empty string');
+      }
+      for (const k of ['addedIn', 'until']) {
+        if (mod.revisit[k] !== undefined && typeof mod.revisit[k] !== 'string') {
+          errors.push(`revisit.${k} must be a string (semver-like, e.g. "2.1.131")`);
+        }
+      }
+    }
+  }
+
+  // testedAgainst — required on per-version variant files; optional on defaults.
+  // Shape: array of strings, each either "X.Y.Z" or a range expression
+  // (">=X", "<X", ">=X,<Y"). For non-default variants, every entry must equal
+  // the filename variant stem (the file makes a specific compatibility claim
+  // and the entry must match it; mismatch is a fatal manifest error).
+  let testedAgainst = null;
+  if (mod.testedAgainst !== undefined) {
+    if (!Array.isArray(mod.testedAgainst) || mod.testedAgainst.length === 0
+        || mod.testedAgainst.some(x => typeof x !== 'string' || !x.trim())) {
+      errors.push('testedAgainst must be a non-empty array of strings (e.g. ["2.1.148"] or [">=2.1.150"])');
+    } else {
+      testedAgainst = mod.testedAgainst.map(s => s.trim());
+      for (const entry of testedAgainst) {
+        if (parseVariantStem(entry) == null) {
+          errors.push(`testedAgainst entry "${entry}" is not a valid version or range`);
+        }
+      }
+      if (variant !== 'default') {
+        if (!testedAgainst.includes(variant)) {
+          errors.push(
+            `testedAgainst ${JSON.stringify(testedAgainst)} does not match filename variant "${variant}" — ` +
+            `per-version files must declare their own version in testedAgainst`
+          );
+        }
+      }
+    }
+  } else if (variant !== 'default') {
+    errors.push(
+      `per-version variant "${variant}" requires a testedAgainst field (e.g. testedAgainst: ['${variant}'])`
+    );
+  }
+
+  const normalized = {
+    name: stem,
+    version: mod.version ?? '0.0.0',
+    description: mod.description ?? '',
+    category: mod.category ?? null,
+    enabled: mod.enabled ?? true,
+    env: Array.isArray(mod.env) ? mod.env : [],
+    tags: Array.isArray(mod.tags) ? mod.tags : [],
+    dependsOn,
+    phase,
+    applyMode,
+    anchor: mod.anchor ?? null,
+    apply: mod.apply ?? null,
+    preload: mod.preload === true,
+    preloadCode: mod.preloadCode ?? null,
+    verify: mod.verify ?? null,
+    required: mod.required === true,
+    revisit: mod.revisit ?? null,
+    forbiddenAfterPatch,
+    fallbackDiff,
+    testedAgainst,
+    resolvedVariant: variant,
+    capabilities,
+    risk: classifyRisk(capabilities),
+    priority,
+    allowOverlapWith,
+    at,
+    kind,
+    target: mod.target ?? null,
+    code: typeof mod.code === 'string' ? mod.code : null,
+    overlay: (mod.overlay && typeof mod.overlay === 'object' && !Array.isArray(mod.overlay)
+      && typeof mod.overlay.register === 'string' && mod.overlay.register.length > 0
+      && typeof mod.overlay.code === 'string' && mod.overlay.code.length > 0)
+      ? { register: mod.overlay.register, code: mod.overlay.code }
+      : null,
+    transform: typeof mod.transform === 'function' ? mod.transform : null,
+    coverageMarker,
+  };
+
+  return { ok: errors.length === 0, errors, normalized };
+}
+
+/**
+ * Resolve a profile name to its patch list.
+ *   profileName: e.g. "minimal" | "standard" | "power"
+ *   profiles:    map returned by readProfiles()  (may be null)
+ *   knownNames:  set of all loaded patch names (used to filter typos out silently —
+ *                an unknown patch in a profile is a config issue, not a runtime one;
+ *                we warn via the returned `unknown` list).
+ * Throws if profileName is not in profiles.
+ */
+export function resolveProfile(profileName, profiles, knownNames) {
+  if (!profiles || !profiles[profileName]) {
+    const valid = profiles ? Object.keys(profiles).sort().join(', ') : '(none defined in ccpatch.yml)';
+    throw new Error(`Unknown profile "${profileName}". Valid: ${valid}`);
+  }
+  const requested = profiles[profileName];
+  const known = new Set(knownNames);
+  const enabled = [];
+  const unknown = [];
+  for (const name of requested) {
+    if (known.has(name)) enabled.push(name);
+    else unknown.push(name);
+  }
+  return { enabled, unknown };
+}

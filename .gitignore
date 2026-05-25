@@ -1,0 +1,59 @@
+# Dependencies
+node_modules/
+bun.lock
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Patch backups
+*.bak
+*.subscribe.bak
+*.hm-rename.bak
+
+# Private platform patches go in extensions/.
+# Gitignore individual private files here if needed, e.g.:
+#   extensions/my_private_patch.mjs
+
+# Internal planning / design docs (not part of the public API)
+patches/claude-code/_planned/
+
+# Storage directory — contains CC archives, outputs, and runtime data.
+# Users populate this locally; it is NOT redistributed.
+# Symlink or create:  mkdir -p storage/archives  (then `make download` or copy your bundle)
+storage
+storage/
+
+# Build / extraction outputs
+releases/
+dist/
+
+# Third-party patch modules installed via `ccpatch module install`.
+# Modules are project-local and not part of the ccpatch tree.
+modules/
+
+# Local Claude Code caches / tool artifacts
+.cc/
+.specstory/
+
+# Local environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+/tmp/cc-debug.log
+
+# Worktrees created by Claude Code agents
+.claude/worktrees/
