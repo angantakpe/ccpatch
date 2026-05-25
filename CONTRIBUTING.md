@@ -1,6 +1,8 @@
 # Contributing to ccpatch
 
-Thanks for considering a patch. This document covers the patch contract, how to add a new one, and what gets merged vs. flagged for discussion.
+Thanks for considering a patch. ccpatch injects scripts into Claude Code's `cli.js` to reach behavior that MCP and external wrappers cannot touch — internal feature flags, the tool list before it reaches the API, user input before the harness processes it, and module-scoped state in the agent loop.
+
+This document covers the patch contract, how to add a new one, and what gets merged vs. flagged for discussion.
 
 ---
 

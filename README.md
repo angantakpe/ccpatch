@@ -2,9 +2,16 @@
 
 # ccpatch
 
-A patch framework for Anthropic's official Claude Code CLI. Extract the bundle from the npm package (or the native Bun binary), apply declarative AST-anchored patches, then repack.
+Claude Code has no extension API for its internals. MCP adds tools — but it cannot touch what lives inside the process: the tool list Claude is offered, the feature flags baked into the bundle, the UI layer, the agent loop, or the module-scoped state that drives the harness.
 
-> tweakcc customizes the UI. cc-enhanced ships a fixed patch set. ccpatch is the framework you write your own patches in.
+ccpatch solves that. It injects scripts directly into `cli.js` so you can alter behavior that is otherwise unreachable:
+
+- **Modify the tool list** before it is sent to the API — add, remove, or reshape tools without Claude knowing
+- **Flip internal feature flags** (`loop_dynamic`, `durable_cron`, `extended_thinking`) that are boolean checks hardcoded in the bundle — no proxy or wrapper can reach these
+- **Intercept user input** at the submit level, before the harness processes it — add native slash commands indistinguishable from built-ins
+- **Access internal conversation state** — the agent loop, turn history, and module-scope variables that are never serialized or exposed
+- **Poke holes in the module boundary** — `expose_tool_dispatch`, `expose_api_client`, `expose_submit_input` let external scripts call into the running CLI process
+- **Patch the UI** — React/Ink component tree, input bar rendering, terminal output
 
 ccpatch is not a fork. It ships **no Anthropic code**. It transforms a copy of the Claude Code CLI that is already installed on your machine.
 
@@ -24,7 +31,7 @@ ccpatch is not a fork. It ships **no Anthropic code**. It transforms a copy of t
 Requires Node.js 20+ and either Bun or npm.
 
 ```
-git clone https://github.com/codehornets/ccpatch.git ccpatch
+git clone https://github.com/angantakpe/ccpatch.git ccpatch
 cd ccpatch
 bun install        # or: npm install
 ```
@@ -85,9 +92,13 @@ make test-patches
 
 A `--profile minimal | standard | power` selector is planned to bundle curated patch sets. For now, edit `ccpatch.yml` or pass `PATCH=` explicitly.
 
-### Drift check _(coming)_
+### Drift check
 
-`ccpatch doctor` will report patches whose anchors have drifted in a new Claude Code release, surfacing the fuzzy candidates the runner already emits to `storage/outputs/anchor-drift.jsonl`.
+```
+node bin/patch-cli.mjs doctor <bundle> --version <x.y.z>
+```
+
+Reports patches whose anchors have drifted in a new Claude Code release. Fuzzy candidates are logged to `storage/outputs/anchor-drift.jsonl` with scores and offsets so re-anchoring is a targeted lookup, not a hunt.
 
 ---
 
