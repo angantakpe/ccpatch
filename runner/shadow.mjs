@@ -145,7 +145,7 @@ export function runShadow(unpatched, patched, patches, names, opts = {}) {
  * Render a shadow report as a plain-text table for terminal output.
  * Pure function — produces a string. Caller writes to logger.
  */
-export function formatShadowReport(report, opts = {}) {
+export function formatShadowReport(report, _opts = {}) {
   const lines = [];
   const { unpatchedBytes, patchedBytes, delta } = report.stats;
   lines.push(`[shadow] bytes: unpatched=${unpatchedBytes} patched=${patchedBytes} delta=${delta >= 0 ? '+' : ''}${delta}`);

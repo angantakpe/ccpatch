@@ -5,19 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { runShadow } from '../runner/shadow.mjs';
-import { runPatchCli } from '../runner/cli.mjs';
 
 const silent = { log() {}, warn() {}, error() {} };
-
-function mkLogger() {
-  const lines = [];
-  return {
-    lines,
-    log(...args) { lines.push(args.join(' ')); },
-    warn(...args) { lines.push('WARN: ' + args.join(' ')); },
-    error(...args) { lines.push('ERR: ' + args.join(' ')); },
-  };
-}
 
 describe('runShadow — bytes / verify / parse / forbidden', () => {
   it('clean run: prepend sentinel only in patched bundle → no anomalies', () => {

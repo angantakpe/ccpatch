@@ -26,9 +26,9 @@
  * Auth: globalThis.__ccpAuth.verify(token) — constant-time compare.
  */
 export default {
-  category: 'vertical',
+  category: 'feature',
   description: 'NDJSON bridge into the running CLI (submit/dispatch/subscribe/cancel).',
-  capabilities: ['network', 'ipc', 'prompt', 'tools'],
+  capabilities: ['network', 'prompt', 'tools'],
   dependsOn: ['event_bus', 'auth_token', 'expose_submit_input', 'expose_tool_dispatch'],
   verify: { present: '__ccpHeadlessBridge_v1' },
   apply: (code) => {

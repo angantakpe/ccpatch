@@ -12,8 +12,6 @@ import {
 } from '../runner/overlay-builder.mjs';
 import { makeWatchLoop } from '../runner/cli.mjs';
 
-const require = createRequire(import.meta.url);
-
 function mkPatch(extra) {
   return {
     description: 'test',

@@ -54,11 +54,6 @@ function copyFixture() {
   return tmp;
 }
 
-function emptyDir() {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'ccpatch-empty-'));
-  return d;
-}
-
 describe('hashPatchesTree', () => {
   it('produces a stable sha256 for a known fixture', () => {
     const patchesDir = path.join(FIXTURE_DIR, 'patches');

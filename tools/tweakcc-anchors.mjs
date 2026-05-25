@@ -32,9 +32,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { parseArgs } from 'node:util';
 import { createHash } from 'node:crypto';
-import { fileURLToPath } from 'node:url';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CWD = process.cwd();
 
 // ─── CLI args ────────────────────────────────────────────────────────────────
@@ -164,7 +162,7 @@ function scoreAnchor(s) {
  * Prefers complete sentences/phrases, avoids template vars.
  * Also extracts static segments from template-heavy lines by splitting on ${...}.
  */
-function extractAnchors(body, variables) {
+function extractAnchors(body) {
   // Matches any ${...} interpolation (known vars or generic ALL_CAPS pattern)
   const anyVarPattern = /\$\{[A-Za-z_][A-Za-z0-9_.]*\}/g;
 
@@ -305,10 +303,10 @@ async function main() {
   for (const file of files) {
     const filePath = path.join(PROMPTS_DIR, file);
     const raw = fs.readFileSync(filePath, 'utf8');
-    const { name, description, ccVersion, variables, body } = parsePromptFile(raw);
+    const { name, description, ccVersion, body } = parsePromptFile(raw);
 
     const promptId = file.replace(/\.md$/, '');
-    const anchors = extractAnchors(body, variables);
+    const anchors = extractAnchors(body);
     const bodyHash = md5(body);
 
     // Hash drift check: compare body hash vs tweakcc's known hashes

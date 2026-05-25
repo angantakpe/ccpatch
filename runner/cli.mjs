@@ -9,7 +9,7 @@ import { resolveProfile, classifyRisk, CAPABILITIES } from './manifest.mjs';
 import { probeAnchor, fuzzyMatch } from './anchors.mjs';
 import { compileKind } from './patch-kinds.mjs';
 import { buildPreload } from './preload-builder.mjs';
-import { writeOverlay, emitOverlay } from './overlay-builder.mjs';
+import { emitOverlay } from './overlay-builder.mjs';
 import { PROJECT_ROOT } from './paths.mjs';
 import {
   enumeratePatchNames,

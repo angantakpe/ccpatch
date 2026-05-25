@@ -9,7 +9,7 @@ export default {
   // absent check passes both when the flag is replaced with !0 AND when the flag was
   // removed upstream (no-op case) — the string won't be present in either outcome.
   verify: { absent: '"tengu_plan_mode_interview_phase",!1' },
-  apply: (code, opts) => {
+  apply: (code) => {
     // The feature flag was removed upstream in v2.1.146 — detect the removal first
     // so we don't print a misleading warning.
     if (!code.includes('tengu_plan_mode_interview_phase')) {

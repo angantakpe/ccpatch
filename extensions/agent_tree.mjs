@@ -16,7 +16,7 @@
  *     children: [ ...nodes ] }
  */
 export default {
-  category: 'vertical',
+  category: 'observe',
   description: 'Per-subagent cost + tool accounting tree exposed as __ccpAgentTree.',
   capabilities: ['telemetry'],
   dependsOn: ['event_bus'],

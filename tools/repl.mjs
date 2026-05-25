@@ -162,7 +162,7 @@ export async function runRepl(bundlePath, io = {}) {
     if (!trimmed) { rl.prompt(); return; }
 
     if (trimmed.startsWith(':')) {
-      const [cmd, ...rest] = trimmed.slice(1).split(/\s+/);
+      const [cmd] = trimmed.slice(1).split(/\s+/);
       if (cmd === 'quit' || cmd === 'q' || cmd === 'exit') {
         rl.close();
         return;

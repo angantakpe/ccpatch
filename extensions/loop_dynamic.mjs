@@ -7,7 +7,7 @@ export default {
   description: 'Unlock self-pacing loops (tengu_kairos_loop_dynamic) and richer loop prompts (tengu_kairos_loop_prompt)',
   capabilities: [],
   verify: { absent: '"tengu_kairos_loop_dynamic",!1' },
-  apply: (code, opts) => {
+  apply: (code) => {
     let patched = 0;
 
     const fnDyn = findFunctionByLiteral(code, resolveAnchorLiteral('isLoopDynamicEnabled'));

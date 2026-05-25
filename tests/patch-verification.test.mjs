@@ -191,7 +191,7 @@ if (HAS_REAL_BUNDLE) {
 }
 
 /** Pick an appropriate fixture for the patch. */
-function fixtureFor(name, patch) {
+function fixtureFor(name, _patch) {
   if (realBundle) return realBundle;
   // For stream-anchor patches fall back to the synthetic anchor fragment.
   const src = readFileSync(patchPaths[name].path, 'utf8');

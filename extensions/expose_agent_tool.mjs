@@ -387,7 +387,7 @@ try {
     if (!regMatch) {
       console.warn('  [!] expose_agent_tool: registration anchor (tools registry) not found — _callSelf captured only on first Task call');
     } else {
-      const [regWhole, REG, TOOL0] = regMatch;
+      const [, REG, TOOL0] = regMatch;
       // Sanity check: the registry must contain a tool whose declaration has an
       // `async call({prompt:` signature within the AgentTool's NK(...) wrapper.
       // We use the call sig presence as the verification gate (same gate as

@@ -11,7 +11,7 @@
  * Rotation: on SIGHUP, re-reads the file source.
  */
 export default {
-  category: 'infra',
+  category: 'infrastructure',
   description: 'Shared-secret loader + constant-time compare exposed as __ccpAuth.',
   capabilities: ['env', 'fs'],
   verify: { present: '__ccpAuth_v1' },

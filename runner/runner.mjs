@@ -68,16 +68,6 @@ export function checkVerify(verify, code) {
   return issues;
 }
 
-/** A verify block with only `present` (no absent/count) is weak — it can pass
- *  on a wrong-location apply if the sentinel happens to occur naturally. */
-export function isWeakVerify(verify) {
-  if (!verify) return true;
-  const hasPresent = toList(verify.present).length > 0;
-  const hasAbsent  = toList(verify.absent).length > 0;
-  const hasCount   = verify.count !== undefined && verify.count !== null;
-  return hasPresent && !hasAbsent && !hasCount;
-}
-
 // Tiny dotted-numeric comparator for CC versions like "2.1.148".
 // Returns -1 | 0 | 1, or null if either input doesn't parse.
 function compareVersions(a, b) {

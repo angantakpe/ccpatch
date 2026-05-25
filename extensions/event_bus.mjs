@@ -16,9 +16,9 @@
  * No bundle anchor required; injected at the CJS-IIFE seam.
  */
 export default {
-  category: 'infra',
+  category: 'infrastructure',
   description: 'Typed pub/sub event bus exposed as __ccpBus.',
-  capabilities: ['ipc'],
+  capabilities: ['telemetry'],
   verify: { present: '__ccpBus_v1' },
   apply: (code) => {
     const hook = `

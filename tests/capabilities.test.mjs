@@ -239,9 +239,8 @@ describe('strict-mode capability gate (CLI)', () => {
     const logger = captureLogger();
     // Apply will then fail downstream (the input file is not a real bundle),
     // but we only care that the gate itself does not reject.
-    let code;
     try {
-      code = await runPatchCli(
+      await runPatchCli(
         [
           inputPath, outputPath,
           '--patch', 'webhook',

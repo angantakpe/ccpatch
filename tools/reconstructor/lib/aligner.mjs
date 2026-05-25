@@ -502,7 +502,7 @@ function structuralFallback(unmatchedBaseIds, unmatchedTargetIds, baseChunks, ta
 /**
  * Classify matches as exact/modified and attribute source files.
  */
-function classifyAndAttribute(matches, baseChunks, targetChunks, baseFps, targetFps, sourceMapIndex, baseNorm, targetNorm) {
+function classifyAndAttribute(matches, baseChunks, _targetChunks, baseFps, targetFps, sourceMapIndex, baseNorm, targetNorm) {
   return matches.map(m => {
     const baseFp = baseFps[m.baseChunkId];
     const targetFp = targetFps[m.targetChunkId];

@@ -373,7 +373,7 @@ function describeFnSpec(spec) {
 /**
  * Main resolver. Dispatch on at.kind.
  */
-export function resolveAt(at, code, opts = {}) {
+export function resolveAt(at, code, _opts = {}) {
   if (!at || typeof at !== 'object') return { ok: false, error: '@At: missing selector object' };
   if (!AT_KINDS.includes(at.kind)) {
     return { ok: false, error: `@At: unknown kind "${at.kind}" (allowed: ${AT_KINDS.join(', ')})` };
