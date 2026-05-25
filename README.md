@@ -1,4 +1,4 @@
-[![drift-check](https://github.com/codehornets/ccpatch/actions/workflows/drift-check.yml/badge.svg)](https://github.com/codehornets/ccpatch/actions/workflows/drift-check.yml)
+[![drift-check](https://github.com/angantakpe/ccpatch/actions/workflows/drift-check.yml/badge.svg)](https://github.com/angantakpe/ccpatch/actions/workflows/drift-check.yml)
 
 # ccpatch
 
