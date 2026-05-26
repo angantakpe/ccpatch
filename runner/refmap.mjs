@@ -26,17 +26,38 @@ import { PROJECT_ROOT } from './paths.mjs';
  * @param {string} [root] - Project root containing the refmaps/ directory.
  * @returns {object|null}
  */
+// Module-scope cache: each `(root, ccVersion)` pair parses its JSON once per
+// process. Refmaps are immutable JSON sidecars in this repo — we never
+// rewrite them at runtime — so memoising the parse is safe. Hot path is
+// runner/anchors.mjs:resolveAnchor, which previously paid an fs.existsSync +
+// fs.readFileSync + JSON.parse on every anchor resolution.
+const REFMAP_CACHE = new Map(); // key: `${root}\x00${ccVersion}`, value: object|null
+
 export function loadRefmap(ccVersion, root = PROJECT_ROOT) {
   if (!ccVersion) return null;
+  const key = `${root}\x00${ccVersion}`;
+  if (REFMAP_CACHE.has(key)) return REFMAP_CACHE.get(key);
   const filePath = path.join(root, 'refmaps', `${ccVersion}.json`);
-  if (!fs.existsSync(filePath)) return null;
-  try {
-    const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-    if (!data || typeof data !== 'object' || !data.anchors) return null;
-    return data;
-  } catch {
-    return null;
+  let value = null;
+  if (fs.existsSync(filePath)) {
+    try {
+      const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      if (data && typeof data === 'object' && data.anchors) value = data;
+    } catch {
+      value = null;
+    }
   }
+  REFMAP_CACHE.set(key, value);
+  return value;
+}
+
+/**
+ * Clear the memoised refmap cache. Tests that write refmaps to disk after
+ * a prior load (or that share a tmpdir across cases) should call this to
+ * avoid seeing a stale `null` from a previous existence check.
+ */
+export function resetRefmapCache() {
+  REFMAP_CACHE.clear();
 }
 
 /**
