@@ -20,6 +20,7 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readPatchFlags } from '../runner/config.mjs';
 import { compileKind } from '../runner/patch-kinds.mjs';
+import { pickFixture } from './fixtures/registry.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
@@ -32,20 +33,6 @@ const PATCH_DIRS = [
 ];
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
-
-function shebang(body = '') {
-  return `#!/usr/bin/env node\n${body}`;
-}
-
-/** Minimal bundle fragment containing the message-stream anchor used by
- *  loop_dynamic, plan_mode_interview, and similar stream-rewriting patches. */
-function streamAnchor() {
-  // Matches the anchorRe used by message-stream patches.
-  // Variable names must be single-char to match the regex \w+.
-  return shebang(`
-for await(let u of Z){if(u.message){if(yield u.message,u.message.type==="progress"&&u.message.toolUseID){v=u.message.toolUseID,n++
-`);
-}
 
 /** Load a patch module by absolute file path. */
 async function loadPatchByPath(filePath) {
@@ -190,13 +177,12 @@ if (HAS_REAL_BUNDLE) {
   process.stderr.write(`[test]   place a bundle at storage/archives/claude-code-vX.Y.Z/cli.js or set CC_BUNDLE_FIXTURE\n`);
 }
 
-/** Pick an appropriate fixture for the patch. */
+/** Pick an appropriate fixture for the patch. Delegates to the registry
+ *  so per-patch fixture stubs (emitted by bin/scaffold-patch.mjs) are loaded
+ *  from one canonical place. */
 function fixtureFor(name, _patch) {
   if (realBundle) return realBundle;
-  // For stream-anchor patches fall back to the synthetic anchor fragment.
-  const src = readFileSync(patchPaths[name].path, 'utf8');
-  if (src.includes('for await') || src.includes('toolUseID')) return streamAnchor();
-  return shebang('/* stub */');
+  return pickFixture(name, (n) => readFileSync(patchPaths[n].path, 'utf8'));
 }
 
 /** Some patches' anchors only exist in the real bundle. When there's no real

@@ -20,6 +20,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { PROJECT_ROOT } from '../runner/paths.mjs';
 
+const REGISTRY_PATH = path.join(PROJECT_ROOT, 'tests/fixtures/registry.mjs');
+const REGISTRY_MARKER = '// ── scaffold-patch.mjs inserts new entries here ──';
+
 function parseArgs(argv) {
   const args = argv.slice(2);
   if (args.length === 0 || args[0] === '--help' || args[0] === '-h') return { help: true };
@@ -39,6 +42,7 @@ const USAGE =
 function templateSplice(name) {
   return `import { spliceBoot } from '../runner/patch-helpers.mjs';
 
+/** @type {import('../types/patch').Patch} */
 export default {
   category: 'optional',
   enabled: false,
@@ -70,6 +74,7 @@ function templateFlag(name) {
 // TODO: replace with the stable tengu_* feature-flag literal you want to force.
 const FLAG_LITERAL = 'tengu_change_me';
 
+/** @type {import('../types/patch').Patch} */
 export default {
   category: 'feature',
   enabled: false,
@@ -88,7 +93,8 @@ export default {
 }
 
 function templateFree(name) {
-  return `export default {
+  return `/** @type {import('../types/patch').Patch} */
+export default {
   category: 'optional',
   enabled: false,
   description: 'TODO: one-line summary',
@@ -132,9 +138,40 @@ function main(argv = process.argv) {
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(filePath, TEMPLATES[opts.kind](opts.name), 'utf8');
   console.log(`Wrote ${filePath}`);
+
+  const registryWrote = appendFixtureStub(opts.name);
+  if (registryWrote) {
+    console.log(`Appended fixture stub for "${opts.name}" to tests/fixtures/registry.mjs`);
+  }
+
   console.log(`Next: open it, fill in the TODOs, then run`);
   console.log(`  node bin/patch-cli.mjs <bundle> --patch ${opts.name} --dry-run`);
   return 0;
+}
+
+/**
+ * Append a per-patch fixture stub to tests/fixtures/registry.mjs. The stub
+ * returns `null` (= "no synthetic fixture available") so the author can
+ * decide whether to write one. Idempotent: skips if `name:` already appears
+ * in the FIXTURES map.
+ */
+function appendFixtureStub(name) {
+  if (!fs.existsSync(REGISTRY_PATH)) {
+    console.warn(`  [warn] ${REGISTRY_PATH} not found — skipping fixture stub`);
+    return false;
+  }
+  const src = fs.readFileSync(REGISTRY_PATH, 'utf8');
+  // Idempotency: bail if a key for this patch already exists in FIXTURES.
+  const keyRe = new RegExp(`^\\s*${name}\\s*:`, 'm');
+  if (keyRe.test(src)) return false;
+  if (!src.includes(REGISTRY_MARKER)) {
+    console.warn(`  [warn] registry marker missing — skipping fixture stub`);
+    return false;
+  }
+  const stub = `// ${name}: return null until a real anchor-bearing fragment is needed.\n  ${name}: () => null,\n  ${REGISTRY_MARKER}`;
+  const next = src.replace(REGISTRY_MARKER, stub);
+  fs.writeFileSync(REGISTRY_PATH, next, 'utf8');
+  return true;
 }
 
 const invokedFromCli = (() => {
