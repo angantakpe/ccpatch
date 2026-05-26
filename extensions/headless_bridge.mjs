@@ -40,7 +40,12 @@ export default {
   if (globalThis.__ccpHeadlessBridge_v1) return;
   if (!process.env.CC_BRIDGE_ADDR) return;
   globalThis.__ccpHeadlessBridge_v1 = true;
-  const net = require('node:net');
+  // See auth_token for the same require-resolution dance.
+  const __req = (typeof globalThis.__hm_require === 'function')
+    ? globalThis.__hm_require
+    : (typeof require === 'function' ? require : null);
+  if (!__req) { console.warn('[ccpatch] headless_bridge: no require available — skipping'); return; }
+  const net = __req('node:net');
   const ADDR = process.env.CC_BRIDGE_ADDR;
   const MAX_LINE = Number(process.env.CC_BRIDGE_MAX_LINE || 1048576);
   const TOPICS = ['turn.start','turn.end','tool.call','tool.result','agent.spawn','agent.exit','cost.delta'];
@@ -170,7 +175,7 @@ export default {
   });
 
   if (ADDR.startsWith('unix:')) {
-    const fs = require('node:fs');
+    const fs = __req('node:fs');
     const sockPath = ADDR.slice(5);
     try { fs.unlinkSync(sockPath); } catch (_) {}
     server.listen(sockPath, () => {

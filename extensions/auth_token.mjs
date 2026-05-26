@@ -23,10 +23,17 @@ export default {
 (() => {
   if (globalThis.__ccpAuth_v1) return;
   globalThis.__ccpAuth_v1 = true;
-  const fs = require('node:fs');
-  const os = require('node:os');
-  const path = require('node:path');
-  const { timingSafeEqual } = require('node:crypto');
+  // Bare \`require\` isn't in scope when the hook is injected outside the
+  // CJS-IIFE wrapper (i.e. between SHEBANG and the wrapper, in an ESM
+  // bundle). esm_compat publishes globalThis.__hm_require for this case.
+  const __req = (typeof globalThis.__hm_require === 'function')
+    ? globalThis.__hm_require
+    : (typeof require === 'function' ? require : null);
+  if (!__req) { console.warn('[ccpatch] auth_token: no require available — skipping'); return; }
+  const fs = __req('node:fs');
+  const os = __req('node:os');
+  const path = __req('node:path');
+  const { timingSafeEqual } = __req('node:crypto');
   let current = '';
   const load = () => {
     if (process.env.CC_BRIDGE_TOKEN) { current = process.env.CC_BRIDGE_TOKEN; return; }

@@ -30,12 +30,16 @@ export default {
   globalThis.__ccpBus_v1 = true;
   const exact = new Map();   // topic -> Set<fn>
   const globs = new Set();   // { re, fn }
-  const escape = (s) => s.replace(/[.+?^\${}()|[\\]\\\\]/g, '\\\\$&');
+  // Build a glob regex by escaping all special chars EXCEPT '*' (handled
+  // separately by splitting). Splitting on '*' lets a topic of bare '*'
+  // produce '^.*$' instead of an invalid '^*$'.
+  const escapeReSeg = (s) => s.replace(/[.+?^\${}()|[\\]\\\\]/g, '\\\\$&');
+  const globToRe = (g) => new RegExp('^' + g.split('*').map(escapeReSeg).join('.*') + '$');
   globalThis.__ccpBus = {
     on(topic, fn) {
       if (typeof fn !== 'function') return () => {};
       if (topic.includes('*')) {
-        const re = new RegExp('^' + escape(topic).replace(/\\\\\\*/g, '.*') + '$');
+        const re = globToRe(topic);
         const entry = { re, fn };
         globs.add(entry);
         return () => globs.delete(entry);
