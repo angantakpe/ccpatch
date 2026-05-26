@@ -28,6 +28,8 @@
 import * as acorn from 'acorn';
 import * as walk from 'acorn-walk';
 import { findFunctionByLiteral } from './ast-anchor.mjs';
+import { findClosingBrace } from './brace-walker.mjs';
+import { getAst } from './ast-cache.mjs';
 
 export const KINDS = ['free', 'prefix', 'postfix', 'transpiler'];
 
@@ -65,7 +67,7 @@ export function locateTarget(code, target) {
   const start = m.index;
   const openBrace = code.indexOf('{', start + m[0].length);
   if (openBrace === -1) return null;
-  const end = findClosingBraceIdx(code, openBrace);
+  const end = findClosingBrace(code, openBrace);
   if (end === -1) return null;
   return { name, start, end: end + 1 };
 }
@@ -89,7 +91,7 @@ function findFunctionByBodySubstring(code, needle) {
 
     const openBrace = code.indexOf('{', fnStart + 8);
     if (openBrace === -1 || openBrace > hit) { searchFrom = hit + 1; continue; }
-    const closePos = findClosingBraceIdx(code, openBrace);
+    const closePos = findClosingBrace(code, openBrace);
     if (closePos === -1 || hit > closePos) { searchFrom = hit + 1; continue; }
 
     const fnText = code.slice(fnStart, closePos + 1);
@@ -98,42 +100,6 @@ function findFunctionByBodySubstring(code, needle) {
     return { name, start: fnStart, end: closePos + 1 };
   }
   return null;
-}
-
-// Mirror of findClosingBrace in ast-anchor.mjs (kept private there).
-function findClosingBraceIdx(code, openPos) {
-  let depth = 1;
-  let i = openPos + 1;
-  while (i < code.length && depth > 0) {
-    const c = code[i];
-    if (c === '"' || c === "'") {
-      i++;
-      while (i < code.length) {
-        if (code[i] === '\\') { i += 2; continue; }
-        if (code[i] === c) { i++; break; }
-        i++;
-      }
-      continue;
-    }
-    if (c === '`') {
-      i++;
-      while (i < code.length) {
-        if (code[i] === '\\') { i += 2; continue; }
-        if (code[i] === '`') { i++; break; }
-        i++;
-      }
-      continue;
-    }
-    if (c === '/' && code[i + 1] === '/') {
-      const nl = code.indexOf('\n', i + 2);
-      i = nl === -1 ? code.length : nl + 1;
-      continue;
-    }
-    if (c === '{') depth++;
-    else if (c === '}') depth--;
-    i++;
-  }
-  return depth === 0 ? i - 1 : -1;
 }
 
 /**
@@ -147,16 +113,23 @@ function findClosingBraceIdx(code, openPos) {
  * Only top-level returns of the target function are rewritten; returns nested
  * inside other function expressions/declarations/arrows are left alone.
  */
-export function rewriteReturns(fnText, injected) {
+export function rewriteReturns(fnText, injected, cacheKey) {
   // Wrap as `(fnText)` so Acorn parses it as an expression.
+  // When the caller can supply { code, start, end } it lets us hit the shared
+  // AST cache; otherwise we parse fnText directly (back-compat path used by
+  // tests/patch-kinds.test.mjs).
   let ast;
   try {
-    ast = acorn.parse(`(${fnText})`, {
-      ecmaVersion: 'latest',
-      allowAwaitOutsideFunction: true,
-      allowReturnOutsideFunction: true,
-      ranges: true,
-    });
+    if (cacheKey && typeof cacheKey === 'object') {
+      ast = getAst(cacheKey.code, cacheKey.start, cacheKey.end, fnText);
+    } else {
+      ast = acorn.parse(`(${fnText})`, {
+        ecmaVersion: 'latest',
+        allowAwaitOutsideFunction: true,
+        allowReturnOutsideFunction: true,
+        ranges: true,
+      });
+    }
   } catch (err) {
     throw new Error(`postfix: could not parse target function: ${err.message}`);
   }
@@ -263,7 +236,7 @@ export function compileKind(patch) {
       const loc = locateTarget(code, patch.target);
       if (!loc) return code;
       const fnText = code.slice(loc.start, loc.end);
-      const rewritten = rewriteReturns(fnText, patch.code);
+      const rewritten = rewriteReturns(fnText, patch.code, { code, start: loc.start, end: loc.end });
       if (rewritten === fnText) return code;
       return code.slice(0, loc.start) + rewritten + code.slice(loc.end);
     };

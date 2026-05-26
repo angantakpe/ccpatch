@@ -30,9 +30,10 @@
 //   AFTER   — immediately after a string literal. target.literal, occurrence?.
 //             site.start === site.end === literal_offset + literal.length.
 
-import * as acorn from 'acorn';
 import { findFunctionByLiteral } from './ast-anchor.mjs';
 import { fuzzyMatch } from './anchors.mjs';
+import { findClosingBrace } from './brace-walker.mjs';
+import { getAst } from './ast-cache.mjs';
 
 export const AT_KINDS = Object.freeze(['HEAD', 'RETURN', 'INVOKE', 'BEFORE', 'AFTER']);
 
@@ -63,7 +64,7 @@ function resolveFunction(spec, code) {
     while (i < code.length && /\s/.test(code[i])) i++;
     if (code[i] !== '{') return null;
     const openBrace = i;
-    const closeBrace = findMatchingBrace(code, openBrace);
+    const closeBrace = findClosingBrace(code, openBrace);
     if (closeBrace === -1) return null;
     return {
       name: spec,
@@ -89,42 +90,6 @@ function resolveFunction(spec, code) {
     };
   }
   return null;
-}
-
-/** Find matching '}' for the '{' at openPos, skipping strings & line comments. */
-function findMatchingBrace(code, openPos) {
-  let depth = 1;
-  let i = openPos + 1;
-  while (i < code.length && depth > 0) {
-    const c = code[i];
-    if (c === '"' || c === "'") {
-      i++;
-      while (i < code.length) {
-        if (code[i] === '\\') { i += 2; continue; }
-        if (code[i] === c) { i++; break; }
-        i++;
-      }
-      continue;
-    }
-    if (c === '`') {
-      i++;
-      while (i < code.length) {
-        if (code[i] === '\\') { i += 2; continue; }
-        if (code[i] === '`') { i++; break; }
-        i++;
-      }
-      continue;
-    }
-    if (c === '/' && code[i + 1] === '/') {
-      const nl = code.indexOf('\n', i + 2);
-      i = nl === -1 ? code.length : nl + 1;
-      continue;
-    }
-    if (c === '{') depth++;
-    else if (c === '}') depth--;
-    i++;
-  }
-  return depth === 0 ? i - 1 : -1;
 }
 
 function fuzzyCandidatesForLiteral(code, literal) {
@@ -166,11 +131,7 @@ function collectReturns(code, fn) {
   const fnText = code.slice(fn.start, fn.end);
   let ast;
   try {
-    ast = acorn.parse(`(${fnText})`, {
-      ecmaVersion: 'latest',
-      allowAwaitOutsideFunction: true,
-      allowReturnOutsideFunction: true,
-    });
+    ast = getAst(code, fn.start, fn.end, fnText);
   } catch (_) {
     return null;
   }

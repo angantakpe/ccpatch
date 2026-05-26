@@ -1,5 +1,58 @@
 // runner/ast-anchor.mjs
-import * as acorn from 'acorn';
+import { findClosingBrace } from './brace-walker.mjs';
+import { getAst } from './ast-cache.mjs';
+
+/**
+ * Per-bundle literal→offset index.
+ *
+ * findFunctionByLiteral() previously called code.indexOf(needle, 0) on every
+ * invocation. For a 16 MB bundle and 30+ declarative patches each searching
+ * for multiple literals, that's a lot of redundant scans. We lazily build a
+ * literal→offsets[] index keyed by the bundle's string identity and reuse
+ * it for the lifetime of that bundle. The index is intentionally scoped per
+ * `code` value (WeakMap-style via identity check) — when the runner mutates
+ * the bundle string a new instance is created and the index naturally
+ * invalidates.
+ */
+let bundleIndexCode = null;
+let bundleIndexMap = null;   // Map<literal, number[]>
+
+/**
+ * Reset the cached per-bundle index. Called from the runner between bundles
+ * to avoid pinning stale references; not required for correctness (identity
+ * check below covers it) but useful for test isolation.
+ */
+export function resetBundleIndex() {
+  bundleIndexCode = null;
+  bundleIndexMap = null;
+}
+
+function indexOfAll(code, needle, cap = 64) {
+  // Bounded: most literals appear a handful of times. Cap guards against
+  // pathological literals (e.g. very short tokens) blowing memory.
+  const out = [];
+  let from = 0;
+  while (out.length < cap) {
+    const idx = code.indexOf(needle, from);
+    if (idx === -1) break;
+    out.push(idx);
+    from = idx + 1;
+  }
+  return out;
+}
+
+function offsetsFor(code, needle) {
+  if (bundleIndexCode !== code) {
+    bundleIndexCode = code;
+    bundleIndexMap = new Map();
+  }
+  let hits = bundleIndexMap.get(needle);
+  if (hits === undefined) {
+    hits = indexOfAll(code, needle);
+    bundleIndexMap.set(needle, hits);
+  }
+  return hits;
+}
 
 /**
  * Find the innermost named function in `code` whose body contains `literal`
@@ -18,43 +71,35 @@ import * as acorn from 'acorn';
  */
 export function findFunctionByLiteral(code, literal) {
   const needle = JSON.stringify(literal); // adds quotes + escaping
-  let searchFrom = 0;
+  const hits = offsetsFor(code, needle);
 
-  while (searchFrom < code.length) {
-    const litIdx = code.indexOf(needle, searchFrom);
-    if (litIdx === -1) return null;
-
+  for (const litIdx of hits) {
     // Scan backward for nearest 'function' keyword before the literal.
     const windowStart = Math.max(0, litIdx - 400);
     const back = code.slice(windowStart, litIdx);
     const relFnKw = back.lastIndexOf('function ');
-    if (relFnKw === -1) { searchFrom = litIdx + 1; continue; }
+    if (relFnKw === -1) continue;
     const fnStart = windowStart + relFnKw;
 
     // Find the opening brace of the function body (skip name + params).
     const openBrace = code.indexOf('{', fnStart + 8);
-    if (openBrace === -1 || openBrace > litIdx) { searchFrom = litIdx + 1; continue; }
+    if (openBrace === -1 || openBrace > litIdx) continue;
 
     // Find the matching closing brace.
     const closePos = findClosingBrace(code, openBrace);
-    if (closePos === -1 || litIdx > closePos) { searchFrom = litIdx + 1; continue; }
+    if (closePos === -1 || litIdx > closePos) continue;
 
     // Parse the extracted function text with Acorn to validate structure and get the name.
     const fnText = code.slice(fnStart, closePos + 1);
     let name = null;
     try {
-      const ast = acorn.parse(`(${fnText})`, {
-        ecmaVersion: 'latest',
-        allowAwaitOutsideFunction: true,
-        allowReturnOutsideFunction: true,
-      });
+      const ast = getAst(code, fnStart, closePos + 1, fnText);
       const expr = ast.body[0]?.expression;
       if (expr && (expr.type === 'FunctionExpression' || expr.type === 'FunctionDeclaration')) {
         name = expr.id?.name ?? null;
       }
       // If Acorn parsed it but it's not a function expression, skip this hit.
       if (!expr || (expr.type !== 'FunctionExpression' && expr.type !== 'FunctionDeclaration')) {
-        searchFrom = litIdx + 1;
         continue;
       }
     } catch (_) {
@@ -62,58 +107,10 @@ export function findFunctionByLiteral(code, literal) {
       const nm = fnText.match(/^function\s*([\w$]+)\s*\(/);
       name = nm?.[1] ?? null;
       // If we can't even get a name, skip this hit.
-      if (!name) { searchFrom = litIdx + 1; continue; }
+      if (!name) continue;
     }
 
     return { name, start: fnStart, end: closePos + 1 };
   }
   return null;
-}
-
-/**
- * Find the position of the closing brace that matches the opening brace at
- * `openPos` in `code`. Correctly skips string literals (single, double, template)
- * and single-line comments so brace counts are not confused by `{` or `}` inside
- * strings or comments.
- *
- * @param {string} code
- * @param {number} openPos - index of the opening `{`
- * @returns {number} index of the matching `}`, or -1 if not found
- */
-function findClosingBrace(code, openPos) {
-  let depth = 1;
-  let i = openPos + 1;
-  while (i < code.length && depth > 0) {
-    const c = code[i];
-    if (c === '"' || c === "'") {
-      // Skip string literal.
-      i++;
-      while (i < code.length) {
-        if (code[i] === '\\') { i += 2; continue; }
-        if (code[i] === c) { i++; break; }
-        i++;
-      }
-      continue;
-    }
-    if (c === '`') {
-      // Skip template literal (no nested ${ handling needed for minified code).
-      i++;
-      while (i < code.length) {
-        if (code[i] === '\\') { i += 2; continue; }
-        if (code[i] === '`') { i++; break; }
-        i++;
-      }
-      continue;
-    }
-    if (c === '/' && code[i + 1] === '/') {
-      // Skip single-line comment.
-      const nl = code.indexOf('\n', i + 2);
-      i = nl === -1 ? code.length : nl + 1;
-      continue;
-    }
-    if (c === '{') depth++;
-    else if (c === '}') depth--;
-    i++;
-  }
-  return depth === 0 ? i - 1 : -1;
 }
