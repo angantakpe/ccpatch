@@ -30,7 +30,10 @@
     "lint:unused": "knip",
     "lint:unused:fix": "knip --fix",
     "lint:unused:prod": "knip --production --strict",
-    "lint": "npm run lint:dead && npm run lint:unused",
+    "lint:types": "node scripts/gen-types.mjs && tsc --noEmit --strict types/patch.d.ts",
+    "lint:declarative": "node scripts/check-declarative.mjs",
+    "lint": "npm run lint:dead && npm run lint:unused && npm run lint:types && npm run lint:declarative",
+    "gen:types": "node scripts/gen-types.mjs",
     "tui": "node bin/patch-tui.mjs"
   },
   "dependencies": {
