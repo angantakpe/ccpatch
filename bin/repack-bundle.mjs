@@ -118,7 +118,7 @@ function findJsRegion(buffer) {
 /**
  * Normalise the patched JS to the format that Bun stores in the binary:
  *
- *   - Rejects files transformed to Node.js ESM format (by esm_compat / fix_bun_shim
+ *   - Rejects files transformed to Node.js ESM format (by esm_compat / bun_shim
  *     patches). Those patches rewrite the CJS wrapper into ESM with `import` statements
  *     and __hm_* shims, which Bun cannot embed. A clear error is thrown.
  *   - Validates the file starts with the Bun CJS wrapper opener.
@@ -129,15 +129,15 @@ function findJsRegion(buffer) {
  * Returns the normalised text string ready for Buffer conversion and embedding.
  */
 function normalisePatchedJs(text) {
-  // Detect Node.js ESM-transformed form produced by esm_compat / fix_bun_shim.
+  // Detect Node.js ESM-transformed form produced by esm_compat / bun_shim.
   // The transformed file may start with a leading newline before the `import` statement.
   if (/^\s*import\s+[\w{]/.test(text)) {
     throw new Error(
-      'The patched JS file has been transformed by the esm_compat or fix_bun_shim patches ' +
+      'The patched JS file has been transformed by the esm_compat or bun_shim patches ' +
       '(it starts with `import ...` instead of `(function(exports,...)`). ' +
       'These patches rewrite the CJS wrapper for Node.js compatibility and produce output ' +
       'that cannot be embedded in a Bun SEA binary. ' +
-      'To use patch-claude-code-native, disable esm_compat and fix_bun_shim in ccpatch.yml ' +
+      'To use patch-claude-code-native, disable esm_compat and bun_shim in ccpatch.yml ' +
       'before running the patch step, or pass PATCH= with a list that excludes those patches.'
     );
   }

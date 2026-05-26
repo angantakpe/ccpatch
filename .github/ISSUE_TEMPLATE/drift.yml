@@ -24,7 +24,7 @@ body:
     id: patch-name
     attributes:
       label: Affected patch(es)
-      placeholder: "fix_message_normalizer, expose_tool_dispatch"
+      placeholder: "message_normalizer, expose_tool_dispatch"
     validations:
       required: true
   - type: textarea

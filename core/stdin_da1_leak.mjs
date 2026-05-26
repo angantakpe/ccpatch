@@ -1,5 +1,5 @@
 /**
- * fix_stdin_da1_leak — Strip terminal Device Attributes (DA1) responses from
+ * stdin_da1_leak — Strip terminal Device Attributes (DA1) responses from
  * stdin before Ink's key handler reads them.
  *
  * Root cause:
@@ -21,7 +21,7 @@
 const block = `var __ccpFixStdinDA1Installed=true;(function(){try{var __ccpDA1Re=/\\x1b\\[[?>][0-9;]*c/g;var __ccpStdinEmit=process.stdin.emit.bind(process.stdin);process.stdin.emit=function(event,data){if(event==='data'&&data!=null){var str=Buffer.isBuffer(data)?data.toString('binary'):(typeof data==='string'?data:null);if(str&&__ccpDA1Re.test(str)){__ccpDA1Re.lastIndex=0;var filtered=str.replace(__ccpDA1Re,'');if(!filtered)return false;data=Buffer.isBuffer(data)?Buffer.from(filtered,'binary'):filtered;}__ccpDA1Re.lastIndex=0;}return __ccpStdinEmit(event,data);};}catch(e){}})();`;
 
 export default {
-  name: 'fix_stdin_da1_leak',
+  name: 'stdin_da1_leak',
   category: 'fix',
   description: 'Strip terminal DA1/DA2 responses from stdin to prevent escape-key + garbage-text split in Ink input.',
   capabilities: [],
@@ -38,7 +38,7 @@ export default {
     if (code.includes(SHEBANG)) {
       const shebangIdx = code.indexOf(SHEBANG);
       const afterShebang = code.indexOf('\n', shebangIdx) + 1;
-      console.log('  [fix_stdin_da1_leak] stdin DA1 filter installed (shebang anchor)');
+      console.log('  [stdin_da1_leak] stdin DA1 filter installed (shebang anchor)');
       return code.slice(0, afterShebang) + block + '\n' + code.slice(afterShebang);
     }
 
@@ -49,11 +49,11 @@ export default {
     const m = code.match(cjsAnchor);
     if (m) {
       const insertAt = m.index + m[0].length;
-      console.log('  [fix_stdin_da1_leak] stdin DA1 filter installed (CJS wrapper anchor)');
+      console.log('  [stdin_da1_leak] stdin DA1 filter installed (CJS wrapper anchor)');
       return code.slice(0, insertAt) + block + code.slice(insertAt);
     }
 
-    console.warn('  [!] fix_stdin_da1_leak: no injection anchor found — stdin DA1 filter not installed');
+    console.warn('  [!] stdin_da1_leak: no injection anchor found — stdin DA1 filter not installed');
     return code;
   },
 };

@@ -38,7 +38,7 @@ export default {
     const window = ctx.appliedCode.slice(Math.max(0, idx - 120), idx);
     if (!/function [A-Za-z_$][\w$]*\(H\)\{$/.test(window)) {
       ctx.logger.warn(
-        `  [hook] fix_message_normalizer.onAfterApply: guard "${sentinel}" did not land at the normalizer head (left-neighbour: ${JSON.stringify(window.slice(-60))})`,
+        `  [hook] message_normalizer.onAfterApply: guard "${sentinel}" did not land at the normalizer head (left-neighbour: ${JSON.stringify(window.slice(-60))})`,
       );
     }
   },
@@ -58,20 +58,20 @@ export default {
       const anchor = `function ${fn}(H){if(H.type==="progress"||H.type==="attachment"||H.type==="system")return!0;if(typeof H.message.content`;
       const replacement = `function ${fn}(H){if(!H)return!1;if(H.type==="progress"||H.type==="attachment"||H.type==="system")return!0;if(!H.message)return!0;if(typeof H.message.content`;
       result = result.replace(anchor, replacement);
-      console.log(`  [+] fix_message_normalizer: ${fn}() null-element and missing-.message guards`);
+      console.log(`  [+] message_normalizer: ${fn}() null-element and missing-.message guards`);
     } else {
-      console.warn(`  [!] fix_message_normalizer: display-item normalizer anchor not found — skipping`);
+      console.warn(`  [!] message_normalizer: display-item normalizer anchor not found — skipping`);
     }
 
     for (const { name, anchor, replacement } of literalPatches) {
       if (!result.includes(anchor)) {
         console.warn(
-          `  [!] fix_message_normalizer: "${name}" anchor not found — skipping`,
+          `  [!] message_normalizer: "${name}" anchor not found — skipping`,
         );
         continue;
       }
       result = result.replace(anchor, replacement);
-      console.log(`  [+] fix_message_normalizer: ${name}`);
+      console.log(`  [+] message_normalizer: ${name}`);
     }
     return result;
   },

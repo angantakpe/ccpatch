@@ -31,7 +31,7 @@ export const HELP = Object.freeze({
     '  --quiet                  Alias for --log-level=error\n' +
     '  --help                   Show this message\n' +
     '\n' +
-    'Profiles: --profile=native auto-excludes esm_compat + fix_bun_shim so the\n' +
+    'Profiles: --profile=native auto-excludes esm_compat + bun_shim so the\n' +
     'output can be repacked into a Bun single-executable.',
 
   capabilities:

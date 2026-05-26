@@ -93,7 +93,7 @@ test('boot — no uncaught-exception markers in stderr during init', async (t) =
 
   const { stderr } = await runPatched(binPath, ['--version']);
 
-  // Patches log status lines like "[fix_bun_shim] ..." to stderr — that's fine.
+  // Patches log status lines like "[bun_shim] ..." to stderr — that's fine.
   // What we don't want: V8 uncaught-exception frames or "ReferenceError: X is
   // not defined" at module-init time (a hallmark of a shim that referenced a
   // missing global).

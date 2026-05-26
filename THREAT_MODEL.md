@@ -23,10 +23,10 @@ Columns:
 | `esm_compat` | CJS-IIFE wrapper | n/a | None | on |
 | `contracts` | typed `__ccp*` registry surface | n/a | None | on |
 | `fetch_interceptor` | global `fetch` | every outgoing CLI HTTP request | fans out to in-process subscribers only; no I/O of its own | on |
-| `fix_bun_shim` | Bun runtime polyfills | n/a | None | on |
-| `fix_stdin_da1_leak` | stdin handler | terminal stdin | strips DA1/DA2 escape sequences in-process | on |
-| `fix_message_normalizer` | display-item type guard | conversation display items | None | on |
-| `fix_project_root` | projectRoot resolver | cwd / env | None | on |
+| `bun_shim` | Bun runtime polyfills | n/a | None | on |
+| `stdin_da1_leak` | stdin handler | terminal stdin | strips DA1/DA2 escape sequences in-process | on |
+| `message_normalizer` | display-item type guard | conversation display items | None | on |
+| `project_root` | projectRoot resolver | cwd / env | None | on |
 | `tool_result_error_content` | tool_result block builder | tool error blocks | None | on |
 
 ### Extensions — fixes & QoL
@@ -35,8 +35,8 @@ Columns:
 | --- | --- | --- | --- | --- |
 | `dotenv_loader` | early boot | local `.env` files | sets `process.env`; no network | off |
 | `hook_noise_mute` | hook stderr writer | hook stderr | swallows known-noisy lines | off |
-| `fix_cache_ttl` | prompt-cache TTL selector | n/a | None | off |
-| `fix_grep_shadow` | grep/find shadow injector | n/a | None | off |
+| `cache_ttl` | prompt-cache TTL selector | n/a | None | off |
+| `grep_shadow` | grep/find shadow injector | n/a | None | off |
 | `rate_limit` | retry / Retry-After logic | API response headers | None | off |
 | `large_content_guard` | system-message content sizer | system messages | None | off |
 | `recap_strip_hint` | recap renderer | recap text | None | off |
@@ -149,7 +149,7 @@ Any high-risk patch whose capabilities aren't fully covered by `--allow-capabili
 Three options, any of them is fine:
 
 - Edit `ccpatch.yml`: set the patch to `false` or comment the line out, then re-run `make patch-claude-code`.
-- Pass an explicit list that excludes it: `make patch-claude-code PATCH=fix_bun_shim,react_singleton,esm_compat,contracts,fetch_interceptor`.
+- Pass an explicit list that excludes it: `make patch-claude-code PATCH=bun_shim,react_singleton,esm_compat,contracts,fetch_interceptor`.
 - Use `--profile minimal` _(coming)_ to apply only `core/` infrastructure and bug fixes.
 
 To audit what was actually injected, run `node bin/patch-cli.mjs <input.js> /tmp/out.js --dry-run` and read the diff.

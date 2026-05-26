@@ -3,8 +3,8 @@
  *
  * Layout:
  *   core/
- *     fix_bun_shim.mjs                 # default / fallback
- *     fix_bun_shim/
+ *     bun_shim.mjs                 # default / fallback
+ *     bun_shim/
  *       2.1.148.mjs                    # used when bundle is exactly 2.1.148
  *       >=2.1.150.mjs                  # used when bundle is >= 2.1.150
  *       >=2.1.150,<2.2.0.mjs           # range with both bounds

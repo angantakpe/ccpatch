@@ -26,7 +26,7 @@ export default {
 
     const anchor = /"--ignore-files"/;
     if (!anchor.test(code)) {
-      console.warn('  [!] fix_grep_shadow: anchor "--ignore-files" not found — skipping');
+      console.warn('  [!] grep_shadow: anchor "--ignore-files" not found — skipping');
       return code;
     }
 
@@ -44,12 +44,12 @@ export default {
     const returnPattern = /return\["unalias find[^"]*","unalias grep[^"]*",\w+\([\s\S]*?"--ignore-files"[\s\S]*?\]\.join\(`[\s\S]*?`\)/;
     const match = code.match(returnPattern);
     if (!match) {
-      console.warn('  [!] fix_grep_shadow: return pattern not matched — skipping');
+      console.warn('  [!] grep_shadow: return pattern not matched — skipping');
       return code;
     }
 
     const patched = code.replace(match[0], 'return null');
-    console.log('  [fix_grep_shadow] PN_() patched to return null — grep/find shadow injection disabled');
+    console.log('  [grep_shadow] PN_() patched to return null — grep/find shadow injection disabled');
     return patched;
   },
 };

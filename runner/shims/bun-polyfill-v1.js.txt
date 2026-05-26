@@ -375,12 +375,12 @@ if (typeof globalThis.Bun === 'undefined') {
         plugin:               function() {},
       };
 
-      console.log('  [fix_bun_shim] globalThis.Bun polyfill installed (Node.js runtime)');
+      console.log('  [bun_shim] globalThis.Bun polyfill installed (Node.js runtime)');
     })();
   } catch (__ccpBunShimErr) {
     // Non-fatal: if the shim itself fails, warn and continue. The bundle may
     // still crash later, but this prevents a silent failure.
-    console.warn('  [fix_bun_shim] WARNING: Bun polyfill setup failed:', __ccpBunShimErr.message);
+    console.warn('  [bun_shim] WARNING: Bun polyfill setup failed:', __ccpBunShimErr.message);
   }
 }
 

@@ -5,14 +5,14 @@
 // that path:
 //   - esm_compat   — rewrites the CJS IIFE wrapper to ESM, which Bun's SEA
 //                    packer cannot re-bundle.
-//   - fix_bun_shim — injects a Bun polyfill that conflicts with the runtime
+//   - bun_shim — injects a Bun polyfill that conflicts with the runtime
 //                    Bun already provides in the SEA host.
 //
 // Rather than make every consumer remember to exclude these, we drop them
 // here whenever profile === 'native'. The build path logs a single
 // "[native] auto-excluded …" line so users see what happened.
 
-export const NATIVE_INCOMPATIBLE_PATCHES = Object.freeze(['esm_compat', 'fix_bun_shim']);
+export const NATIVE_INCOMPATIBLE_PATCHES = Object.freeze(['esm_compat', 'bun_shim']);
 
 /**
  * Given the resolved list of patches to apply and the active profile name,

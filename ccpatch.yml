@@ -12,7 +12,7 @@
 #                 env: [CC_FOO]
 #
 # make override (bypasses this file entirely):
-#   make patch-claude-code PATCH=fetch_interceptor,fix_bun_shim,...
+#   make patch-claude-code PATCH=fetch_interceptor,bun_shim,...
 #
 # Strict mode (CI/release):
 #   pass --strict to patch-cli.mjs or set CCPATCH_STRICT=1 — fails the build
@@ -32,7 +32,8 @@ version: 1
 # ──────────────────────────────────────────────────────────────────────────────
 ack:
   fetch_interceptor: [network]
-  fix_bun_shim: [env, network]
+  bun_shim: [env, network]
+  project_root: [env]
   tool_result_error_content: [network]
 
 patches:
@@ -51,10 +52,10 @@ patches:
   fetch_interceptor: true         # fan-out fetch tee — required by tool_result_error_content and extensions
 
   # ── Bug Fixes ───────────────────────────────────────────────────────────────
-  fix_bun_shim: true              # required — Bun polyfill so bundle runs in Node.js
-  fix_stdin_da1_leak: true        # strip DA1/DA2 escape sequences from stdin
-  fix_message_normalizer: true    # guard display-item type crashes
-  fix_project_root: true          # projectRoot fallback so .cc/commands/ loads
+  bun_shim: true              # required — Bun polyfill so bundle runs in Node.js
+  stdin_da1_leak: true        # strip DA1/DA2 escape sequences from stdin
+  message_normalizer: true    # guard display-item type crashes
+  project_root: true          # projectRoot fallback so .cc/commands/ loads
   tool_result_error_content: true # Anthropic API requires non-empty content on is_error blocks
 
   # ════════════════════════════════════════════════════════════════════════════
@@ -64,8 +65,8 @@ patches:
   # ── Fixes (opinionated) ─────────────────────────────────────────────────────
   dotenv_loader: false       # load .env before any patch runs
   hook_noise_mute: false     # suppress known-noisy hook stderr chatter
-  fix_cache_ttl: false       # always 1h prompt-cache TTL (disables telemetry downgrade)
-  fix_grep_shadow: false     # disable grep/find shadow injection (ugrep compat)
+  cache_ttl: false       # always 1h prompt-cache TTL (disables telemetry downgrade)
+  grep_shadow: false     # disable grep/find shadow injection (ugrep compat)
   rate_limit: false          # skip retries on subscription limits, cap Retry-After at 30s
   large_content_guard: false # truncate oversized system-message content before terminal crash
   recap_strip_hint: false    # remove "(disable recaps in /config)" hint from recaps
@@ -157,10 +158,10 @@ profiles:
     - contracts
     - overlay_loader
     - fetch_interceptor
-    - fix_bun_shim
-    - fix_stdin_da1_leak
-    - fix_message_normalizer
-    - fix_project_root
+    - bun_shim
+    - stdin_da1_leak
+    - message_normalizer
+    - project_root
     - tool_result_error_content
     - subagent_hooks_stub
 
@@ -171,10 +172,10 @@ profiles:
     - contracts
     - overlay_loader
     - fetch_interceptor
-    - fix_bun_shim
-    - fix_stdin_da1_leak
-    - fix_message_normalizer
-    - fix_project_root
+    - bun_shim
+    - stdin_da1_leak
+    - message_normalizer
+    - project_root
     - tool_result_error_content
     - subagent_hooks_stub
     - input_bar_color
@@ -201,15 +202,15 @@ profiles:
     - contracts
     - overlay_loader
     - fetch_interceptor
-    - fix_bun_shim
-    - fix_stdin_da1_leak
-    - fix_message_normalizer
-    - fix_project_root
+    - bun_shim
+    - stdin_da1_leak
+    - message_normalizer
+    - project_root
     - tool_result_error_content
     - dotenv_loader
     - hook_noise_mute
-    - fix_cache_ttl
-    - fix_grep_shadow
+    - cache_ttl
+    - grep_shadow
     - rate_limit
     - large_content_guard
     - recap_strip_hint
@@ -250,10 +251,10 @@ profiles:
     - contracts
     - overlay_loader
     - fetch_interceptor
-    - fix_bun_shim
-    - fix_stdin_da1_leak
-    - fix_message_normalizer
-    - fix_project_root
+    - bun_shim
+    - stdin_da1_leak
+    - message_normalizer
+    - project_root
     - tool_result_error_content
     - subagent_hooks_stub
     - event_bus
@@ -271,7 +272,7 @@ profiles:
     - headless_bridge
 
   daemon_native:
-    # Same as `daemon`, minus esm_compat + fix_bun_shim. Use this for the
+    # Same as `daemon`, minus esm_compat + bun_shim. Use this for the
     # native-binary repack path (patch-claude-code-native) where those two
     # rewrite the CJS wrapper into ESM `import` form that can't be re-embedded
     # back into the Bun SEA binary.
@@ -279,9 +280,9 @@ profiles:
     - contracts
     - overlay_loader
     - fetch_interceptor
-    - fix_stdin_da1_leak
-    - fix_message_normalizer
-    - fix_project_root
+    - stdin_da1_leak
+    - message_normalizer
+    - project_root
     - tool_result_error_content
     - subagent_hooks_stub
     - event_bus
@@ -300,10 +301,10 @@ profiles:
     - contracts
     - overlay_loader
     - fetch_interceptor
-    - fix_bun_shim
-    - fix_stdin_da1_leak
-    - fix_message_normalizer
-    - fix_project_root
+    - bun_shim
+    - stdin_da1_leak
+    - message_normalizer
+    - project_root
     - tool_result_error_content
     - subagent_hooks_stub
     - event_bus

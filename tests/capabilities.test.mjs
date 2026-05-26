@@ -202,7 +202,7 @@ import path from 'node:path';
 function makeFixture() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ccpatch-caps-'));
   const inputPath = path.join(dir, 'in.js');
-  // Minimal CJS-IIFE so required patches (overlay_loader, contracts, fix_bun_shim)
+  // Minimal CJS-IIFE so required patches (overlay_loader, contracts, bun_shim)
   // find their boot anchor and apply silently instead of printing [!] warnings.
   fs.writeFileSync(inputPath, '(function(exports, require, module, __filename, __dirname) {/* dummy */\n});\n');
   return { dir, inputPath, outputPath: path.join(dir, 'out.js') };
@@ -390,7 +390,7 @@ describe('Track B CLI ack gate', () => {
       'version: 1\nack:\n' +
       '  webhook: [network, env]\n' +
       '  fetch_interceptor: [network]\n' +
-      '  fix_bun_shim: [env, network]\n' +
+      '  bun_shim: [env, network]\n' +
       '  tool_result_error_content: [network]\n',
     );
     const logger = captureLogger();

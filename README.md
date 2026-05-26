@@ -57,7 +57,7 @@ make patch-claude-code VERSION=2.1.148 OUTPUT=./my-cli.js
 Override the YAML and apply an explicit list of patches:
 
 ```
-make patch-claude-code PATCH=fetch_interceptor,fix_bun_shim,cost_tracker
+make patch-claude-code PATCH=fetch_interceptor,bun_shim,cost_tracker
 ```
 
 Preview the diff without writing the output:
@@ -78,7 +78,7 @@ Patch a native (Bun-compiled) Claude Code binary end-to-end:
 make patch-claude-code-native VERSION=2.1.148
 ```
 
-> **Prerequisite:** `esm_compat` and `fix_bun_shim` must be disabled in `ccpatch.yml` (or excluded from `PATCH=`) before running the native pipeline. Those patches rewrite the CJS wrapper for Node.js and produce output that cannot be embedded back into a Bun SEA binary.
+> **Prerequisite:** `esm_compat` and `bun_shim` must be disabled in `ccpatch.yml` (or excluded from `PATCH=`) before running the native pipeline. Those patches rewrite the CJS wrapper for Node.js and produce output that cannot be embedded back into a Bun SEA binary.
 
 Run the patch verification test suite:
 
@@ -107,8 +107,8 @@ The current patch set, grouped by intent. Full list and toggles live in `ccpatch
 | Category | Patches |
 | --- | --- |
 | **Infrastructure** (`core/`) | `react_singleton`, `esm_compat`, `contracts`, `fetch_interceptor` |
-| **Bug fixes** (`core/`) | `fix_bun_shim`, `fix_stdin_da1_leak`, `fix_message_normalizer`, `fix_project_root`, `tool_result_error_content` |
-| **Fixes / QoL** (`extensions/`) | `dotenv_loader`, `hook_noise_mute`, `fix_cache_ttl`, `fix_grep_shadow`, `rate_limit`, `large_content_guard`, `recap_strip_hint`, `input_bar_color` |
+| **Bug fixes** (`core/`) | `bun_shim`, `stdin_da1_leak`, `message_normalizer`, `project_root`, `tool_result_error_content` |
+| **Fixes / QoL** (`extensions/`) | `dotenv_loader`, `hook_noise_mute`, `cache_ttl`, `grep_shadow`, `rate_limit`, `large_content_guard`, `recap_strip_hint`, `input_bar_color` |
 | **Feature unlocks** | `durable_cron`, `loop_dynamic`, `plan_mode_interview` _(no-op on recent versions — upstream removed the flag)_, `unhide_features`, `extended_thinking`, `force_thinking`, `mcp_lazy` |
 | **Command system** | `custom_commands`, `slash_dispatch`, `subagent_hooks_stub` |
 | **Observability** | `cost_tracker`, `context_budget_warn`, `tool_result_trim`, `tools_log`, `boost_project_commands`, `session_timer`, `debug` |

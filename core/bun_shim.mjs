@@ -1,4 +1,4 @@
-// Patch: fix_bun_shim
+// Patch: bun_shim
 // Injects a globalThis.Bun polyfill so the extracted CJS bundle can run under
 // Node.js. Bun-compiled bundles call Bun.* APIs without typeof guards. This shim
 // provides Node.js equivalents for every Bun API the bundle actually invokes.
@@ -38,7 +38,7 @@ export default {
     const hasShebang = code.includes(SHEBANG);
     const hasCjsIife = code.includes(CJS_IIFE);
     if (!hasShebang && !hasCjsIife) {
-      console.warn('  [!] fix_bun_shim: neither shebang nor CJS-IIFE anchor found — skipping');
+      console.warn('  [!] bun_shim: neither shebang nor CJS-IIFE anchor found — skipping');
       return code;
     }
 

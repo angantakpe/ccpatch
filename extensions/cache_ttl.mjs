@@ -32,11 +32,11 @@ export default {
       );
       const match = code.match(pattern);
       if (!match) {
-        console.error('  [fix_cache_ttl] WARNING: DoY feature-flag tail not found — pattern may have changed. Patch skipped.');
+        console.error('  [cache_ttl] WARNING: DoY feature-flag tail not found — pattern may have changed. Patch skipped.');
         return code;
       }
       const fixed = code.replace(match[0], 'return!0}');
-      console.log('  [fix_cache_ttl] patched DoY() → always 1h TTL for eligible users (feature-flag gate removed)');
+      console.log('  [cache_ttl] patched DoY() → always 1h TTL for eligible users (feature-flag gate removed)');
       return fixed;
     }
   };

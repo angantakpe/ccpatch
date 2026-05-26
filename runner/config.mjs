@@ -33,7 +33,7 @@ export function readPatchFlags(yamlPath) {
  *
  *   ack:
  *     fetch_interceptor: [network]
- *     fix_bun_shim: [env, network]
+ *     bun_shim: [env, network]
  *
  * Returns { [patchName]: string[] } or null if absent/unreadable.
  */

@@ -62,7 +62,7 @@ jobs:
         # Fails if any enabled patch declares high-risk capabilities the
         # allowlist doesn't acknowledge. The allowlist below covers what
         # ccpatch.yml ships enabled by default (network for fetch_interceptor /
-        # tool_result_error_content, env for fix_bun_shim). If a future change
+        # tool_result_error_content, env for bun_shim). If a future change
         # turns on a patch that needs `tools`, `exec`, or `telemetry` by
         # default, this step will fail — that's the intended forcing function
         # for an explicit review.

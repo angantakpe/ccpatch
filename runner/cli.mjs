@@ -479,7 +479,7 @@ export async function runPatchCli(args, logger = console) {
   }
 
   // ── --profile=native filter ──────────────────────────────────────────────
-  // The Bun SEA repack path is incompatible with esm_compat and fix_bun_shim.
+  // The Bun SEA repack path is incompatible with esm_compat and bun_shim.
   // Drop them mechanically and log what happened so users aren't surprised.
   {
     const { patches: filtered, excluded } = applyNativeProfileFilter(patchesToApply, options.profile);

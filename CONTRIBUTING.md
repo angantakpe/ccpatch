@@ -302,8 +302,8 @@ When a patch needs a *different implementation* for a different Claude Code vers
 
 ```
 core/
-  fix_bun_shim.mjs                 # default / fallback
-  fix_bun_shim/
+  bun_shim.mjs                 # default / fallback
+  bun_shim/
     2.1.148.mjs                    # used when bundle is exactly 2.1.148
     >=2.1.150.mjs                  # used when bundle is >= 2.1.150
     >=2.1.150,<2.2.0.mjs           # half-open range
@@ -331,7 +331,7 @@ Any file in a version dir whose stem isn't a parseable version or range is a fat
 Every per-version variant file must declare a `testedAgainst` field whose value matches its filename stem:
 
 ```js
-// core/fix_bun_shim/2.1.148.mjs
+// core/bun_shim/2.1.148.mjs
 export default {
   description: '...',
   testedAgainst: ['2.1.148'],
@@ -635,12 +635,12 @@ export async function onVerifyFail(ctx)  { /* return string → retry verify */ 
 **Telemetry.** Every hook fire writes one JSONL line to `storage/outputs/patch-lifecycle.jsonl`:
 
 ```json
-{ "ts": "2026-05-22T...", "patch": "fix_message_normalizer",
+{ "ts": "2026-05-22T...", "patch": "message_normalizer",
   "hook": "onAfterApply", "attempt": 1, "phase": "main",
   "byteDelta": 412, "durationMs": 5 }
 ```
 
-Hooks that throw still produce an entry with an `error` field. See `core/fix_message_normalizer.mjs` for a real-world `onAfterApply` self-check.
+Hooks that throw still produce an entry with an `error` field. See `core/message_normalizer.mjs` for a real-world `onAfterApply` self-check.
 
 ---
 
