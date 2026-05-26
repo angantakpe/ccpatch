@@ -20,6 +20,21 @@
 # ──────────────────────────────────────────────────────────────────────────────
 version: 1
 
+# ──────────────────────────────────────────────────────────────────────────────
+# ack: — Capability acknowledgements (default-strict gate)
+#
+# Patches that declare `network`, `exec`, or `env` capabilities require an
+# explicit ack entry here before the build will proceed. By acknowledging a
+# capability you confirm you've read THREAT_MODEL.md for that patch and
+# understand the runtime privileges it claims.
+#
+# Pass --allow-unacked on the CLI to bypass this check (legacy warn-only mode).
+# ──────────────────────────────────────────────────────────────────────────────
+ack:
+  fetch_interceptor: [network]
+  fix_bun_shim: [env, network]
+  tool_result_error_content: [network]
+
 patches:
 
   # ════════════════════════════════════════════════════════════════════════════

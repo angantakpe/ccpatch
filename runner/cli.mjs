@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 
 import { loadPatches } from './loader.mjs';
 import { applyNamedPatches, resolvePatchNames } from './runner.mjs';
-import { readPatchFlags, readProfiles } from './config.mjs';
+import { readPatchFlags, readProfiles, readAcks } from './config.mjs';
 import { resolveProfile, classifyRisk, CAPABILITIES } from './manifest.mjs';
 import { probeAnchor, fuzzyMatch } from './anchors.mjs';
 import { compileKind } from './patch-kinds.mjs';
@@ -33,7 +33,7 @@ import {
 const REVERT_SIDECAR_VERSION = 1;
 
 const USAGE = 'Usage:\n' +
-  '  node patch-cli.mjs <input.js> <output.js> [--patch <name>] [--profile <name>] [--preload <preload.mjs>] [--strict] [--dry-run] [--write-on-clean] [--allow-capabilities <list>] [--dev]\n' +
+  '  node patch-cli.mjs <input.js> <output.js> [--patch <name>] [--profile <name>] [--preload <preload.mjs>] [--strict] [--dry-run] [--write-on-clean] [--allow-capabilities <list>] [--allow-unacked] [--dev]\n' +
   '  node patch-cli.mjs watch <input.js> <output.js> [--patch <name>] [--profile <name>] [--debounce <ms>]\n' +
   '  node patch-cli.mjs doctor <input.js> [--profile <name>] [--strict]\n' +
   '  node patch-cli.mjs revert <patched.js> [--output <restored.js>]\n' +
@@ -103,6 +103,51 @@ export function findGateViolations(patches, names, allow) {
     const missing = caps.filter(c => !allowSet.has(c));
     if (missing.length > 0) {
       violations.push({ name, capabilities: caps, risk, missing });
+    }
+  }
+  return violations;
+}
+
+/**
+ * Capabilities that require explicit acknowledgement (Track B default-strict).
+ * These are the high-impact capabilities a user MUST opt into per patch
+ * before the build will proceed.
+ */
+export const ACK_REQUIRED_CAPS = Object.freeze(['network', 'exec', 'env']);
+
+/**
+ * Given the patches selected for apply, a YAML `ack:` map, and an optional
+ * --allow-capabilities allow list, return the list of patches whose ack-required
+ * capabilities (network/exec/env) are not all covered.
+ *
+ * A patch's caps are covered if for every cap in ACK_REQUIRED_CAPS the patch
+ * declares, EITHER:
+ *   - the YAML `ack:` entry for that patch lists the cap (or `*`/`true`), OR
+ *   - the --allow-capabilities flag covers the cap (set or `all`).
+ */
+export function findUnackedAckRequired(patches, names, acks, allow) {
+  const ackMap = acks || {};
+  const violations = [];
+  for (const name of names) {
+    const p = patches[name];
+    if (!p) continue;
+    const caps = Array.isArray(p.capabilities) ? p.capabilities : [];
+    const ackTargets = caps.filter(c => ACK_REQUIRED_CAPS.includes(c));
+    if (ackTargets.length === 0) continue;
+    const ackedRaw = ackMap[name];
+    const ackedAll = Array.isArray(ackedRaw) && ackedRaw.includes('*');
+    const ackedSet = new Set(Array.isArray(ackedRaw) ? ackedRaw : []);
+    const allowAll = !!(allow && allow.all);
+    const allowSet = allow ? allow.set : new Set();
+    const missing = ackTargets.filter(c => {
+      if (ackedAll) return false;
+      if (ackedSet.has(c)) return false;
+      if (allowAll) return false;
+      if (allowSet.has(c)) return false;
+      return true;
+    });
+    if (missing.length > 0) {
+      violations.push({ name, capabilities: caps, missing });
     }
   }
   return violations;
@@ -286,6 +331,9 @@ export function parsePatchCliArgs(args) {
     } else if (args[i].startsWith('--allow-capabilities=')) {
       patchOptions.allowCapabilitiesRaw = args[i].slice('--allow-capabilities='.length);
     }
+    if (args[i] === '--allow-unacked') {
+      patchOptions.allowUnacked = true;
+    }
   }
   if (!patchOptions.strict && process.env.CCPATCH_STRICT === '1') {
     patchOptions.strict = true;
@@ -449,9 +497,11 @@ export async function runPatchCli(args, logger = console) {
   }
 
   // ── Capability gate ───────────────────────────────────────────────────────
-  // In strict mode, refuse to apply patches with `high`-risk capabilities
-  // unless the user has explicitly acknowledged them via --allow-capabilities.
-  // Non-strict mode: emit a warning but proceed.
+  // Track B (default-strict): patches with `network`, `exec`, or `env`
+  // capabilities require explicit acknowledgement via the `ack:` block in
+  // ccpatch.yml (or via --allow-capabilities). `--allow-unacked` restores
+  // legacy warn-and-proceed behaviour. Other high-risk caps (tools, telemetry)
+  // continue to follow the legacy strict-mode-only gate below.
   {
     const allow = parseAllowCapabilities(patchOptions.allowCapabilitiesRaw);
     if (allow && allow.unknown.length > 0) {
@@ -461,6 +511,41 @@ export async function runPatchCli(args, logger = console) {
       );
       return 1;
     }
+
+    // Default-strict ack gate for network/exec/env.
+    const ackYamlPath = path.resolve(process.cwd(), 'ccpatch.yml');
+    const acks = readAcks(ackYamlPath);
+    const ackViolations = findUnackedAckRequired(patches, patchesToApply, acks, allow);
+    if (ackViolations.length > 0) {
+      if (patchOptions.allowUnacked) {
+        const summary = ackViolations
+          .map(v => `  ${v.name.padEnd(28)} ${v.capabilities.join(', ')}  [unacked: ${v.missing.join(', ')}]`)
+          .join('\n');
+        logger.log(
+          `  [capabilities] WARN: ${ackViolations.length} patch(es) with unacked capabilities ` +
+          `(--allow-unacked set, proceeding):\n${summary}`
+        );
+      } else {
+        const first = ackViolations[0];
+        const yamlSnippet =
+          `  ack:\n` +
+          `    ${first.name}: [${first.missing.join(', ')}]`;
+        logger.error(
+          `Patch "${first.name}" needs capability ack. Add to ccpatch.yml:\n` +
+          `${yamlSnippet}\n` +
+          `Or pass --allow-unacked to skip this check.`
+        );
+        if (ackViolations.length > 1) {
+          const rest = ackViolations.slice(1)
+            .map(v => `  ${v.name}: [${v.missing.join(', ')}]`)
+            .join('\n');
+          logger.error(`Additional unacked patch(es):\n${rest}`);
+        }
+        return 1;
+      }
+    }
+
+    // Legacy strict-mode-only gate for the broader high-risk set.
     const violations = findGateViolations(patches, patchesToApply, allow);
     if (violations.length > 0) {
       const summary = violations
