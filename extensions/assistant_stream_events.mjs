@@ -18,7 +18,7 @@ export default {
   description: 'Re-emit Anthropic SSE message events to __ccpBus.',
   capabilities: ['telemetry'],
   dependsOn: ['fetch_interceptor', 'event_bus'],
-  verify: { present: '__ccpAssistantStream_v1', count: { present: 1 } },
+  verify: { present: '__ccpAssistantStream_v1', count: { present: 2 } },
   apply: (code) => {
     const hook = `
 // ══════════════════════════════════════════════════════════════════════════

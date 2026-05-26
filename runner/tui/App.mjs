@@ -4,7 +4,7 @@ import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import { Box, Text, useApp, useInput } from 'ink';
 
 import { loadPatches } from '../loader.mjs';
-import { readPatchFlags, readProfiles, readAcks } from '../config.mjs';
+import { readPatchFlags, readAcks } from '../config.mjs';
 import { PROJECT_ROOT } from '../paths.mjs';
 import { PatchList } from './PatchList.mjs';
 import { Detail } from './Detail.mjs';
