@@ -129,7 +129,7 @@ describe('version-resolver: missing default + no matching range throws', () => {
       const dir = path.join(tmp, 'only_versioned');
       fs.mkdirSync(dir, { recursive: true });
       fs.writeFileSync(path.join(dir, '>=2.1.150.mjs'),
-        'export default { description: "x", testedAgainst: [">=2.1.150"], verify: { present: "x" }, apply: c => c };\n');
+        'export default { description: "x", testedAgainst: [">=2.1.150"], verify: { present: "x", weak: true }, apply: c => c };\n');
       assert.throws(
         () => resolvePatchFile(tmp, 'only_versioned', '2.1.100'),
         /no default.*no version variant matches/s,
@@ -145,7 +145,7 @@ describe('version-resolver: missing default + no matching range throws', () => {
       const dir = path.join(tmp, 'bad');
       fs.mkdirSync(dir, { recursive: true });
       fs.writeFileSync(path.join(dir, 'not-a-version.mjs'),
-        'export default { description: "x", verify: { present: "x" }, apply: c => c };\n');
+        'export default { description: "x", verify: { present: "x", weak: true }, apply: c => c };\n');
       assert.throws(
         () => scanVariantDir(dir),
         /unparseable version stem/,
@@ -160,7 +160,7 @@ describe('manifest: testedAgainst validation', () => {
   it('rejects per-version variant without testedAgainst', () => {
     const mod = {
       description: 'x',
-      verify: { present: 'x' },
+      verify: { present: 'x', weak: true },
       apply: () => '',
     };
     const { ok, errors } = validateManifest(mod, '2.1.148.mjs', { variant: '2.1.148' });
@@ -172,7 +172,7 @@ describe('manifest: testedAgainst validation', () => {
     const mod = {
       description: 'x',
       testedAgainst: ['2.1.149'],
-      verify: { present: 'x' },
+      verify: { present: 'x', weak: true },
       apply: () => '',
     };
     const { ok, errors } = validateManifest(mod, '2.1.148.mjs', { variant: '2.1.148' });
@@ -187,7 +187,7 @@ describe('manifest: testedAgainst validation', () => {
     const mod = {
       description: 'x',
       testedAgainst: ['2.1.148'],
-      verify: { present: 'x' },
+      verify: { present: 'x', weak: true },
       apply: () => '',
     };
     const { ok, errors, normalized } = validateManifest(mod, '2.1.148.mjs', { variant: '2.1.148' });
@@ -200,7 +200,7 @@ describe('manifest: testedAgainst validation', () => {
     const mod = {
       description: 'x',
       testedAgainst: ['>=2.1.150'],
-      verify: { present: 'x' },
+      verify: { present: 'x', weak: true },
       apply: () => '',
     };
     const { ok, errors } = validateManifest(mod, '>=2.1.150.mjs', { variant: '>=2.1.150' });
@@ -210,7 +210,7 @@ describe('manifest: testedAgainst validation', () => {
   it('treats default-variant testedAgainst as optional', () => {
     const mod = {
       description: 'x',
-      verify: { present: 'x' },
+      verify: { present: 'x', weak: true },
       apply: () => '',
     };
     const { ok, errors } = validateManifest(mod, 'foo.mjs', { variant: 'default' });
@@ -221,7 +221,7 @@ describe('manifest: testedAgainst validation', () => {
     const mod = {
       description: 'x',
       testedAgainst: ['not-a-version'],
-      verify: { present: 'x' },
+      verify: { present: 'x', weak: true },
       apply: () => '',
     };
     const { ok, errors } = validateManifest(mod, 'foo.mjs');

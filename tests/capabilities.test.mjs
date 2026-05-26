@@ -17,7 +17,7 @@ describe('validateManifest — capabilities', () => {
   it('accepts the full set of known capabilities', () => {
     const mod = {
       description: 'ok',
-      verify: { present: 'x' },
+      verify: { present: 'x', weak: true },
       apply: () => '',
       capabilities: [...CAPABILITIES],
     };
@@ -30,7 +30,7 @@ describe('validateManifest — capabilities', () => {
   it('accepts an empty capabilities array', () => {
     const mod = {
       description: 'ok',
-      verify: { present: 'x' },
+      verify: { present: 'x', weak: true },
       apply: () => '',
       capabilities: [],
     };
@@ -41,7 +41,7 @@ describe('validateManifest — capabilities', () => {
   });
 
   it('defaults to empty when capabilities omitted', () => {
-    const mod = { description: 'ok', verify: { present: 'x' }, apply: () => '' };
+    const mod = { description: 'ok', verify: { present: 'x', weak: true }, apply: () => '' };
     const { ok, normalized } = validateManifest(mod, 'p.mjs');
     assert.equal(ok, true);
     assert.deepEqual(normalized.capabilities, []);
@@ -51,7 +51,7 @@ describe('validateManifest — capabilities', () => {
   it('rejects unknown capability values', () => {
     const mod = {
       description: 'ok',
-      verify: { present: 'x' },
+      verify: { present: 'x', weak: true },
       apply: () => '',
       capabilities: ['network', 'rocket-launch'],
     };
@@ -66,7 +66,7 @@ describe('validateManifest — capabilities', () => {
   it('rejects non-array capabilities', () => {
     const mod = {
       description: 'ok',
-      verify: { present: 'x' },
+      verify: { present: 'x', weak: true },
       apply: () => '',
       capabilities: 'network',
     };

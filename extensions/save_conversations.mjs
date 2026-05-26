@@ -8,7 +8,7 @@ export default {
 
     description: 'Auto-save all conversations to JSON file',
     capabilities: ["network","fs","env","telemetry"],
-    verify: { present: "'save_conversations'" },
+    verify: { present: "'save_conversations'", weak: true },
   dependsOn: ['fetch_interceptor'],
     apply: (code) => {
       const hook = `

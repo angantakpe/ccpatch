@@ -751,6 +751,11 @@ async function runDoctor(options, patches, logger) {
       ? { ...patch, apply: compileKind(patch) }
       : patch;
     const res = probeAnchor(probePatch, code);
+    if (patch.deprecated) {
+      const sinceStr = patch.deprecated.since ? ` (since ${patch.deprecated.since})` : '';
+      logger.log(`  DEPRECATED   ${name} — ${patch.deprecated.reason}${sinceStr}`);
+      continue;
+    }
     if (res.status === 'ok') {
       if (res.weak) {
         logger.log(`  UNVERIFIED   ${name} — verify only has 'present' (no absent/count); cannot detect wrong-location apply`);

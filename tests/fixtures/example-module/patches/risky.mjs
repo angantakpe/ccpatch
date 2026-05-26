@@ -2,6 +2,6 @@
 export default {
   description: 'example-module/risky — declares high-risk capabilities',
   capabilities: ['network', 'telemetry'],
-  verify: { present: 'EX-MOD-RISKY' },
+  verify: { present: 'EX-MOD-RISKY', weak: true },
   apply: (code) => code + ' EX-MOD-RISKY',
 };

@@ -42,7 +42,7 @@ describe('manifest: coverageMarker validation', () => {
     return {
       description: 'x',
       apply: (c) => c + '+',
-      verify: { present: '+' },
+      verify: { present: '+', weak: true },
       ...extra,
     };
   }
@@ -84,7 +84,7 @@ describe('apply-time coverage manifest', () => {
       good: {
         description: 'g',
         apply: (c) => c + '+good',
-        verify: { present: '+good' },
+        verify: { present: '+good', weak: true },
       },
       noop: {
         description: 'n',
@@ -95,7 +95,7 @@ describe('apply-time coverage manifest', () => {
       drifted: {
         description: 'd',
         apply: (c) => c,
-        verify: { present: 'wont-appear' },
+        verify: { present: 'wont-appear', weak: true },
       },
     };
     await applyNamedPatches('seed', patches, ['good', 'noop', 'drifted'], silent, { version: '9.9.9' });
@@ -112,7 +112,7 @@ describe('apply-time coverage manifest', () => {
   }));
 
   it('falls back to coverage-apply-unknown.json when no version provided', withTmpCwd(async (tmp) => {
-    const patches = { p: { description: 'p', apply: (c) => c + '!', verify: { present: '!' } } };
+    const patches = { p: { description: 'p', apply: (c) => c + '!', verify: { present: '!', weak: true } } };
     await applyNamedPatches('x', patches, ['p'], silent);
     const file = path.join(tmp, 'storage/outputs/coverage-apply-unknown.json');
     assert.ok(fs.existsSync(file));
@@ -152,7 +152,7 @@ describe('auto-injection of __ccpCovHit at apply time', () => {
       marked: {
         description: 'marked',
         apply: (c) => c + '\n/* INJECT */ console.log("did-thing");\n',
-        verify: { present: 'did-thing' },
+        verify: { present: 'did-thing', weak: true },
         coverageMarker: 'marked-hit',
       },
     };

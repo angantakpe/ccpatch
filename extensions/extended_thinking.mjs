@@ -3,7 +3,7 @@ export default {
 
   description: 'Inject thinking/effort config into API requests via CC_THINKING and CC_EFFORT_LEVEL env vars',
   capabilities: ["network","prompt","env"],
-  verify: { present: '__ccpIsComplexPrompt' },
+  verify: { present: '__ccpIsComplexPrompt', weak: true },
   dependsOn: ['fetch_interceptor'],
   apply: (code) => {
     const hook = `

@@ -31,7 +31,7 @@ function mkPatch({ description = 't', apply, verify, dependsOn, priority, phase,
 describe('manifest — priority', () => {
   it('accepts a finite integer priority', () => {
     const { ok, normalized } = validateManifest(
-      { description: 'x', apply: (c) => c + '1', verify: { present: '1' }, priority: 50 },
+      { description: 'x', apply: (c) => c + '1', verify: { present: '1', weak: true }, priority: 50 },
       'p.mjs',
     );
     assert.equal(ok, true);
@@ -40,7 +40,7 @@ describe('manifest — priority', () => {
 
   it('defaults priority to 1000 when omitted', () => {
     const { ok, normalized } = validateManifest(
-      { description: 'x', apply: (c) => c + '1', verify: { present: '1' } },
+      { description: 'x', apply: (c) => c + '1', verify: { present: '1', weak: true } },
       'p.mjs',
     );
     assert.equal(ok, true);
@@ -49,7 +49,7 @@ describe('manifest — priority', () => {
 
   it('rejects non-integer priority (float)', () => {
     const { ok, errors } = validateManifest(
-      { description: 'x', apply: (c) => c + '1', verify: { present: '1' }, priority: 1.5 },
+      { description: 'x', apply: (c) => c + '1', verify: { present: '1', weak: true }, priority: 1.5 },
       'p.mjs',
     );
     assert.equal(ok, false);
@@ -58,7 +58,7 @@ describe('manifest — priority', () => {
 
   it('rejects non-integer priority (string)', () => {
     const { ok, errors } = validateManifest(
-      { description: 'x', apply: (c) => c + '1', verify: { present: '1' }, priority: '5' },
+      { description: 'x', apply: (c) => c + '1', verify: { present: '1', weak: true }, priority: '5' },
       'p.mjs',
     );
     assert.equal(ok, false);
@@ -69,7 +69,7 @@ describe('manifest — priority', () => {
 describe('manifest — allowOverlapWith', () => {
   it('accepts a string array', () => {
     const { ok, normalized } = validateManifest(
-      { description: 'x', apply: (c) => c + '1', verify: { present: '1' }, allowOverlapWith: ['other'] },
+      { description: 'x', apply: (c) => c + '1', verify: { present: '1', weak: true }, allowOverlapWith: ['other'] },
       'p.mjs',
     );
     assert.equal(ok, true);
@@ -78,7 +78,7 @@ describe('manifest — allowOverlapWith', () => {
 
   it('rejects non-array', () => {
     const { ok, errors } = validateManifest(
-      { description: 'x', apply: (c) => c + '1', verify: { present: '1' }, allowOverlapWith: 'foo' },
+      { description: 'x', apply: (c) => c + '1', verify: { present: '1', weak: true }, allowOverlapWith: 'foo' },
       'p.mjs',
     );
     assert.equal(ok, false);
@@ -87,7 +87,7 @@ describe('manifest — allowOverlapWith', () => {
 
   it('rejects array containing non-string', () => {
     const { ok, errors } = validateManifest(
-      { description: 'x', apply: (c) => c + '1', verify: { present: '1' }, allowOverlapWith: ['ok', 42] },
+      { description: 'x', apply: (c) => c + '1', verify: { present: '1', weak: true }, allowOverlapWith: ['ok', 42] },
       'p.mjs',
     );
     assert.equal(ok, false);
@@ -99,9 +99,9 @@ describe('applyNamedPatches — priority ordering', () => {
   it('orders same-phase peers by priority ascending', async () => {
     const log = [];
     const patches = {
-      a: mkPatch({ apply: (c) => { log.push('a'); return c + 'A'; }, verify: { present: 'A' }, priority: 200 }),
-      b: mkPatch({ apply: (c) => { log.push('b'); return c + 'B'; }, verify: { present: 'B' }, priority: 100 }),
-      c: mkPatch({ apply: (c) => { log.push('c'); return c + 'C'; }, verify: { present: 'C' }, priority: 50 }),
+      a: mkPatch({ apply: (c) => { log.push('a'); return c + 'A'; }, verify: { present: 'A', weak: true }, priority: 200 }),
+      b: mkPatch({ apply: (c) => { log.push('b'); return c + 'B'; }, verify: { present: 'B', weak: true }, priority: 100 }),
+      c: mkPatch({ apply: (c) => { log.push('c'); return c + 'C'; }, verify: { present: 'C', weak: true }, priority: 50 }),
     };
     await applyNamedPatches('x', patches, ['a', 'b', 'c'], silent);
     assert.deepEqual(log, ['c', 'b', 'a']);
@@ -110,8 +110,8 @@ describe('applyNamedPatches — priority ordering', () => {
   it('dependsOn beats priority (dep runs first even if higher priority)', async () => {
     const log = [];
     const patches = {
-      a: mkPatch({ apply: (c) => { log.push('a'); return c + 'A'; }, verify: { present: 'A' }, priority: 999 }),
-      b: mkPatch({ apply: (c) => { log.push('b'); return c + 'B'; }, verify: { present: 'B' }, priority: 10, dependsOn: ['a'] }),
+      a: mkPatch({ apply: (c) => { log.push('a'); return c + 'A'; }, verify: { present: 'A', weak: true }, priority: 999 }),
+      b: mkPatch({ apply: (c) => { log.push('b'); return c + 'B'; }, verify: { present: 'B', weak: true }, priority: 10, dependsOn: ['a'] }),
     };
     await applyNamedPatches('x', patches, ['a', 'b'], silent);
     assert.deepEqual(log, ['a', 'b']);
@@ -122,8 +122,8 @@ describe('applyNamedPatches — overlap detection', () => {
   it('reports overlap as warning in non-strict mode (does not throw)', async () => {
     const logger = mkLogger();
     const patches = {
-      a: mkPatch({ apply: (c) => c.replace('HELLO', 'AAAAA'), verify: { present: 'AAAAA' } }),
-      b: mkPatch({ apply: (c) => c.replace('AAAAA', 'BBBBB').replace('HELLO', 'BBBBB'), verify: { present: 'BBBBB' } }),
+      a: mkPatch({ apply: (c) => c.replace('HELLO', 'AAAAA'), verify: { present: 'AAAAA', weak: true } }),
+      b: mkPatch({ apply: (c) => c.replace('AAAAA', 'BBBBB').replace('HELLO', 'BBBBB'), verify: { present: 'BBBBB', weak: true } }),
     };
     await assert.doesNotReject(() => applyNamedPatches('xxHELLOxx', patches, ['a', 'b'], logger));
     assert.ok(
@@ -134,8 +134,8 @@ describe('applyNamedPatches — overlap detection', () => {
 
   it('strict mode: overlap without allowOverlapWith is fatal', async () => {
     const patches = {
-      a: mkPatch({ apply: (c) => c.replace('HELLO', 'AAAAA'), verify: { present: 'AAAAA' } }),
-      b: mkPatch({ apply: (c) => c.replace('AAAAA', 'BBBBB'), verify: { present: 'BBBBB' } }),
+      a: mkPatch({ apply: (c) => c.replace('HELLO', 'AAAAA'), verify: { present: 'AAAAA', weak: true } }),
+      b: mkPatch({ apply: (c) => c.replace('AAAAA', 'BBBBB'), verify: { present: 'BBBBB', weak: true } }),
     };
     await assert.rejects(
       () => applyNamedPatches('xxHELLOxx', patches, ['a', 'b'], silent, { strict: true }),
@@ -146,8 +146,8 @@ describe('applyNamedPatches — overlap detection', () => {
   it('strict mode: allowOverlapWith on one side suppresses the failure', async () => {
     const logger = mkLogger();
     const patches = {
-      a: mkPatch({ apply: (c) => c.replace('HELLO', 'AAAAA'), verify: { present: 'AAAAA' }, allowOverlapWith: ['b'] }),
-      b: mkPatch({ apply: (c) => c.replace('AAAAA', 'BBBBB'), verify: { present: 'BBBBB' } }),
+      a: mkPatch({ apply: (c) => c.replace('HELLO', 'AAAAA'), verify: { present: 'AAAAA', weak: true }, allowOverlapWith: ['b'] }),
+      b: mkPatch({ apply: (c) => c.replace('AAAAA', 'BBBBB'), verify: { present: 'BBBBB', weak: true } }),
     };
     await assert.doesNotReject(
       () => applyNamedPatches('xxHELLOxx', patches, ['a', 'b'], logger, { strict: true }),
@@ -174,8 +174,8 @@ describe('applyNamedPatches — overlap detection', () => {
       'line8',
     ].join('\n');
     const patches = {
-      a: mkPatch({ apply: (c) => c.replace('TOP', 'TOP_A'), verify: { present: 'TOP_A' } }),
-      b: mkPatch({ apply: (c) => c.replace('BOT', 'BOT_B'), verify: { present: 'BOT_B' } }),
+      a: mkPatch({ apply: (c) => c.replace('TOP', 'TOP_A'), verify: { present: 'TOP_A', weak: true } }),
+      b: mkPatch({ apply: (c) => c.replace('BOT', 'BOT_B'), verify: { present: 'BOT_B', weak: true } }),
     };
     const out = await applyNamedPatches(code, patches, ['a', 'b'], silent, { strict: true });
     assert.ok(out.includes('TOP_A') && out.includes('BOT_B'));

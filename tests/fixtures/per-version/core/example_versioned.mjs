@@ -1,6 +1,6 @@
 // Fixture: default variant for example_versioned.
 export default {
   description: 'example_versioned default fallback (fixture)',
-  verify: { present: 'EV-DEFAULT' },
+  verify: { present: 'EV-DEFAULT', weak: true },
   apply: (code) => code + ' EV-DEFAULT',
 };

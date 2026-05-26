@@ -3,7 +3,7 @@ export default {
 
     description: 'Rate limiting: skip retries on subscription usage limits, cap Retry-After at 30s, surface error immediately',
     capabilities: ["network","env"],
-    verify: { present: 'CC_RATE_LIMIT_PATCH_ENABLED' },
+    verify: { present: 'CC_RATE_LIMIT_PATCH_ENABLED', weak: true },
   dependsOn: ['fetch_interceptor'],
     apply: (code) => {
       const hook = `

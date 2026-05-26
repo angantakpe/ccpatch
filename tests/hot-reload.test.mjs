@@ -17,7 +17,7 @@ const require = createRequire(import.meta.url);
 function mkPatch(extra) {
   return {
     description: 'test',
-    verify: { present: 'x' },
+    verify: { present: 'x', weak: true },
     apply: (c) => c + 'x',
     ...extra,
   };

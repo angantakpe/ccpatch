@@ -145,7 +145,7 @@ describe('patch-kinds: manifest validation', () => {
   it('rejects apply() combined with a non-free kind', () => {
     const mod = {
       description: 'mix',
-      verify: { present: 'x' },
+      verify: { present: 'x', weak: true },
       kind: 'prefix',
       target: { function: 'foo' },
       code: 'x()',
@@ -159,7 +159,7 @@ describe('patch-kinds: manifest validation', () => {
   it('requires target.function for non-free kinds', () => {
     const mod = {
       description: 'no target',
-      verify: { present: 'x' },
+      verify: { present: 'x', weak: true },
       kind: 'prefix',
       code: 'x()',
     };
@@ -171,7 +171,7 @@ describe('patch-kinds: manifest validation', () => {
   it('requires code: string for prefix kind', () => {
     const mod = {
       description: 'no code',
-      verify: { present: 'x' },
+      verify: { present: 'x', weak: true },
       kind: 'prefix',
       target: { function: 'foo' },
     };
@@ -183,7 +183,7 @@ describe('patch-kinds: manifest validation', () => {
   it('requires transform: function for transpiler kind', () => {
     const mod = {
       description: 'no transform',
-      verify: { present: 'x' },
+      verify: { present: 'x', weak: true },
       kind: 'transpiler',
       target: { function: 'foo' },
     };
@@ -195,7 +195,7 @@ describe('patch-kinds: manifest validation', () => {
   it('accepts a valid prefix manifest and normalizes kind', () => {
     const mod = {
       description: 'good',
-      verify: { present: 'x' },
+      verify: { present: 'x', weak: true },
       kind: 'prefix',
       target: { function: 'foo' },
       code: 'x()',
@@ -208,7 +208,7 @@ describe('patch-kinds: manifest validation', () => {
   it('defaults kind to "free" and still requires apply', () => {
     const mod = {
       description: 'classic',
-      verify: { present: 'x' },
+      verify: { present: 'x', weak: true },
       apply: () => '',
     };
     const { ok, normalized } = validateManifest(mod, 'c.mjs');

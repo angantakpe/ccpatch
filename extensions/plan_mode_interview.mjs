@@ -6,6 +6,7 @@ export default {
 
   description: 'Unlock the plan mode interview phase (tengu_plan_mode_interview_phase)',
   capabilities: ["env"],
+  deprecated: { reason: 'upstream removed feature flag', since: '2.1.146' },
   // absent check passes both when the flag is replaced with !0 AND when the flag was
   // removed upstream (no-op case) — the string won't be present in either outcome.
   verify: { absent: '"tengu_plan_mode_interview_phase",!1' },

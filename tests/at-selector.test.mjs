@@ -137,7 +137,7 @@ describe('resolveAt — BEFORE / AFTER', () => {
 });
 
 describe('manifest validator — at field', () => {
-  const base = { description: 'x', verify: { present: 'y' }, apply: () => '' };
+  const base = { description: 'x', verify: { present: 'y', weak: true }, apply: () => '' };
 
   it('rejects unknown kind', () => {
     const { ok, errors } = validateManifest(
@@ -186,7 +186,7 @@ describe('manifest validator — at field', () => {
 
   it('rejects @At selector when apply() is missing', () => {
     const { ok, errors } = validateManifest(
-      { description: 'x', verify: { present: 'y' }, at: { kind: 'HEAD', target: { function: 'A' } } },
+      { description: 'x', verify: { present: 'y', weak: true }, at: { kind: 'HEAD', target: { function: 'A' } } },
       'p.mjs'
     );
     assert.equal(ok, false);

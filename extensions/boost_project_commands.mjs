@@ -10,6 +10,8 @@ export default {
     verify: {
       present: '_ip=(s)=>s.loadedFrom==="commands_DEPRECATED"',
       label: 'Boost Project Commands',
+      // weak: present-only sentinel; apply() rewrites two sort expressions
+      weak: true,
     },
     apply: (code) => {
       // Two sort expressions gated by whether a search string is active:

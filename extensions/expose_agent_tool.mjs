@@ -118,7 +118,7 @@ export default {
   description: 'Expose native AgentTool (vC7.call) via globalThis.__ccpAgentTool for background heartbeat dispatch.',
   capabilities: ["tools"],
   dependsOn: ['subagent_hooks_stub'],
-  verify: { present: '__ccpAgentTool', label: 'Expose AgentTool' },
+  verify: { present: '__ccpAgentTool', label: 'Expose AgentTool', weak: true },
 
   apply: (code) => {
     // Idempotency guard: check for a string that only exists when this patch's bootstrap was applied.

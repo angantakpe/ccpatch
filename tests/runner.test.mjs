@@ -8,7 +8,7 @@ function mkPatch({ description = 'test', apply, verify, required, dependsOn } = 
   const p = {
     description,
     apply: apply ?? ((c) => c + ' '),
-    verify: verify ?? { present: '' },
+    verify: verify ?? { present: '', weak: true },
   };
   if (required) p.required = required;
   if (dependsOn) p.dependsOn = dependsOn;
@@ -74,7 +74,7 @@ describe('applyNamedPatches — non-strict (default)', () => {
 
   it('warns on verify failures but does not throw', async () => {
     const patches = {
-      p: { description: 't', apply: (c) => c + '!', verify: { present: 'NOT-THERE' } },
+      p: { description: 't', apply: (c) => c + '!', verify: { present: 'NOT-THERE', weak: true } },
     };
     await assert.doesNotReject(() => applyNamedPatches('x', patches, ['p'], silent));
   });
@@ -109,7 +109,7 @@ describe('applyNamedPatches — strict mode', () => {
 
   it('throws on verify.present miss', async () => {
     const patches = {
-      p: { description: 't', apply: (c) => c + '!', verify: { present: 'NOT-THERE' } },
+      p: { description: 't', apply: (c) => c + '!', verify: { present: 'NOT-THERE', weak: true } },
     };
     await assert.rejects(
       () => applyNamedPatches('x', patches, ['p'], silent, opts),

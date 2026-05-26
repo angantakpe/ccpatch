@@ -8,7 +8,7 @@ export default {
 
     description: 'Block specific tools from being used',
     capabilities: ["env","tools"],
-    verify: { present: '__isToolBlocked__' },
+    verify: { present: '__isToolBlocked__', weak: true },
     apply: (code) => {
       const hook = `
 // ══════════════════════════════════════════════════════════════════════════

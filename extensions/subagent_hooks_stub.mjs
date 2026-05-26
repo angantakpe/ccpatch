@@ -3,7 +3,7 @@ export default {
 
   description: 'No-op stub publishing the __ccpSubagent event-bus contract for patches that subscribe to subagent lifecycle.',
   capabilities: [],
-  verify: { present: '__ccpSubagentStubInstalled' },
+  verify: { present: '__ccpSubagentStubInstalled', weak: true },
   apply: (code) => {
     if (code.includes('__ccpSubagentStubInstalled')) return code;
 
