@@ -30,7 +30,8 @@
     "lint:unused": "knip",
     "lint:unused:fix": "knip --fix",
     "lint:unused:prod": "knip --production --strict",
-    "lint": "npm run lint:dead && npm run lint:unused"
+    "lint": "npm run lint:dead && npm run lint:unused",
+    "tui": "node bin/patch-tui.mjs"
   },
   "dependencies": {
     "acorn": "^8.14.0",
