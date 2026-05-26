@@ -2,6 +2,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 
+import { HELP, USAGE, maybePrintSubcommandHelp } from './cli/help.mjs';
+import { extractGlobalFlags, makeLogger } from './cli/logger.mjs';
+import { applyNativeProfileFilter } from './cli/native-profile.mjs';
+import { buildJsonReport, renderTextSummary } from './cli/build-report.mjs';
+import { runDoctorSuggest } from './cli/doctor-suggest.mjs';
 import { loadPatches } from './loader.mjs';
 import { applyNamedPatches, resolvePatchNames } from './runner.mjs';
 import { readPatchFlags, readProfiles, readAcks } from './config.mjs';
@@ -32,30 +37,9 @@ import {
 
 const REVERT_SIDECAR_VERSION = 1;
 
-const USAGE = 'Usage:\n' +
-  '  node patch-cli.mjs <input.js> <output.js> [--patch <name>] [--profile <name>] [--preload <preload.mjs>] [--strict] [--dry-run] [--write-on-clean] [--allow-capabilities <list>] [--allow-unacked] [--dev]\n' +
-  '  node patch-cli.mjs watch <input.js> <output.js> [--patch <name>] [--profile <name>] [--debounce <ms>]\n' +
-  '  node patch-cli.mjs doctor <input.js> [--profile <name>] [--strict]\n' +
-  '  node patch-cli.mjs revert <patched.js> [--output <restored.js>]\n' +
-  '  node patch-cli.mjs diff <patched.js>\n' +
-  '  node patch-cli.mjs repl <patched.js>\n' +
-  '  node patch-cli.mjs versions [--target-version <x.y.z>]\n' +
-  '  node patch-cli.mjs capabilities [--profile <name>] [--json]\n' +
-  '  node patch-cli.mjs refmap <bundle.js> [--out <path>] [--cc-version X.Y.Z] [--check]\n' +
-  '  node patch-cli.mjs fallback-capture <patched.js> --against <unpatched.js> [--patch <name>]\n' +
-  '  node patch-cli.mjs coverage <patched.js> [--smoke <cmd>] [--out <report.json>] [--cc-version X.Y.Z]\n' +
-  '  node patch-cli.mjs module install <path-or-url> [--strict] [--allow-capabilities <list>] [--force]\n' +
-  '  node patch-cli.mjs module list\n' +
-  '  node patch-cli.mjs module remove <name>\n' +
-  '  node patch-cli.mjs module verify <name>\n' +
-  '  node patch-cli.mjs module update <name>\n' +
-  '  node patch-cli.mjs --list\n' +
-  '\n' +
-  'Profiles (from ccpatch.yml): minimal | standard | power\n' +
-  '\n' +
-  'revert/diff: reads the <patched>.ccp-revert.json sidecar produced at apply\n' +
-  '             time. Only the JS bundle (.mjs/.js) is supported in v1 — Bun\n' +
-  '             binary repack reversal is out of scope.';
+// USAGE / HELP are owned by ./cli/help.mjs. Re-exported for legacy callers
+// that imported the symbol off this module.
+export { USAGE, HELP };
 
 function sha256(s) {
   return createHash('sha256').update(s, 'utf8').digest('hex');
@@ -280,12 +264,14 @@ export function parsePatchCliArgs(args) {
     const inputPath = path.resolve(rest[0]);
     let profile = null;
     let strict = false;
+    let suggest = false;
     for (let i = 1; i < rest.length; i++) {
       if ((rest[i] === '--profile' || rest[i] === '-p') && rest[i + 1]) profile = rest[++i];
       else if (rest[i] === '--strict') strict = true;
+      else if (rest[i] === '--suggest') suggest = true;
     }
     if (!strict && process.env.CCPATCH_STRICT === '1') strict = true;
-    return { doctor: true, inputPath, profile, strict };
+    return { doctor: true, inputPath, profile, strict, suggest };
   }
   if (args.length < 2) {
     return { error: USAGE };
@@ -346,16 +332,30 @@ export function parsePatchCliArgs(args) {
 }
 
 export async function runPatchCli(args, logger = console) {
-  if (args.includes('--help') || args.includes('-h')) {
-    logger.log(USAGE);
-    return 0;
-  }
+  // Pull off global flags (--log-level, --quiet, --json) before any
+  // subcommand-specific parsing. We re-wrap `logger` with a leveled logger so
+  // every downstream call honors --quiet / --log-level. The default `console`
+  // sink preserves legacy behavior when no flag is passed.
+  const { level, json, args: cleanedArgs } = extractGlobalFlags(args);
+  const leveled = (logger === console)
+    ? makeLogger({ level, sink: console, json })
+    : logger;
+  // Alias so every existing `logger.log(...)` in this function uses the leveled
+  // sink without us having to touch each call site.
+  logger = leveled;
+  args = cleanedArgs;
+
+  // Per-subcommand --help. `ccpatch <cmd> --help` (or `-h`) renders just that
+  // subcommand's usage block; falls back to the global banner otherwise.
+  if (maybePrintSubcommandHelp(args, leveled)) return 0;
 
   if (args[0] === 'module') {
-    return await runModuleCommand(args.slice(1), logger);
+    return await runModuleCommand(args.slice(1), leveled);
   }
 
   const options = parsePatchCliArgs(args);
+  // Surface --json downstream (build path) so the result can be serialized.
+  if (options && !options.error) options.json = json;
   if (options.error) {
     logger.log(options.error);
     return 1;
@@ -404,7 +404,12 @@ export async function runPatchCli(args, logger = console) {
   }
 
   if (options.doctor) {
-    return await runDoctor(options, patches, logger);
+    const rc = await runDoctor(options, patches, logger);
+    if (options.suggest) {
+      logger.log('');
+      runDoctorSuggest(logger);
+    }
+    return rc;
   }
 
   if (options.capabilities) {
@@ -473,12 +478,24 @@ export async function runPatchCli(args, logger = console) {
     }
   }
 
+  // ── --profile=native filter ──────────────────────────────────────────────
+  // The Bun SEA repack path is incompatible with esm_compat and fix_bun_shim.
+  // Drop them mechanically and log what happened so users aren't surprised.
+  {
+    const { patches: filtered, excluded } = applyNativeProfileFilter(patchesToApply, options.profile);
+    if (excluded.length > 0) {
+      logger.log(`  [native] auto-excluded ${excluded.join(', ')} — incompatible with Bun SEA repack`);
+      patchesToApply = filtered;
+    }
+  }
+
   if (patchesToApply.length === 0) {
     logger.log(`No patches specified. Use --patch <name> or --patch all.`);
     return 0;
   }
 
   logger.log(`Applying ${patchesToApply.length} patches...`);
+  const buildStartedAt = Date.now();
 
   const patchOptions = options.patchOptions || {};
   if (!patchOptions.version && process.env.CCPATCH_CLI_VERSION) {
@@ -582,10 +599,19 @@ export async function runPatchCli(args, logger = console) {
 
   let patchedCode;
   let strictFailed = false;
+  // Cluster B will eventually have applyNamedPatches return { code, report }.
+  // Read defensively so this code path keeps working through that migration.
+  let runnerReport = {};
   const captureReverse = [];
   patchOptions.captureReverse = captureReverse;
   try {
-    patchedCode = await applyNamedPatches(code, patches, patchesToApply, activeLogger, patchOptions);
+    const ret = await applyNamedPatches(code, patches, patchesToApply, activeLogger, patchOptions);
+    if (ret && typeof ret === 'object' && typeof ret.code === 'string') {
+      patchedCode = ret.code;
+      runnerReport = ret.report || {};
+    } else {
+      patchedCode = ret;
+    }
   } catch (err) {
     if (patchOptions.dryRun) {
       strictFailed = true;
@@ -681,6 +707,30 @@ export async function runPatchCli(args, logger = console) {
     } else {
       logger.log(`  [~] --preload: no preload-capable patches in current selection`);
     }
+  }
+
+  // ── End-of-run summary / --json report ──────────────────────────────────
+  const durationMs = Date.now() - buildStartedAt;
+  if (options.json) {
+    // JSON path: a single JSON object on stdout. The leveled logger has
+    // already routed informational text to stderr when --json was set, so
+    // the payload is the only thing on stdout.
+    const payload = buildJsonReport({
+      ok: true,
+      durationMs,
+      report: runnerReport,
+      patchNames: patchesToApply,
+    });
+    process.stdout.write(JSON.stringify(payload) + '\n');
+  } else {
+    logger.log('');
+    logger.log(renderTextSummary({
+      ok: true,
+      durationMs,
+      report: runnerReport,
+      outputPath: options.outputPath,
+      drySuggest: false,
+    }));
   }
 
   return 0;
