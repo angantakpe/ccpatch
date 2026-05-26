@@ -27,6 +27,32 @@ export function readPatchFlags(yamlPath) {
 }
 
 /**
+ * Parse the optional `ack:` map from ccpatch.yml. Each entry acknowledges
+ * the capabilities required by a patch, signalling the user has read
+ * THREAT_MODEL.md for that patch.
+ *
+ *   ack:
+ *     fetch_interceptor: [network]
+ *     fix_bun_shim: [env, network]
+ *
+ * Returns { [patchName]: string[] } or null if absent/unreadable.
+ */
+export function readAcks(yamlPath) {
+  if (!existsSync(yamlPath)) return null;
+  const doc = yamlLoad(readFileSync(yamlPath, 'utf8'));
+  if (!doc?.ack || typeof doc.ack !== 'object') return null;
+  const out = {};
+  for (const [name, val] of Object.entries(doc.ack)) {
+    if (Array.isArray(val)) {
+      out[name] = val.filter(s => typeof s === 'string');
+    } else if (val === true) {
+      out[name] = ['*'];
+    }
+  }
+  return out;
+}
+
+/**
  * Parse the optional `profiles:` map from ccpatch.yml.
  * Returns { name: string[] } or null if absent/unreadable.
  */

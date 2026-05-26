@@ -125,6 +125,9 @@ By default only `core/` infrastructure and bug fixes are enabled. Extensions are
 - ccpatch makes **no network calls** from the patcher and ships **no telemetry**.
 - ccpatch ships **no Anthropic source code** and is not affiliated with, sponsored by, or endorsed by Anthropic.
 - See [THREAT_MODEL.md](./THREAT_MODEL.md) for a per-patch breakdown of what each touches, reads, and sends.
+- Patches that declare `network`, `exec`, or `env` capabilities are gated by an `ack:` block in `ccpatch.yml`. Builds fail until you acknowledge each capability per patch (e.g. `fetch_interceptor: [network]`).
+- Acking is a one-line attestation that you've read THREAT_MODEL.md for that patch. Pass `--allow-unacked` to bypass the gate (legacy warn-only mode).
+- See `ccpatch.yml`'s `ack:` block for the shipped defaults that cover the always-on core patches.
 - See [SUPPORTED_VERSIONS.md](./SUPPORTED_VERSIONS.md) for the upstream versions exercised in CI and known bundle hashes.
 - See [NOTICE](./NOTICE) for trademark and terms-of-service notes.
 

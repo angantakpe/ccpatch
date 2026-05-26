@@ -5,6 +5,8 @@ import { validateManifest, classifyRisk, CAPABILITIES } from '../runner/manifest
 import {
   parseAllowCapabilities,
   findGateViolations,
+  findUnackedAckRequired,
+  ACK_REQUIRED_CAPS,
   parsePatchCliArgs,
   runPatchCli,
   runCapabilities,
@@ -229,8 +231,10 @@ describe('strict-mode capability gate (CLI)', () => {
     );
     assert.equal(code, 1);
     assert.ok(
-      logger._err.some(line => line.includes('--allow-capabilities')),
-      `expected error mentioning --allow-capabilities, got: ${logger._err.join('\n')}`,
+      logger._err.some(line =>
+        line.includes('--allow-capabilities') || line.includes('needs capability ack')
+      ),
+      `expected error mentioning capability ack, got: ${logger._err.join('\n')}`,
     );
   });
 
@@ -297,5 +301,159 @@ describe('ccpatch capabilities --json', () => {
     // Summary tally should count webhook in network/env/telemetry buckets.
     assert.ok(data.summary.network >= 1);
     assert.ok(data.summary.telemetry >= 1);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Track B: default-strict ack gate for network/exec/env capabilities
+// ─────────────────────────────────────────────────────────────────────────────
+describe('findUnackedAckRequired', () => {
+  const PATCHES = {
+    cosmetic: { capabilities: [] },
+    netty:    { capabilities: ['network'] },
+    envy:     { capabilities: ['env'] },
+    big:      { capabilities: ['network', 'env', 'exec'] },
+    toolish:  { capabilities: ['tools'] }, // high-risk but NOT ack-required
+  };
+
+  it('exports the ack-required capability list', () => {
+    assert.deepEqual([...ACK_REQUIRED_CAPS].sort(), ['env', 'exec', 'network']);
+  });
+
+  it('zero-cap patches never violate', () => {
+    assert.deepEqual(findUnackedAckRequired(PATCHES, ['cosmetic'], null, null), []);
+  });
+
+  it('tools-only patch is not ack-required', () => {
+    assert.deepEqual(findUnackedAckRequired(PATCHES, ['toolish'], null, null), []);
+  });
+
+  it('unacked network patch violates', () => {
+    const v = findUnackedAckRequired(PATCHES, ['netty'], null, null);
+    assert.equal(v.length, 1);
+    assert.deepEqual(v[0].missing, ['network']);
+  });
+
+  it('YAML ack covers the cap', () => {
+    const v = findUnackedAckRequired(PATCHES, ['netty'], { netty: ['network'] }, null);
+    assert.deepEqual(v, []);
+  });
+
+  it('--allow-capabilities covers the cap', () => {
+    const allow = parseAllowCapabilities('network,env,exec');
+    const v = findUnackedAckRequired(PATCHES, ['big'], null, allow);
+    assert.deepEqual(v, []);
+  });
+
+  it('partial YAML ack still violates missing caps', () => {
+    const v = findUnackedAckRequired(PATCHES, ['big'], { big: ['network'] }, null);
+    assert.equal(v.length, 1);
+    assert.deepEqual(v[0].missing, ['env', 'exec']);
+  });
+});
+
+describe('Track B CLI ack gate', () => {
+  function setupTempProject() {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ccpatch-ackcli-'));
+    const inputPath = path.join(dir, 'in.js');
+    fs.writeFileSync(inputPath, '(function(exports, require, module, __filename, __dirname) {/* dummy */\n});\n');
+    return { dir, inputPath, outputPath: path.join(dir, 'out.js') };
+  }
+
+  function withCwd(dir, fn) {
+    const prev = process.cwd();
+    process.chdir(dir);
+    return Promise.resolve(fn()).finally(() => process.chdir(prev));
+  }
+
+  it('unacked network patch fails build with new ack message', async () => {
+    const { dir, inputPath, outputPath } = setupTempProject();
+    // No ccpatch.yml → no acks. Pick the `webhook` patch (network+env+telemetry).
+    const logger = captureLogger();
+    const code = await withCwd(dir, () =>
+      runPatchCli(
+        [inputPath, outputPath, '--patch', 'webhook', '--version', '2.1.140'],
+        logger,
+      ),
+    );
+    assert.equal(code, 1);
+    const errs = logger._err.join('\n');
+    assert.ok(errs.includes('needs capability ack'), `expected ack error, got: ${errs}`);
+    assert.ok(errs.includes('Add to ccpatch.yml'), `expected snippet hint, got: ${errs}`);
+    assert.ok(errs.includes('--allow-unacked'), `expected --allow-unacked hint, got: ${errs}`);
+  });
+
+  it('YAML ack lets the patch pass the ack gate', async () => {
+    const { dir, inputPath, outputPath } = setupTempProject();
+    fs.writeFileSync(
+      path.join(dir, 'ccpatch.yml'),
+      'version: 1\nack:\n' +
+      '  webhook: [network, env]\n' +
+      '  fetch_interceptor: [network]\n' +
+      '  fix_bun_shim: [env, network]\n' +
+      '  tool_result_error_content: [network]\n',
+    );
+    const logger = captureLogger();
+    let code;
+    try {
+      code = await withCwd(dir, () =>
+        runPatchCli(
+          [inputPath, outputPath, '--patch', 'webhook', '--version', '2.1.140'],
+          logger,
+        ),
+      );
+    } catch {
+      // downstream apply may fail; we only check the gate did not reject
+    }
+    const errs = logger._err.join('\n');
+    assert.ok(!errs.includes('needs capability ack'),
+      `gate should not have rejected; errs: ${errs}`);
+  });
+
+  it('--allow-capabilities also satisfies the ack gate', async () => {
+    const { dir, inputPath, outputPath } = setupTempProject();
+    const logger = captureLogger();
+    let code;
+    try {
+      code = await withCwd(dir, () =>
+        runPatchCli(
+          [
+            inputPath, outputPath,
+            '--patch', 'webhook',
+            '--version', '2.1.140',
+            '--allow-capabilities=all',
+          ],
+          logger,
+        ),
+      );
+    } catch { /* downstream apply may fail */ }
+    const errs = logger._err.join('\n');
+    assert.ok(!errs.includes('needs capability ack'),
+      `gate should not have rejected; errs: ${errs}`);
+  });
+
+  it('--allow-unacked warns but does not fail the gate', async () => {
+    const { dir, inputPath, outputPath } = setupTempProject();
+    const logger = captureLogger();
+    let code;
+    try {
+      code = await withCwd(dir, () =>
+        runPatchCli(
+          [
+            inputPath, outputPath,
+            '--patch', 'webhook',
+            '--version', '2.1.140',
+            '--allow-unacked',
+          ],
+          logger,
+        ),
+      );
+    } catch { /* downstream apply may fail */ }
+    const errs = logger._err.join('\n');
+    const outs = logger._out.join('\n');
+    assert.ok(!errs.includes('needs capability ack'),
+      `gate should not have rejected; errs: ${errs}`);
+    assert.ok(outs.includes('unacked capabilities') || outs.includes('[capabilities] WARN'),
+      `expected warn line; outs: ${outs}`);
   });
 });
