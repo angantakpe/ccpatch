@@ -15,7 +15,7 @@ export default {
 
   description: 'Capture first successful interactive /v1/messages request shape for shadow-agent reuse.',
   capabilities: ["network"],
-  verify: { present: '__ccpInteractiveRequestCaptured_v1' },
+  verify: { present: '__ccpInteractiveRequestCaptured_v1', weak: true },
   apply: (code) => {
     if (code.includes('__ccpInteractiveRequestCaptured_v1')) return code;
     const SHEBANG = '#!/usr/bin/env node';

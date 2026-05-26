@@ -20,7 +20,7 @@ function clearTelemetry() {
 }
 
 describe('manifest — lifecycle hooks', () => {
-  const base = { description: 't', apply: (c) => c + '+', verify: { present: '+' } };
+  const base = { description: 't', apply: (c) => c + '+', verify: { present: '+', weak: true } };
 
   it('accepts function-typed hooks', () => {
     const { ok } = validateManifest(
@@ -49,7 +49,7 @@ describe('lifecycle hooks — runtime', () => {
       p: {
         description: 't',
         apply: (c, opts) => { seen.flag = opts.injectedFlag; return c + '+'; },
-        verify: { present: '+' },
+        verify: { present: '+', weak: true },
         onBeforeApply(ctx) { ctx.opts.injectedFlag = 'hello'; },
       },
     };
@@ -62,7 +62,7 @@ describe('lifecycle hooks — runtime', () => {
       p: {
         description: 't',
         apply: (c) => c + '+raw',
-        verify: { present: '+POST' },
+        verify: { present: '+POST', weak: true },
         onAfterApply(ctx) {
           ctx.appliedCode = ctx.appliedCode.replace('+raw', '+POST');
         },
@@ -77,7 +77,7 @@ describe('lifecycle hooks — runtime', () => {
       p: {
         description: 't',
         apply: (c) => c + 'broken',
-        verify: { present: 'GOOD' },
+        verify: { present: 'GOOD', weak: true },
         onVerifyFail(ctx) {
           return ctx.appliedCode.replace('broken', 'GOOD');
         },
@@ -93,7 +93,7 @@ describe('lifecycle hooks — runtime', () => {
       p: {
         description: 't',
         apply: (c) => c + 'broken',
-        verify: { present: 'GOOD' },
+        verify: { present: 'GOOD', weak: true },
         onVerifyFail() { attempts++; /* return undefined */ },
       },
     };
@@ -110,7 +110,7 @@ describe('lifecycle hooks — runtime', () => {
       p: {
         description: 't',
         apply: (c) => c + 'broken',
-        verify: { present: 'GOOD' },
+        verify: { present: 'GOOD', weak: true },
         onVerifyFail(ctx) {
           calls++;
           return ctx.appliedCode; // still broken
@@ -130,7 +130,7 @@ describe('lifecycle hooks — runtime', () => {
       p: {
         description: 't',
         apply: (c) => { order.push('apply'); return c + '+'; },
-        verify: { present: '+' },
+        verify: { present: '+', weak: true },
         async onBeforeApply() {
           await new Promise(r => setTimeout(r, 5));
           order.push('beforeApply');
@@ -152,7 +152,7 @@ describe('lifecycle hooks — runtime', () => {
       p: {
         description: 't',
         apply: (c) => c + '+',
-        verify: { present: '+' },
+        verify: { present: '+', weak: true },
         onBeforeApply() { throw new Error('boom in hook'); },
       },
     };
@@ -169,7 +169,7 @@ describe('lifecycle hooks — runtime', () => {
       p: {
         description: 't',
         apply: (c) => c + '+raw',
-        verify: { present: '+POST' },
+        verify: { present: '+POST', weak: true },
         onBeforeApply() {},
         onAfterApply(ctx) { ctx.appliedCode = ctx.appliedCode.replace('+raw', '+POST'); },
       },
@@ -191,7 +191,7 @@ describe('lifecycle hooks — runtime', () => {
       p: {
         description: 't',
         apply: (c) => c + '+',
-        verify: { present: '+' },
+        verify: { present: '+', weak: true },
         onBeforeApply() { throw new Error('telemetry-boom'); },
       },
     };

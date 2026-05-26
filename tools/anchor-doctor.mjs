@@ -119,8 +119,14 @@ if (jsonOut) {
   console.log();
   console.log(`  ${'patch'.padEnd(widthName)}  status   detail`);
   console.log(`  ${'-'.repeat(widthName)}  -------  ${'-'.repeat(60)}`);
-  const icon = { ok: ' ✓ ', drift: ' ~ ', missing: ' ✗ ' };
+  const icon = { ok: ' ✓ ', drift: ' ~ ', missing: ' ✗ ', deprecated: ' ⊘ ' };
   for (const r of rows) {
+    const patch = patches[r.name];
+    if (patch && patch.deprecated) {
+      const detail = `deprecated: ${patch.deprecated.reason}${patch.deprecated.since ? ` (since ${patch.deprecated.since})` : ''}`.slice(0, 70);
+      console.log(`  ${r.name.padEnd(widthName)} ${icon.deprecated} ${'deprecated'.padEnd(7)} ${detail}`);
+      continue;
+    }
     const detail = (r.detail || (r.weak ? 'weak verify (no absent/count)' : '')).slice(0, 70);
     console.log(`  ${r.name.padEnd(widthName)} ${icon[r.status] ?? ' ? '} ${r.status.padEnd(7)} ${detail}`);
   }

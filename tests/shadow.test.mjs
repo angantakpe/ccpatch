@@ -13,7 +13,7 @@ describe('runShadow — bytes / verify / parse / forbidden', () => {
     const unpatched = 'function main(){return 1;}\n';
     const patched = '/* CCP_SENTINEL */\n' + unpatched;
     const patches = {
-      p: { verify: { present: '/* CCP_SENTINEL */' } },
+      p: { verify: { present: '/* CCP_SENTINEL */', weak: true } },
     };
     const r = runShadow(unpatched, patched, patches, ['p']);
     assert.equal(r.ok, true, JSON.stringify(r.anomalies));
@@ -26,7 +26,7 @@ describe('runShadow — bytes / verify / parse / forbidden', () => {
     // Patch claims to inject "function" but it's already there
     const patched = unpatched + '/* something else */';
     const patches = {
-      weak: { verify: { present: 'function' } },
+      weak: { verify: { present: 'function', weak: true } },
     };
     const r = runShadow(unpatched, patched, patches, ['weak']);
     assert.equal(r.ok, false);
@@ -39,7 +39,7 @@ describe('runShadow — bytes / verify / parse / forbidden', () => {
   it('verify.present sentinel missing from patched → verify anomaly', () => {
     const unpatched = 'const x = 1;\n';
     const patched = unpatched + 'const y = 2;\n';
-    const patches = { p: { verify: { present: '__MISSING__' } } };
+    const patches = { p: { verify: { present: '__MISSING__', weak: true } } };
     const r = runShadow(unpatched, patched, patches, ['p']);
     assert.equal(r.ok, false);
     const verifyAnoms = r.anomalies.filter(a => a.kind === 'verify');
@@ -62,7 +62,7 @@ describe('runShadow — bytes / verify / parse / forbidden', () => {
     const patched = 'function f(){console.log("x");return 1;}\n';
     const patches = {
       noisy: {
-        verify: { present: 'console.log' },
+        verify: { present: 'console.log', weak: true },
         forbiddenAfterPatch: ['console.log'],
       },
     };
@@ -104,7 +104,7 @@ describe('--dry-run --write-on-clean via CLI', () => {
       sentinel: {
         description: 't',
         apply: (c) => '/* OK_SENTINEL */\n' + c,
-        verify: { present: '/* OK_SENTINEL */' },
+        verify: { present: '/* OK_SENTINEL */', weak: true },
       },
     };
     const patched = await applyNamedPatches(code, patches, ['sentinel'], silent);
@@ -127,7 +127,7 @@ describe('--dry-run --write-on-clean via CLI', () => {
       bad: {
         description: 't',
         apply: (c) => c + '\nconsole.log("x");\n',
-        verify: { present: 'console.log' },
+        verify: { present: 'console.log', weak: true },
         forbiddenAfterPatch: ['console.log'],
       },
     };

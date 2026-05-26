@@ -204,7 +204,7 @@ describe('slash-in-patch-name policy', () => {
     // because validateManifest enforces stem matching, and stems cannot contain '/'
     // since enumeratePatchNames reads filenames (which on POSIX can't contain '/').
     const { ok, errors } = validateManifest(
-      { description: 'x', verify: { present: 'y' }, apply: () => '', name: 'foo/bar' },
+      { description: 'x', verify: { present: 'y', weak: true }, apply: () => '', name: 'foo/bar' },
       'foo.mjs',
     );
     assert.equal(ok, false);

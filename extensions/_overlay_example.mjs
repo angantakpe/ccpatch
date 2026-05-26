@@ -21,7 +21,7 @@ export default {
   // Manifest still requires a verify block. The overlay-loader's own verify
   // asserts the require call is in place; for this example we just assert the
   // shebang is still in the bundle (a true no-op apply).
-  verify: { present: '#!/usr/bin/env node' },
+  verify: { present: '#!/usr/bin/env node', weak: true },
   overlay: {
     register: 'overlay-example',
     code: `

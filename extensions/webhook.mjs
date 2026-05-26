@@ -5,7 +5,7 @@ export default {
 
     description: 'Send webhook notifications on key events',
     capabilities: ["network","env","telemetry"],
-    verify: { present: '__sendWebhook__' },
+    verify: { present: '__sendWebhook__', weak: true },
     apply: (code) => {
       const hook = `
 // ══════════════════════════════════════════════════════════════════════════

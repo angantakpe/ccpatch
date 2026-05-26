@@ -13,13 +13,25 @@
  * Required:
  *   verify       object    { present?: string|string[],
  *                            absent?:  string|string[],
- *                            count?:   number | { present?: number, absent?: number } }
+ *                            count?:   number | { present?: number, absent?: number },
+ *                            weak?:    boolean }
  *                          Post-apply assertion. At least one of present/absent/count required.
  *                          - present: substrings that MUST exist post-apply.
  *                          - absent:  substrings that MUST NOT exist post-apply (catches
  *                                     no-op apply + double-apply).
  *                          - count:   exact occurrence totals. Shorthand number => present count.
  *                                     Object => fine-grained { present, absent } counts.
+ *                          - weak:    boolean opt-in. When verify only declares `present`
+ *                                     (no absent/count), validation errors out — set
+ *                                     weak:true to acknowledge that the verify cannot
+ *                                     detect wrong-location apply / double apply.
+ *
+ * Optional top-level:
+ *   deprecated   object    { reason: string, since?: string }
+ *                          Marks the patch as deprecated. Reporters render the patch
+ *                          row with a "deprecated" status (not "ok") and surface
+ *                          `reason` in the detail column. `since` is informational
+ *                          (e.g. CC version that removed the underlying feature).
  *
  * Optional fields:
  *   name         string    Must match the filename stem if provided.
@@ -149,6 +161,14 @@ export function validateManifest(mod, filename, ctx = {}) {
     const hasCount = v.count !== undefined && v.count !== null;
     if (!hasPresent && !hasAbsent && !hasCount) {
       errors.push(`patch ${stem}: 'verify' must specify at least one of present/absent/count — see CONTRIBUTING.md`);
+    }
+    // Weak-verify guard: present-only verify cannot detect wrong-location apply
+    // or double-apply. Require opt-in via verify.weak:true.
+    if (hasPresent && !hasAbsent && !hasCount && v.weak !== true) {
+      errors.push(`weak verify: declare verify.absent or verify.count, or opt in with verify.weak: true`);
+    }
+    if (v.weak !== undefined && typeof v.weak !== 'boolean') {
+      errors.push('verify.weak must be a boolean');
     }
     if (hasCount) {
       const c = v.count;
@@ -425,6 +445,29 @@ export function validateManifest(mod, filename, ctx = {}) {
     }
   }
 
+  // Optional deprecated — marks the patch as no-longer-needed (e.g. upstream
+  // fixed the issue or removed the feature flag). Reporters render this as a
+  // dedicated status instead of "ok".
+  let deprecated = null;
+  if (mod.deprecated !== undefined) {
+    if (!mod.deprecated || typeof mod.deprecated !== 'object' || Array.isArray(mod.deprecated)) {
+      errors.push('deprecated must be an object: { reason: string, since?: string }');
+    } else {
+      if (typeof mod.deprecated.reason !== 'string' || !mod.deprecated.reason.trim()) {
+        errors.push('deprecated.reason is required and must be a non-empty string');
+      }
+      if (mod.deprecated.since !== undefined && typeof mod.deprecated.since !== 'string') {
+        errors.push('deprecated.since must be a string if defined');
+      }
+      if (typeof mod.deprecated.reason === 'string' && mod.deprecated.reason.trim()) {
+        deprecated = {
+          reason: mod.deprecated.reason.trim(),
+          since: typeof mod.deprecated.since === 'string' ? mod.deprecated.since : undefined,
+        };
+      }
+    }
+  }
+
   // Optional revisit — forensic-patch metadata
   if (mod.revisit !== undefined) {
     if (!mod.revisit || typeof mod.revisit !== 'object' || Array.isArray(mod.revisit)) {
@@ -490,6 +533,7 @@ export function validateManifest(mod, filename, ctx = {}) {
     preloadCode: mod.preloadCode ?? null,
     verify: mod.verify ?? null,
     required: mod.required === true,
+    deprecated,
     revisit: mod.revisit ?? null,
     forbiddenAfterPatch,
     fallbackDiff,

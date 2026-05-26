@@ -21,7 +21,7 @@ export default {
 
   description: 'Inject placeholder content for empty tool_result blocks with is_error:true (Anthropic API requires non-empty content).',
   capabilities: ["network"],
-  verify: { present: '__ccpTREC_init' },
+  verify: { present: '__ccpTREC_init', weak: true },
   dependsOn: ['fetch_interceptor'],
   apply: (code) => {
     const hook = `

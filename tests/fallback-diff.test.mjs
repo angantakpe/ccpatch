@@ -33,7 +33,7 @@ describe('fallbackDiff — runtime fallback', () => {
       drifted: {
         description: 't',
         apply: (c) => c, // anchor missed — no change
-        verify: { present: 'line2-CHANGED' },
+        verify: { present: 'line2-CHANGED', weak: true },
         fallbackDiff: { patch: fallback, capturedAgainst: '2.1.148' },
       },
     };
@@ -54,7 +54,7 @@ describe('fallbackDiff — runtime fallback', () => {
       drifted: {
         description: 't',
         apply: (c) => c,
-        verify: { present: 'will-not-be-there' },
+        verify: { present: 'will-not-be-there', weak: true },
         fallbackDiff: { patch: bogus, capturedAgainst: '2.1.148', fuzz: 0 },
       },
     };
@@ -77,7 +77,7 @@ describe('fallbackDiff — runtime fallback', () => {
       ok: {
         description: 't',
         apply: (c) => c.replace('line2', 'line2-OK'),
-        verify: { present: 'line2-OK' },
+        verify: { present: 'line2-OK', weak: true },
         get fallbackDiff() {
           fallbackTouched = true;
           return { patch: bogus, capturedAgainst: '2.1.148' };
@@ -106,7 +106,7 @@ describe('fallbackDiff — runtime fallback', () => {
       drifted: {
         description: 't',
         apply: (c) => c,
-        verify: { present: 'line2-CHANGED' },
+        verify: { present: 'line2-CHANGED', weak: true },
         fallbackDiff: { patch: fallback, capturedAgainst: '2.1.148' },
       },
     };
@@ -129,7 +129,7 @@ describe('fallbackDiff — manifest validation', () => {
   const baseMod = {
     description: 't',
     apply: (c) => c,
-    verify: { present: 'x' },
+    verify: { present: 'x', weak: true },
   };
 
   it('rejects fallbackDiff missing patch', () => {

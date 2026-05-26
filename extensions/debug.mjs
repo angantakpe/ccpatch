@@ -5,7 +5,7 @@ export default {
 
     description: 'Add debug logging for API calls and tool usage',
     capabilities: ["network","fs","env","telemetry"],
-    verify: { present: '__debugLog__' },
+    verify: { present: '__debugLog__', weak: true },
     apply: (code) => {
       const debugHook = `
 // ══════════════════════════════════════════════════════════════════════════

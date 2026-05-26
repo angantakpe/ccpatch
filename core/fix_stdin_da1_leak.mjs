@@ -25,7 +25,7 @@ export default {
   category: 'fix',
   description: 'Strip terminal DA1/DA2 responses from stdin to prevent escape-key + garbage-text split in Ink input.',
   capabilities: [],
-  verify: { present: '__ccpFixStdinDA1Installed' },
+  verify: { present: '__ccpFixStdinDA1Installed', weak: true },
   preload: true,
   preloadCode: block,
   apply: (code) => {

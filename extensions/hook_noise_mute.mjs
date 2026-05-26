@@ -6,7 +6,7 @@ export default {
   category: 'infrastructure',
   description: 'Mute known hook noise from tool output (ugrep bad-option lines, rtk rewrite chatter)',
   capabilities: ["exec"],
-  verify: { present: '__ccpNoiseMuted' },
+  verify: { present: '__ccpNoiseMuted', weak: true },
   dependsOn: [],
   applyMode: 'either',
   anchor: { literal: '(function(exports, require, module, __filename, __dirname)' },

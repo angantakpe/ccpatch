@@ -3,7 +3,7 @@ export default {
 
   description: 'Truncate oversized tool_result content blocks before they are sent to the API (saves tokens)',
   capabilities: ["network","tools"],
-  verify: { present: "'tool_result_trim'" },
+  verify: { present: "'tool_result_trim'", weak: true },
   dependsOn: ['fetch_interceptor'],
   apply: (code) => {
     const hook = `

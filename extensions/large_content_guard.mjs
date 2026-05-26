@@ -5,6 +5,8 @@ export default {
   capabilities: ["prompt"],
   verify: {
     present: ['chars truncated'],
+    // weak: substring may legitimately appear once or twice across two render paths
+    weak: true,
   },
   apply: (code) => {
     // The lZ7 system-message renderer can crash on extremely large content

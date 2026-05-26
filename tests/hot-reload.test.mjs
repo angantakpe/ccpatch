@@ -15,7 +15,7 @@ import { makeWatchLoop } from '../runner/cli.mjs';
 function mkPatch(extra) {
   return {
     description: 'test',
-    verify: { present: 'x' },
+    verify: { present: 'x', weak: true },
     apply: (c) => c + 'x',
     ...extra,
   };

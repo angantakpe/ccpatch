@@ -13,7 +13,7 @@ import overlayLoader from '../core/overlay_loader.mjs';
 function mkPatch(extra) {
   return {
     description: 'test',
-    verify: { present: 'x' },
+    verify: { present: 'x', weak: true },
     apply: (c) => c + 'x',
     ...extra,
   };
@@ -151,7 +151,7 @@ describe('manifest validation — overlay field', () => {
   it('accepts a valid overlay', () => {
     const mod = {
       description: 'ok',
-      verify: { present: 'x' },
+      verify: { present: 'x', weak: true },
       apply: () => '',
       overlay: { register: 'svc', code: 'return 1;' },
     };
@@ -163,7 +163,7 @@ describe('manifest validation — overlay field', () => {
   it('rejects overlay missing register', () => {
     const mod = {
       description: 'ok',
-      verify: { present: 'x' },
+      verify: { present: 'x', weak: true },
       apply: () => '',
       overlay: { code: 'return 1;' },
     };
@@ -175,7 +175,7 @@ describe('manifest validation — overlay field', () => {
   it('rejects overlay missing code', () => {
     const mod = {
       description: 'ok',
-      verify: { present: 'x' },
+      verify: { present: 'x', weak: true },
       apply: () => '',
       overlay: { register: 'svc' },
     };
@@ -187,7 +187,7 @@ describe('manifest validation — overlay field', () => {
   it('rejects overlay with empty register string', () => {
     const mod = {
       description: 'ok',
-      verify: { present: 'x' },
+      verify: { present: 'x', weak: true },
       apply: () => '',
       overlay: { register: '', code: 'return 1;' },
     };

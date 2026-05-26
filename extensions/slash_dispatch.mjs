@@ -3,7 +3,7 @@ export default {
 
   description: 'Intercept /slash-commands in UserPromptSubmit — dispatch via __ccpDispatchSlash registry',
   capabilities: ["prompt"],
-  verify: { present: '__ccpSlashDispatchInstalled' },
+  verify: { present: '__ccpSlashDispatchInstalled', weak: true },
   dependsOn: ['custom_commands'],
   apply: (code) => {
     const marker = '__ccpSlashDispatchInstalled';
