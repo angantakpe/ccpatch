@@ -164,6 +164,32 @@ This is the escape hatch — same power as `apply()`, but limited to the bytes o
 - Mixing a non-free `kind` with a user-supplied `apply()` is a manifest error — the runner synthesizes `apply` from the declarative fields.
 - The synthesized `apply` returns the input unchanged when the target can't be found. Pair the patch with a strong `verify` (use `count` or both `present` *and* `absent`) so a missed anchor surfaces as a verify failure rather than silent drift.
 
+### Codemod: free-form → declarative
+
+About 80% of patches under `extensions/` use the free-form `apply()` escape hatch even when their behavior maps cleanly onto `prefix` / `postfix` / `transpiler`. To find candidates and convert one mechanically:
+
+```bash
+# Print a one-line warning per build listing free-form patches that look declarative.
+node scripts/check-declarative.mjs
+
+# Convert a single patch in place (Pattern A only — single-function override).
+node scripts/codemod-declarative.mjs <patch-name>            # dry-run, prints diff
+node scripts/codemod-declarative.mjs <patch-name> --write    # apply
+```
+
+**Scope (`codemod-declarative.mjs`):** narrow on purpose. It only rewrites patches whose `apply()` calls `findFunctionByLiteral(code, resolveAnchorLiteral('NAME'))` once and replaces the whole function body with `return !0`. Multi-anchor patches, regex sweeps over the bundle, and patches with side-effect logging stay free-form — convert by hand.
+
+**What the codemod emits:** `kind: 'transpiler'` (not `'prefix'`) because the original drops the entire function body; `transpiler` is the faithful translation. If the override is purely "force-enable", `prefix` with `code: 'return !0;'` is smaller — that optimization is a follow-up.
+
+**Author types (`types/patch.d.ts`):** add a JSDoc directive at the top of your patch file to get editor hints:
+
+```js
+/** @type {import('../types/patch').Patch} */
+export default { … };
+```
+
+The type file is hand-mirrored from `runner/manifest.mjs`. `npm run gen:types` re-runs `scripts/gen-types.mjs` which extracts the validator's `CAPABILITIES` / `KINDS` / `AT_KINDS` / `PHASES` / `CATEGORIES` / `APPLY_MODES` arrays and fails CI if the type unions in `types/patch.d.ts` drift. `npm run gen:types -- --write` rewrites the unions in place.
+
 ---
 
 ## Overlay loader — shims-as-files, one hook
