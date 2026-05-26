@@ -280,8 +280,8 @@ async function fireHook(patch, hookName, ctx, logger) {
 
 function writeLifecycleEntry(entry) {
   try {
-    mkdirSync('storage/outputs', { recursive: true });
-    appendFileSync(join('storage/outputs', 'patch-lifecycle.jsonl'),
+    mkdirSync('storage/diagnostics', { recursive: true });
+    appendFileSync(join('storage/diagnostics', 'patch-lifecycle.jsonl'),
                    JSON.stringify(entry) + '\n', 'utf8');
   } catch (_) { /* non-fatal */ }
 }
@@ -621,8 +621,8 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
               candidates,
               verify_failed: verifyFailed,
             });
-            mkdirSync('storage/outputs', { recursive: true });
-            appendFileSync(join('storage/outputs', 'anchor-drift.jsonl'), alertLine + '\n', 'utf8');
+            mkdirSync('storage/diagnostics', { recursive: true });
+            appendFileSync(join('storage/diagnostics', 'anchor-drift.jsonl'), alertLine + '\n', 'utf8');
 
             if (candidates.length > 0) {
               for (const c of candidates) {

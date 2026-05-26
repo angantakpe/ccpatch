@@ -777,8 +777,8 @@ async function runDoctor(options, patches, logger) {
     try {
       const version = options.patchOptions?.version ?? process.env.CCPATCH_CLI_VERSION ?? null;
       const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      fs.mkdirSync('storage/outputs', { recursive: true });
-      const outPath = path.join('storage/outputs', 'anchor-drift.jsonl');
+      fs.mkdirSync('storage/diagnostics', { recursive: true });
+      const outPath = path.join('storage/diagnostics', 'anchor-drift.jsonl');
       for (const { name, patch, status, detail } of driftEntries) {
         const v = patch.verify ?? {};
         const presents = Array.isArray(v.present) ? v.present : (v.present ? [v.present] : []);

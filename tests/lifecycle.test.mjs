@@ -7,7 +7,7 @@ import { validateManifest } from '../runner/manifest.mjs';
 
 const silent = { log() {}, warn() {}, error() {} };
 
-const TELEMETRY_PATH = path.join('storage/outputs', 'patch-lifecycle.jsonl');
+const TELEMETRY_PATH = path.join('storage/diagnostics', 'patch-lifecycle.jsonl');
 
 function readTelemetry() {
   if (!fs.existsSync(TELEMETRY_PATH)) return [];

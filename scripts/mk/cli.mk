@@ -331,7 +331,7 @@ clean: ## Wipe all build outputs; downloaded archives in storage/archives/ are p
 	rm -rf tools/reconstructor/node_modules
 	rm -f cli.beautified.js /tmp/ccpatch-stderr.log
 	find . -name "*:Zone.Identifier" -type f -delete
-	@echo "[clean] done — storage/archives/ preserved"
+	@echo "[clean] done — storage/archives/ and storage/diagnostics/ preserved"
 
 clean-patched: ## Remove patched files for current VERSION only: make clean-patched [VERSION=x.y.z]
 	rm -rf releases/$(VERSION)

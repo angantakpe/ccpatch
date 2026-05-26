@@ -143,7 +143,8 @@ if (!globalThis.__ccpFetchInterceptorInstalled__) {
 
 export default {
   category: 'infrastructure',
-
+  // required: silent failure leaves all network-subscriber patches (cost_tracker, cache_responses, etc.) with no intercept bus.
+  required: true,
   description: 'Shared fetch interceptor with fan-out SSE subscriber system (applied first in output)',
   capabilities: ["network"],
   verify: {
