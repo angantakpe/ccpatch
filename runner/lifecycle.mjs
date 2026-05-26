@@ -16,7 +16,7 @@ import { join } from 'node:path';
  *   name, phase, code, appliedCode, opts, verify.issues, attempt, logger.
  * Hook errors are logged ([hook] <name>.<hookName>) and treated as the
  * surrounding step's failure (apply throw / verify fail). Not swallowed.
- * Each hook fire writes one JSONL entry to storage/outputs/patch-lifecycle.jsonl.
+ * Each hook fire writes one JSONL entry to storage/diagnostics/patch-lifecycle.jsonl.
  */
 export async function fireHook(patch, hookName, ctx, logger) {
   const fn = patch[hookName];
@@ -50,8 +50,8 @@ export async function fireHook(patch, hookName, ctx, logger) {
 
 export function writeLifecycleEntry(entry) {
   try {
-    mkdirSync('storage/outputs', { recursive: true });
-    appendFileSync(join('storage/outputs', 'patch-lifecycle.jsonl'),
+    mkdirSync('storage/diagnostics', { recursive: true });
+    appendFileSync(join('storage/diagnostics', 'patch-lifecycle.jsonl'),
                    JSON.stringify(entry) + '\n', 'utf8');
   } catch (_) { /* non-fatal */ }
 }

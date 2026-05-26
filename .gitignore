@@ -56,3 +56,6 @@ npm-debug.log*
 
 # Worktrees created by Claude Code agents
 .claude/worktrees/
+
+# Diagnostic JSONL logs — kept across `make clean` but not committed.
+storage/diagnostics/*.jsonl
