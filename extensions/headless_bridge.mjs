@@ -30,7 +30,7 @@ export default {
   description: 'NDJSON bridge into the running CLI (submit/dispatch/subscribe/cancel).',
   capabilities: ['network', 'prompt', 'tools'],
   dependsOn: ['event_bus', 'auth_token', 'expose_submit_input', 'expose_tool_dispatch'],
-  verify: { present: '__ccpHeadlessBridge_v1' },
+  verify: { present: '__ccpHeadlessBridge_v1', count: { present: 1 } },
   apply: (code) => {
     const hook = `
 // ══════════════════════════════════════════════════════════════════════════

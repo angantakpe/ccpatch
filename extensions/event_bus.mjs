@@ -19,7 +19,7 @@ export default {
   category: 'infrastructure',
   description: 'Typed pub/sub event bus exposed as __ccpBus.',
   capabilities: ['telemetry'],
-  verify: { present: '__ccpBus_v1' },
+  verify: { present: '__ccpBus_v1', count: { present: 1 } },
   apply: (code) => {
     const hook = `
 // ══════════════════════════════════════════════════════════════════════════

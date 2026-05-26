@@ -14,7 +14,7 @@ export default {
   category: 'infrastructure',
   description: 'Shared-secret loader + constant-time compare exposed as __ccpAuth.',
   capabilities: ['env', 'fs'],
-  verify: { present: '__ccpAuth_v1' },
+  verify: { present: '__ccpAuth_v1', count: { present: 1 } },
   apply: (code) => {
     const hook = `
 // ══════════════════════════════════════════════════════════════════════════

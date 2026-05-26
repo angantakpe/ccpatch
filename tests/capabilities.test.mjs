@@ -394,9 +394,8 @@ describe('Track B CLI ack gate', () => {
       '  tool_result_error_content: [network]\n',
     );
     const logger = captureLogger();
-    let code;
     try {
-      code = await withCwd(dir, () =>
+      await withCwd(dir, () =>
         runPatchCli(
           [inputPath, outputPath, '--patch', 'webhook', '--version', '2.1.140'],
           logger,
@@ -413,9 +412,8 @@ describe('Track B CLI ack gate', () => {
   it('--allow-capabilities also satisfies the ack gate', async () => {
     const { dir, inputPath, outputPath } = setupTempProject();
     const logger = captureLogger();
-    let code;
     try {
-      code = await withCwd(dir, () =>
+      await withCwd(dir, () =>
         runPatchCli(
           [
             inputPath, outputPath,
@@ -435,9 +433,8 @@ describe('Track B CLI ack gate', () => {
   it('--allow-unacked warns but does not fail the gate', async () => {
     const { dir, inputPath, outputPath } = setupTempProject();
     const logger = captureLogger();
-    let code;
     try {
-      code = await withCwd(dir, () =>
+      await withCwd(dir, () =>
         runPatchCli(
           [
             inputPath, outputPath,

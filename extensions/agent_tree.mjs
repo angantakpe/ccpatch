@@ -20,7 +20,7 @@ export default {
   description: 'Per-subagent cost + tool accounting tree exposed as __ccpAgentTree.',
   capabilities: ['telemetry'],
   dependsOn: ['event_bus'],
-  verify: { present: '__ccpAgentTree_v1' },
+  verify: { present: '__ccpAgentTree_v1', count: { present: 1 } },
   apply: (code) => {
     const hook = `
 // ══════════════════════════════════════════════════════════════════════════
