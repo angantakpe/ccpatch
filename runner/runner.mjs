@@ -1,15 +1,14 @@
 import { mkdirSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { createHash } from 'node:crypto';
-import { createPatch, structuredPatch, applyPatch } from 'diff';
+import { structuredPatch, applyPatch } from 'diff';
 import { validateManifest } from './manifest.mjs';
 import { fuzzyMatch } from './anchors.mjs';
 import { resolveAt } from './at-selector.mjs';
 import { compileKind } from './patch-kinds.mjs';
-
-function sha256(s) {
-  return createHash('sha256').update(s, 'utf8').digest('hex');
-}
+import { diffSpansFromPatch, detectOverlapsInPhase } from './conflict.mjs';
+import { fireHook } from './lifecycle.mjs';
+import { injectCoverageHit } from './coverage.mjs';
+import { captureReverseDiff } from './reverse-diff.mjs';
 
 const PHASE_ORDER = { pre: 0, main: 1, post: 2 };
 
@@ -118,209 +117,6 @@ export function topoSort(names, patches) {
   }
   for (const name of names) visit(name);
   return result;
-}
-
-/**
- * Convert a structuredPatch into approximate byte ranges in the *pre-apply*
- * code. We currently use line resolution: each hunk produces one range
- * spanning from the start of `oldStart` to the start of `oldStart + oldLines`.
- * That's imperfect — a small edit inside a long line produces a too-wide span —
- * but it's a sane first approximation. A future revision can compute
- * byte-exact spans by diffing within hunks.
- */
-function diffSpansFromPatch(preCode, sp) {
-  const ranges = [];
-  if (!sp || !Array.isArray(sp.hunks)) return ranges;
-  // Build a line-start index once.
-  const lineStarts = [0];
-  for (let i = 0; i < preCode.length; i++) {
-    if (preCode.charCodeAt(i) === 10 /* \n */) lineStarts.push(i + 1);
-  }
-  const lineOffset = (lineNum1) => {
-    const idx = Math.max(0, Math.min(lineStarts.length - 1, lineNum1 - 1));
-    return lineStarts[idx];
-  };
-  for (const h of sp.hunks) {
-    const start = lineOffset(h.oldStart);
-    const endLine = h.oldStart + (h.oldLines || 0);
-    const end = endLine >= lineStarts.length ? preCode.length : lineOffset(endLine);
-    if (end > start) ranges.push([start, end]);
-  }
-  return ranges;
-}
-
-function rangesIntersect(a, b) {
-  return a[0] < b[1] && b[0] < a[1];
-}
-
-/**
- * Detect overlap conflicts among patches that ran in the same phase.
- *   trace: array of { name, phase, atSitesOriginal, diffSpansPre, preCodeLen, allowOverlapWith }
- * Where:
- *   atSitesOriginal — atSites recorded in the code state immediately before
- *                     this patch applied (post-previous-patches code state).
- *   diffSpansPre    — byte ranges in the pre-apply code that the patch touched.
- *
- * Returns array of conflicts: { phase, a, b, kind, rangeA, rangeB }.
- *
- * Note: because each patch sees a different code state, "comparing ranges
- * across patches" is approximate. We compare A's diff span (in A's preCode) to
- * B's at/diff span (in B's preCode = post-A code). Offsets shift by the net
- * delta A introduced; we don't correct for that. The check is a smell detector,
- * not a proof — false positives are possible when ranges incidentally align.
- */
-function detectOverlapsInPhase(traces) {
-  const conflicts = [];
-  for (let i = 0; i < traces.length; i++) {
-    for (let j = i + 1; j < traces.length; j++) {
-      const A = traces[i];
-      const B = traces[j];
-      // at-vs-at: compare resolved sites (in their respective code states).
-      if (A.atSites && B.atSites) {
-        for (const sa of A.atSites) {
-          for (const sb of B.atSites) {
-            if (rangesIntersect([sa.start, sa.end || sa.start + 1], [sb.start, sb.end || sb.start + 1])) {
-              conflicts.push({
-                phase: A.phase, a: A.name, b: B.name, kind: 'at-vs-at',
-                rangeA: [sa.start, sa.end ?? sa.start],
-                rangeB: [sb.start, sb.end ?? sb.start],
-              });
-            }
-          }
-        }
-      }
-      // at-vs-diff: B's resolved at-sites intersect A's diff span.
-      if (B.atSites && A.diffSpans) {
-        for (const sb of B.atSites) {
-          for (const ra of A.diffSpans) {
-            if (rangesIntersect(ra, [sb.start, sb.end || sb.start + 1])) {
-              conflicts.push({
-                phase: A.phase, a: A.name, b: B.name, kind: 'at-vs-diff',
-                rangeA: ra,
-                rangeB: [sb.start, sb.end ?? sb.start],
-              });
-            }
-          }
-        }
-      }
-      // diff-vs-diff: both patches touched overlapping byte ranges (approx).
-      if (A.diffSpans && B.diffSpans) {
-        for (const ra of A.diffSpans) {
-          for (const rb of B.diffSpans) {
-            if (rangesIntersect(ra, rb)) {
-              conflicts.push({
-                phase: A.phase, a: A.name, b: B.name, kind: 'diff-vs-diff',
-                rangeA: ra, rangeB: rb,
-              });
-            }
-          }
-        }
-      }
-    }
-  }
-  return conflicts;
-}
-
-/**
- * Lifecycle hooks (optional, declared on the patch module):
- *
- *   onBeforeApply(ctx)  — called before resolveAt/compileKind/apply. May mutate
- *                          ctx.opts (the per-invocation patchOptions) or ctx.code.
- *   onAfterApply(ctx)   — called after apply() (and any fallback-diff) returns.
- *                          May mutate ctx.appliedCode for last-mile fixups.
- *   onVerifyFail(ctx)   — called when checkVerify() finds issues. Return a string
- *                          to re-run verify against that string (one retry max);
- *                          return undefined/anything else to give up.
- *
- * ctx is a single per-patch object reused across all hook invocations. Fields:
- *   name, phase, code, appliedCode, opts, verify.issues, attempt, logger.
- * Hook errors are logged ([hook] <name>.<hookName>) and treated as the
- * surrounding step's failure (apply throw / verify fail). Not swallowed.
- * Each hook fire writes one JSONL entry to storage/outputs/patch-lifecycle.jsonl.
- */
-async function fireHook(patch, hookName, ctx, logger) {
-  const fn = patch[hookName];
-  if (typeof fn !== 'function') return { ok: true, result: undefined };
-  const start = Date.now();
-  const beforeLen = (typeof ctx.appliedCode === 'string') ? ctx.appliedCode.length
-                  : (typeof ctx.code === 'string') ? ctx.code.length : 0;
-  let entry = {
-    ts: new Date().toISOString(),
-    patch: ctx.name,
-    hook: hookName,
-    attempt: ctx.attempt,
-    phase: ctx.phase,
-  };
-  try {
-    const result = await fn(ctx);
-    const afterLen = (typeof ctx.appliedCode === 'string') ? ctx.appliedCode.length
-                   : (typeof ctx.code === 'string') ? ctx.code.length : 0;
-    entry.byteDelta = afterLen - beforeLen;
-    entry.durationMs = Date.now() - start;
-    writeLifecycleEntry(entry);
-    return { ok: true, result };
-  } catch (err) {
-    entry.durationMs = Date.now() - start;
-    entry.error = err && err.message ? err.message : String(err);
-    writeLifecycleEntry(entry);
-    logger.error(`  [hook] ${ctx.name}.${hookName} threw: ${entry.error}`);
-    return { ok: false, error: err };
-  }
-}
-
-function writeLifecycleEntry(entry) {
-  try {
-    mkdirSync('storage/outputs', { recursive: true });
-    appendFileSync(join('storage/outputs', 'patch-lifecycle.jsonl'),
-                   JSON.stringify(entry) + '\n', 'utf8');
-  } catch (_) { /* non-fatal */ }
-}
-
-/**
- * Inject a `__ccpCovHit('<marker>')` call into the post-apply code so this
- * patch's runtime coverage can be tracked. Best-effort:
- *   1. If the patch resolved an @At HEAD/AFTER/BEFORE/INVOKE site, splice the
- *      call immediately at that site in the post-apply code (mapped by line
- *      content match — atSites point into the pre-apply code).
- *   2. Otherwise, prepend the call onto the first inserted line of the diff.
- *   3. Otherwise, return null to signal "no place to instrument" — the runner
- *      logs a notice and proceeds.
- *
- * Returns the modified code string on success or null on skip.
- */
-function injectCoverageHit(preCode, postCode, marker, atSites) {
-  if (!marker || typeof postCode !== 'string') return null;
-  const hitCall = `(globalThis.__ccpCovHit&&globalThis.__ccpCovHit(${JSON.stringify(marker)}));`;
-  // Strategy 1: anchor in the post-apply diff. Find the first hunk of inserted
-  // text (a line present in postCode but not preCode) and prepend the call.
-  try {
-    const sp = structuredPatch('a', 'b', preCode, postCode, '', '', { context: 0 });
-    for (const h of sp.hunks || []) {
-      for (const ln of h.lines || []) {
-        if (ln.startsWith('+') && ln.length > 1) {
-          const insertedLine = ln.slice(1);
-          // Skip pure-whitespace inserts; we want real code to wrap.
-          if (!insertedLine.trim()) continue;
-          const idx = postCode.indexOf(insertedLine);
-          if (idx !== -1) {
-            return postCode.slice(0, idx) + hitCall + postCode.slice(idx);
-          }
-        }
-      }
-    }
-  } catch (_) { /* fall through */ }
-  // Strategy 2: at-site fallback (atSites refer to preCode offsets, but if
-  // postCode === preCode + injection that didn't show up in the diff, this
-  // still produces a runnable hit). Splice into postCode at the same offset
-  // when possible.
-  if (Array.isArray(atSites) && atSites.length > 0) {
-    const site = atSites[0];
-    const off = typeof site.start === 'number' ? site.start : null;
-    if (off !== null && off <= postCode.length) {
-      return postCode.slice(0, off) + hitCall + postCode.slice(off);
-    }
-  }
-  return null;
 }
 
 export async function applyNamedPatches(code, patches, patchNames, logger = console, patchOptions = {}) {
@@ -628,15 +424,7 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
         // Capture a reverse diff from the effective post-apply code back to
         // `preCode` so the patched bundle can be restored byte-for-byte later.
         // Skip no-change applies — they contribute nothing to a revert.
-        if (Array.isArray(patchOptions.captureReverse) && effectiveCode !== preCode && typeof effectiveCode === 'string') {
-          const reverseDiff = createPatch(name, effectiveCode, preCode, 'patched', 'original');
-          patchOptions.captureReverse.push({
-            name,
-            reverseDiff,
-            preSha256: sha256(preCode),
-            postSha256: sha256(effectiveCode),
-          });
-        }
+        captureReverseDiff(name, preCode, effectiveCode, patchOptions.captureReverse);
         // Auto-inject __ccpCovHit() for patches that opted in via coverageMarker.
         // Best-effort: only attempt when the patch actually changed code, and
         // skip silently (with a notice) when no hook site is findable.
