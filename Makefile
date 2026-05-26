@@ -4,9 +4,48 @@ export
 include scripts/mk/vars.mk
 include scripts/mk/cli.mk
 
-.PHONY: help refmap refmap-check smoke-bridge lint lint-dead lint-unused
-smoke-bridge: ## Smoke-test the headless_bridge NDJSON protocol (no patched CLI needed)
+.PHONY: help refmap refmap-check smoke-bridge smoke-integration \
+        bridge-host bridge-host-stop bridge-tail bridge-submit \
+        verticals-check lint lint-dead lint-unused
+
+# ── Verticals: testing the headless bridge + agent tree ─────────────────────
+
+# Default socket / token for the interactive `bridge-host` + tier-3 smoke.
+# Override on the command line: make bridge-host CC_BRIDGE_ADDR=tcp://127.0.0.1:7878
+CC_BRIDGE_ADDR  ?= unix:/tmp/ccpatch.sock
+CC_BRIDGE_TOKEN ?= devtoken
+
+smoke-bridge: ## Tier 1 — NDJSON protocol smoke against a stubbed host (no patched CLI)
 	@node tests/smoke_bridge.mjs
+
+bridge-host: ## Tier 2 — boot a stub bridge host so you can prod it with ccpatch-bridge / nc
+	@echo "[bridge-host] CC_BRIDGE_ADDR=$(CC_BRIDGE_ADDR)"
+	@echo "[bridge-host] CC_BRIDGE_TOKEN=$(CC_BRIDGE_TOKEN)"
+	@CC_BRIDGE_ADDR=$(CC_BRIDGE_ADDR) CC_BRIDGE_TOKEN=$(CC_BRIDGE_TOKEN) node tests/bridge_host.mjs
+
+bridge-host-stop: ## Tier 2 — kill any stray bridge-host and unlink the unix socket
+	@-pkill -f tests/bridge_host.mjs 2>/dev/null || true
+	@if echo "$(CC_BRIDGE_ADDR)" | grep -q '^unix:'; then \
+		SOCK=$$(echo $(CC_BRIDGE_ADDR) | sed 's/^unix://'); \
+		rm -f "$$SOCK" && echo "removed $$SOCK"; \
+	fi
+
+bridge-submit: ## Tier 2 — send PROMPT to the running bridge-host: make bridge-submit PROMPT="hi"
+	@test -n "$(PROMPT)" || (echo "usage: make bridge-submit PROMPT=\"...\"" && exit 2)
+	@CC_BRIDGE_ADDR=$(CC_BRIDGE_ADDR) CC_BRIDGE_TOKEN=$(CC_BRIDGE_TOKEN) \
+		node tools/ccpatch-bridge.mjs submit "$(PROMPT)"
+
+bridge-tail: ## Tier 2 — tail bus events from the running bridge-host
+	@CC_BRIDGE_ADDR=$(CC_BRIDGE_ADDR) CC_BRIDGE_TOKEN=$(CC_BRIDGE_TOKEN) \
+		node tools/ccpatch-bridge.mjs tail '*'
+
+smoke-integration: ## Tier 3 — drive a real patched CLI over the bridge (set CCPATCH_INTEGRATION_CLI)
+	@node tests/smoke_integration.mjs
+
+verticals-check: lint smoke-bridge ## Tier 1 — full vertical CI gate (lint + protocol smoke)
+	@echo "[verticals-check] OK"
+
+# ── Dead-code lint ──────────────────────────────────────────────────────────
 
 lint-dead: ## Static dead-code check via tsc --checkJs (unused locals/params/imports)
 	@node scripts/lint-dead.mjs

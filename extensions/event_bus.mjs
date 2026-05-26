@@ -68,7 +68,9 @@ export default {
 `;
     const SHEBANG = '#!/usr/bin/env node';
     const IIFE = '(function(exports, require, module, __filename, __dirname)';
-    if (code.includes(SHEBANG)) return code.replace(SHEBANG, SHEBANG + '\n' + hook);
+    // Use the function form so `$&`/`$'`/`$$` inside `hook` (regex source) are
+    // treated literally rather than as String.prototype.replace specials.
+    if (code.includes(SHEBANG)) return code.replace(SHEBANG, () => SHEBANG + '\n' + hook);
     if (code.includes(IIFE)) return code.replace(IIFE, () => hook + IIFE);
     console.warn('  [!] event_bus: anchor not found — skipping');
     return code;

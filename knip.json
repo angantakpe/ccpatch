@@ -14,6 +14,8 @@
     "tools/tweakcc-anchors.mjs",
     "tests/**/*.test.mjs",
     "tests/smoke_bridge.mjs",
+    "tests/bridge_host.mjs",
+    "tests/smoke_integration.mjs",
     "core/**/*.mjs",
     "extensions/**/*.mjs"
   ],
