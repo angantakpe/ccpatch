@@ -68,7 +68,7 @@ describe('lifecycle hooks — runtime', () => {
         },
       },
     };
-    const out = await applyNamedPatches('x', patches, ['p'], silent);
+    const { code: out } = await applyNamedPatches('x', patches, ['p'], silent);
     assert.equal(out, 'x+POST');
   });
 
@@ -83,7 +83,7 @@ describe('lifecycle hooks — runtime', () => {
         },
       },
     };
-    const out = await applyNamedPatches('x', patches, ['p'], silent, { strict: true });
+    const { code: out } = await applyNamedPatches('x', patches, ['p'], silent, { strict: true });
     assert.equal(out, 'xGOOD');
   });
 

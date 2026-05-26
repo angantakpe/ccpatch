@@ -95,8 +95,11 @@ describe('manifest — allowOverlapWith', () => {
   });
 });
 
-describe('applyNamedPatches — priority ordering', () => {
-  it('orders same-phase peers by priority ascending', async () => {
+describe('applyNamedPatches — ordering', () => {
+  // Priority was removed in favor of pure (phase asc, topo index asc).
+  // The manifest still accepts `priority` for back-compat but the runner
+  // ignores it for ordering decisions.
+  it('preserves input/topo order for same-phase peers (priority is no-op)', async () => {
     const log = [];
     const patches = {
       a: mkPatch({ apply: (c) => { log.push('a'); return c + 'A'; }, verify: { present: 'A', weak: true }, priority: 200 }),
@@ -104,16 +107,17 @@ describe('applyNamedPatches — priority ordering', () => {
       c: mkPatch({ apply: (c) => { log.push('c'); return c + 'C'; }, verify: { present: 'C', weak: true }, priority: 50 }),
     };
     await applyNamedPatches('x', patches, ['a', 'b', 'c'], silent);
-    assert.deepEqual(log, ['c', 'b', 'a']);
+    assert.deepEqual(log, ['a', 'b', 'c']);
   });
 
-  it('dependsOn beats priority (dep runs first even if higher priority)', async () => {
+  it('dependsOn determines order regardless of input order', async () => {
     const log = [];
     const patches = {
-      a: mkPatch({ apply: (c) => { log.push('a'); return c + 'A'; }, verify: { present: 'A', weak: true }, priority: 999 }),
-      b: mkPatch({ apply: (c) => { log.push('b'); return c + 'B'; }, verify: { present: 'B', weak: true }, priority: 10, dependsOn: ['a'] }),
+      a: mkPatch({ apply: (c) => { log.push('a'); return c + 'A'; }, verify: { present: 'A', weak: true } }),
+      b: mkPatch({ apply: (c) => { log.push('b'); return c + 'B'; }, verify: { present: 'B', weak: true }, dependsOn: ['a'] }),
     };
-    await applyNamedPatches('x', patches, ['a', 'b'], silent);
+    // Note: input order ['b','a'] — dep edge still forces a before b.
+    await applyNamedPatches('x', patches, ['b', 'a'], silent);
     assert.deepEqual(log, ['a', 'b']);
   });
 });
@@ -177,7 +181,7 @@ describe('applyNamedPatches — overlap detection', () => {
       a: mkPatch({ apply: (c) => c.replace('TOP', 'TOP_A'), verify: { present: 'TOP_A', weak: true } }),
       b: mkPatch({ apply: (c) => c.replace('BOT', 'BOT_B'), verify: { present: 'BOT_B', weak: true } }),
     };
-    const out = await applyNamedPatches(code, patches, ['a', 'b'], silent, { strict: true });
+    const { code: out } = await applyNamedPatches(code, patches, ['a', 'b'], silent, { strict: true });
     assert.ok(out.includes('TOP_A') && out.includes('BOT_B'));
   });
 });

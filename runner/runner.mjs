@@ -9,6 +9,7 @@ import { diffSpansFromPatch, detectOverlapsInPhase } from './conflict.mjs';
 import { fireHook } from './lifecycle.mjs';
 import { injectCoverageHit } from './coverage.mjs';
 import { captureReverseDiff } from './reverse-diff.mjs';
+import { verifyBatch } from './verify-batch.mjs';
 
 const PHASE_ORDER = { pre: 0, main: 1, post: 2 };
 
@@ -129,6 +130,75 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
 
   const topoOrdered = topoSort(patchNames, patches);
 
+  // Report buckets — populated as patches apply, returned to caller for
+  // downstream tooling (dashboards, timing budgets, drift triage).
+  const timings = [];
+  const drifts = [];
+  const verifyIssuesReport = [];
+
+  // Deferred verify queue, flushed at phase boundaries and at the very end.
+  // Each entry snapshots the code as it was IMMEDIATELY after its own apply()
+  // returned — so verify sees only that patch's contribution, never a later
+  // patch's rewrite of the same span. At flush we group entries by snapshot
+  // identity: consecutive no-change patches share a snapshot and get batched;
+  // mutating patches each form their own group. verifyBatch then walks each
+  // unique snapshot exactly once, scanning the union of all present/absent
+  // literals in a single pass — replacing the old 2×N per-patch indexOf walks.
+  let pendingVerify = [];
+  let currentPhase = null;
+  async function flushPendingVerify(_reasonPhase) {
+    if (pendingVerify.length === 0) return;
+    const batch = pendingVerify;
+    pendingVerify = [];
+    const groups = new Map(); // snapshot -> array of entries
+    for (const e of batch) {
+      const arr = groups.get(e.snapshot);
+      if (arr) arr.push(e); else groups.set(e.snapshot, [e]);
+    }
+    const issuesByEntry = new Map();
+    for (const [snapshot, entries] of groups) {
+      const items = entries.map((b) => ({
+        patchName: b.name,
+        present: b.present,
+        absent: b.absent,
+        count: b.count,
+      }));
+      const batchResults = verifyBatch(snapshot, items);
+      for (let i = 0; i < entries.length; i++) {
+        issuesByEntry.set(entries[i], batchResults[i].issues);
+      }
+    }
+    for (let i = 0; i < batch.length; i++) {
+      const entry = batch[i];
+      let issues = issuesByEntry.get(entry) || [];
+      if (issues.length > 0 && typeof entry.patch.onVerifyFail === 'function') {
+        entry.lifecycleCtx.verify.issues = issues.slice();
+        entry.lifecycleCtx.attempt = 2;
+        const hookRes = await fireHook(entry.patch, 'onVerifyFail', entry.lifecycleCtx, logger);
+        if (!hookRes.ok) {
+          if (entry.patchStrict) failures.push(`${entry.name}: onVerifyFail threw: ${hookRes.error.message}`);
+        } else if (typeof hookRes.result === 'string') {
+          const retryIssues = checkVerify(entry.patch.verify, hookRes.result);
+          if (retryIssues.length === 0) {
+            nextCode = hookRes.result;
+            entry.lifecycleCtx.appliedCode = hookRes.result;
+            issues = [];
+            logger.log(`  [hook] ${entry.name}.onVerifyFail healed verify`);
+          } else {
+            issues = retryIssues;
+          }
+        }
+      }
+      if (issues.length > 0) {
+        verifyIssuesReport.push({ name: entry.name, issues: issues.slice() });
+        for (const issue of issues) {
+          logger.warn(`  [!] VERIFY FAILED: ${entry.name} — ${issue}`);
+          if (entry.patchStrict) failures.push(`${entry.name}: verify: ${issue}`);
+        }
+      }
+    }
+  }
+
   // Enforce phase-respecting dependencies: a patch may only depend on patches
   // in the same or an earlier phase. (pre < main < post)
   for (const name of topoOrdered) {
@@ -146,54 +216,14 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
     }
   }
 
-  // Composite stable sort: (1) phase, (2) topo position, (3) priority asc.
-  // Topo is authoritative for ordering deps; priority only orders peers without
-  // a dependency relationship. Map name → topo index for tie-breaking peers
-  // that survive the phase split.
+  // Ordering: (phase asc, topo index asc). topoSort already produced a valid
+  // linear extension of the dependsOn graph, so within a phase we preserve its
+  // order verbatim — guaranteeing a dependent never precedes its dependency.
   const topoIndex = new Map(topoOrdered.map((n, i) => [n, i]));
-  const priorityOf = (name) => {
-    const p = patches[name];
-    if (!p) return 1000;
-    return Number.isInteger(p.priority) ? p.priority : 1000;
-  };
-  // Use topoOrdered as the base, then partition by (phase, priority) while
-  // preserving topo order for ties. We sort with a synthetic key that splits
-  // peers (nodes with no transitive dep edge between them) by priority. Since
-  // we can't cheaply compute reachability here, we approximate: within a phase,
-  // group by topo strata as defined by the topo order, then sort each phase
-  // bucket by (priority, original topo index). This is stable enough that a
-  // dependent never precedes its dependency (topoSort guarantees the input is
-  // already valid), because within one phase a B that dependsOn A had to appear
-  // after A in topoOrdered — but a lower-priority B could float past A.
-  // Guard against that: when sorting, if B depends (transitively) on A, B must
-  // stay after A regardless of priority.
-  const transDeps = new Map(); // name → Set of names it (transitively) depends on
-  function depsOf(name) {
-    if (transDeps.has(name)) return transDeps.get(name);
-    const out = new Set();
-    const stack = [...((patches[name] && patches[name].dependsOn) || [])];
-    while (stack.length) {
-      const d = stack.pop();
-      if (out.has(d)) continue;
-      out.add(d);
-      const dp = patches[d];
-      if (dp && Array.isArray(dp.dependsOn)) {
-        for (const dd of dp.dependsOn) if (!out.has(dd)) stack.push(dd);
-      }
-    }
-    transDeps.set(name, out);
-    return out;
-  }
   const ordered = topoOrdered.slice().sort((a, b) => {
     const pa = PHASE_ORDER[phaseOf(patches[a])];
     const pb = PHASE_ORDER[phaseOf(patches[b])];
     if (pa !== pb) return pa - pb;
-    // Same phase: respect dependency edges first.
-    if (depsOf(a).has(b)) return 1;  // a depends on b → b first
-    if (depsOf(b).has(a)) return -1; // b depends on a → a first
-    const prA = priorityOf(a), prB = priorityOf(b);
-    if (prA !== prB) return prA - prB;
-    // Stable fallback: original topo position.
     return topoIndex.get(a) - topoIndex.get(b);
   });
 
@@ -204,6 +234,14 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
       results[name] = 'skipped';
       continue;
     }
+
+    // Phase transition: flush any pending verify checks against the
+    // end-of-phase code before moving on.
+    const thisPhase = phaseOf(patch);
+    if (currentPhase !== null && thisPhase !== currentPhase) {
+      await flushPendingVerify(currentPhase);
+    }
+    currentPhase = thisPhase;
 
     const patchStrict = globalStrict || patch.required === true;
     const fail = (reason) => {
@@ -285,6 +323,7 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
       const callOpts = atSites ? { ...beforeOpts, atSites } : beforeOpts;
       const appliedCode = applyFn(preCode, callOpts);
       const _patchMs = Date.now() - _patchStart;
+      timings.push({ name, ms: _patchMs });
       if (_patchMs > 5000) {
         logger.warn(`  [!] SLOW PATCH: "${name}" took ${_patchMs}ms — check for catastrophic regex backtracking`);
       } else if (_patchMs > 1000) {
@@ -411,6 +450,7 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
             appendFileSync(join('storage/outputs', 'anchor-drift.jsonl'), alertLine + '\n', 'utf8');
 
             if (candidates.length > 0) {
+              drifts.push({ name, candidates: candidates.slice() });
               for (const c of candidates) {
                 logger.warn(`      Closest candidate (score ${c.score.toFixed(2)}, from ${c.source}): \`${c.snippet.slice(0, 80)}\` at offset ${c.offset}`);
               }
@@ -475,31 +515,20 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
       }
 
       if (patch.verify) {
-        let issues = checkVerify(patch.verify, nextCode);
-        if (issues.length > 0 && typeof patch.onVerifyFail === 'function') {
-          lifecycleCtx.verify.issues = issues.slice();
-          lifecycleCtx.attempt = 2;
-          const hookRes = await fireHook(patch, 'onVerifyFail', lifecycleCtx, logger);
-          if (!hookRes.ok) {
-            fail(`onVerifyFail threw: ${hookRes.error.message}`);
-          } else if (typeof hookRes.result === 'string') {
-            // Retry verify against the hook-returned code (max 1 retry).
-            const retryCode = hookRes.result;
-            const retryIssues = checkVerify(patch.verify, retryCode);
-            if (retryIssues.length === 0) {
-              nextCode = retryCode;
-              lifecycleCtx.appliedCode = retryCode;
-              issues = [];
-              logger.log(`  [hook] ${name}.onVerifyFail healed verify`);
-            } else {
-              issues = retryIssues;
-            }
-          }
-        }
-        for (const issue of issues) {
-          logger.warn(`  [!] VERIFY FAILED: ${name} — ${issue}`);
-          fail(`verify: ${issue}`);
-        }
+        // Defer verify into the phase batch. End-of-phase flush runs verifyBatch
+        // in one linear scan per snapshot, then dispatches onVerifyFail
+        // per-patch as needed. `snapshot` captures the code immediately after
+        // this patch's apply() so verify sees only this patch's contribution.
+        pendingVerify.push({
+          name,
+          patch,
+          patchStrict,
+          lifecycleCtx,
+          snapshot: nextCode,
+          present: toList(patch.verify.present),
+          absent: toList(patch.verify.absent),
+          count: patch.verify.count,
+        });
       }
     } catch (err) {
       logger.error(`  [!] Error applying patch "${name}": ${err.message}`);
@@ -507,6 +536,9 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
       fail(`apply() threw: ${err.message}`);
     }
   }
+
+  // Final flush — verify the last phase's accumulated assertions in one pass.
+  await flushPendingVerify(currentPhase);
 
   // Overlap detection: scan each phase for pairs whose ranges intersect.
   // Conflicts are reported to the logger and a JSONL sidecar regardless of
@@ -616,5 +648,10 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
     }
   }
 
-  return nextCode;
+  // New return shape (consumed by Cluster A): patched code, per-patch result
+  // map, and a structured report (timings, drift candidates, verify issues).
+  // Callers that only need per-patch outcomes can destructure:
+  //   const { results } = await applyNamedPatches(...)
+  const report = { timings, drifts, verifyIssues: verifyIssuesReport };
+  return { code: nextCode, results, report };
 }

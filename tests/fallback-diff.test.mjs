@@ -38,7 +38,7 @@ describe('fallbackDiff — runtime fallback', () => {
       },
     };
     const logger = mkLogger();
-    const out = await applyNamedPatches(original, patches, ['drifted'], logger);
+    const { code: out } = await applyNamedPatches(original, patches, ['drifted'], logger);
     assert.equal(out, target);
     assert.ok(
       logger.entries.log.some(l => l.includes('[fallback] drifted') && l.includes('stored-diff applied')),
@@ -59,7 +59,7 @@ describe('fallbackDiff — runtime fallback', () => {
       },
     };
     const logger = mkLogger();
-    const out = await applyNamedPatches(original, patches, ['drifted'], logger);
+    const { code: out } = await applyNamedPatches(original, patches, ['drifted'], logger);
     assert.equal(out, original);
     assert.ok(
       logger.entries.warn.some(w => w.includes('produced no changes')),
@@ -85,7 +85,7 @@ describe('fallbackDiff — runtime fallback', () => {
       },
     };
     const logger = mkLogger();
-    const out = await applyNamedPatches(original, patches, ['ok'], logger);
+    const { code: out } = await applyNamedPatches(original, patches, ['ok'], logger);
     assert.ok(out.includes('line2-OK'));
     // The fallback property may be read once by manifest normalization, but
     // the runtime fallback branch must not produce a [fallback] log line.
@@ -111,7 +111,7 @@ describe('fallbackDiff — runtime fallback', () => {
       },
     };
     const logger = mkLogger();
-    const out = await applyNamedPatches(
+    const { code: out } = await applyNamedPatches(
       original, patches, ['drifted'], logger, { disableFallback: true },
     );
     assert.equal(out, original);

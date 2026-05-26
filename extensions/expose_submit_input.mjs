@@ -43,12 +43,26 @@ export default {
     // Strip the trailing `{helpers:{` (it's not consumed by the wrap; only
     // `let X=...await Y(` is rewritten so the original body continues unchanged).
     const anchor = `let ${varName}=${ReactNs}.useCallback(async(${m[3]})=>{await ${innerFn}(`;
+    // The captured React useCallback expects a single arg of shape
+    //   [{ value, preExpansionValue, mode: 'prompt', pastedContents, skipSlashCommands, uuid }]
+    // (the "queuedCommands" array). External callers like headless_bridge pass
+    // a plain string for ergonomics, so we install an adapter that wraps a
+    // string into the expected array shape before delegating.
     const replacement =
       'var __ccpSubmitInputCaptured_v1=!0;' +
-      `let ${varName}=(function(__ccpCb){try{globalThis.__ccpSubmitInput=__ccpCb;` +
-        // Contract registration — the value is the callback itself.
+      `let ${varName}=(function(__ccpCb){try{` +
+        `var __ccpSubmitInputAdapter=function(__inp,__opts){` +
+          `var __qc;` +
+          `if(typeof __inp==="string"){` +
+            `__qc=[{value:__inp,preExpansionValue:__inp,mode:"prompt",` +
+              `pastedContents:void 0,skipSlashCommands:false,` +
+              `uuid:(globalThis.crypto&&globalThis.crypto.randomUUID)?globalThis.crypto.randomUUID():String(Math.random()).slice(2)}];` +
+          `}else if(Array.isArray(__inp)){__qc=__inp;}else{__qc=[__inp];}` +
+          `return __ccpCb(__qc);` +
+        `};` +
+        `globalThis.__ccpSubmitInput=__ccpSubmitInputAdapter;` +
         `if(typeof globalThis.__ccpProvide==="function"){` +
-          `globalThis.__ccpProvide("submitInput",{version:1,producer:"expose_submit_input",shape:[],value:__ccpCb});` +
+          `globalThis.__ccpProvide("submitInput",{version:1,producer:"expose_submit_input",shape:[],value:__ccpSubmitInputAdapter});` +
         `}` +
       `}catch(_ccpSI_){}return __ccpCb;})(${anchor.slice(anchor.indexOf('=') + 1)}`;
 

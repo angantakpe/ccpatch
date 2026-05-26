@@ -107,7 +107,7 @@ describe('--dry-run --write-on-clean via CLI', () => {
         verify: { present: '/* OK_SENTINEL */', weak: true },
       },
     };
-    const patched = await applyNamedPatches(code, patches, ['sentinel'], silent);
+    const { code: patched } = await applyNamedPatches(code, patches, ['sentinel'], silent);
     const report = runShadow(code, patched, patches, ['sentinel']);
     assert.equal(report.ok, true);
 
@@ -131,7 +131,7 @@ describe('--dry-run --write-on-clean via CLI', () => {
         forbiddenAfterPatch: ['console.log'],
       },
     };
-    const patched = await applyNamedPatches(code, patches, ['bad'], silent);
+    const { code: patched } = await applyNamedPatches(code, patches, ['bad'], silent);
     const report = runShadow(code, patched, patches, ['bad']);
     assert.equal(report.ok, false);
 

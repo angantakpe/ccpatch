@@ -48,7 +48,7 @@ export default {
   const net = __req('node:net');
   const ADDR = process.env.CC_BRIDGE_ADDR;
   const MAX_LINE = Number(process.env.CC_BRIDGE_MAX_LINE || 1048576);
-  const TOPICS = ['turn.start','turn.end','tool.call','tool.result','agent.spawn','agent.exit','cost.delta'];
+  const TOPICS = ['turn.start','turn.end','tool.call','tool.result','tool.use','agent.spawn','agent.exit','cost.delta','assistant.text','assistant.thinking'];
 
   const server = net.createServer((sock) => {
     let buf = '';
@@ -193,6 +193,14 @@ export default {
     const SHEBANG = '#!/usr/bin/env node';
     const IIFE = '(function(exports, require, module, __filename, __dirname)';
     if (code.includes(SHEBANG)) return code.replace(SHEBANG, () => SHEBANG + '\n' + hook);
+    // For Bun-native repack the patched JS MUST start with the IIFE, so we
+    // inject the hook just *inside* the function body (right after the opening
+    // `) {`), not before it.
+    const m = code.match(/\(function\(exports, require, module, __filename, __dirname\)\s*\{/);
+    if (m) {
+      const idx = m.index + m[0].length;
+      return code.slice(0, idx) + '\n' + hook + '\n' + code.slice(idx);
+    }
     if (code.includes(IIFE)) return code.replace(IIFE, () => hook + IIFE);
     console.warn('  [!] headless_bridge: anchor not found — skipping');
     return code;

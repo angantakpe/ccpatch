@@ -59,8 +59,8 @@ describe('topoSort', () => {
 describe('applyNamedPatches — non-strict (default)', () => {
   it('warns but does not throw on no-change', async () => {
     const patches = { noop: mkPatch({ apply: (c) => c }) };
-    const out = await applyNamedPatches('hello', patches, ['noop'], silent);
-    assert.equal(out, 'hello');
+    const { code } = await applyNamedPatches('hello', patches, ['noop'], silent);
+    assert.equal(code, 'hello');
   });
 
   it('swallows apply() errors and continues', async () => {
@@ -68,8 +68,8 @@ describe('applyNamedPatches — non-strict (default)', () => {
       bad:  mkPatch({ apply: () => { throw new Error('boom'); } }),
       good: mkPatch({ apply: (c) => c + '+good' }),
     };
-    const out = await applyNamedPatches('x', patches, ['bad', 'good'], silent);
-    assert.equal(out, 'x+good');
+    const { code } = await applyNamedPatches('x', patches, ['bad', 'good'], silent);
+    assert.equal(code, 'x+good');
   });
 
   it('warns on verify failures but does not throw', async () => {
@@ -146,8 +146,24 @@ describe('applyNamedPatches — strict mode', () => {
       a: { ...mkPatch({ apply: (c) => c + '1' }), allowOverlapWith: ['b'] },
       b: { ...mkPatch({ apply: (c) => c + '2' }), allowOverlapWith: ['a'] },
     };
-    const out = await applyNamedPatches('x', patches, ['a', 'b'], silent, opts);
-    assert.equal(out, 'x12');
+    const { code } = await applyNamedPatches('x', patches, ['a', 'b'], silent, opts);
+    assert.equal(code, 'x12');
+  });
+
+  it('returns { code, results, report } with timings populated', async () => {
+    const patches = {
+      a: mkPatch({ apply: (c) => c + 'A', verify: { present: 'A', weak: true } }),
+      b: mkPatch({ apply: (c) => c + 'B', verify: { present: 'B', weak: true } }),
+    };
+    const ret = await applyNamedPatches('x', patches, ['a', 'b'], silent);
+    assert.equal(ret.code, 'xAB');
+    assert.equal(ret.results.a, 'applied');
+    assert.equal(ret.results.b, 'applied');
+    assert.ok(Array.isArray(ret.report.timings));
+    assert.equal(ret.report.timings.length, 2);
+    assert.ok(ret.report.timings.every(t => typeof t.name === 'string' && typeof t.ms === 'number'));
+    assert.ok(Array.isArray(ret.report.drifts));
+    assert.ok(Array.isArray(ret.report.verifyIssues));
   });
 });
 
@@ -165,8 +181,8 @@ describe('applyNamedPatches — required: true (per-patch strict)', () => {
       core: mkPatch({ apply: (c) => c + '+core', required: true }),
       opt:  mkPatch({ apply: (c) => c }),
     };
-    const out = await applyNamedPatches('x', patches, ['core', 'opt'], silent);
-    assert.equal(out, 'x+core');
+    const { code } = await applyNamedPatches('x', patches, ['core', 'opt'], silent);
+    assert.equal(code, 'x+core');
   });
 });
 

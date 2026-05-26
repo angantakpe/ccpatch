@@ -34,7 +34,7 @@ describe('applyNamedPatches — reverse diff capture', () => {
       b: mkPatch((c) => c.replace('return 2;', 'return 22;')),
     };
     const captureReverse = [];
-    const out = await applyNamedPatches(ORIGINAL, patches, ['a', 'b'], silent, { captureReverse });
+    const { code: out } = await applyNamedPatches(ORIGINAL, patches, ['a', 'b'], silent, { captureReverse });
     assert.equal(captureReverse.length, 2);
     assert.equal(captureReverse[0].name, 'a');
     assert.equal(captureReverse[1].name, 'b');
@@ -61,7 +61,7 @@ describe('applyNamedPatches — reverse diff capture', () => {
       c: mkPatch((c) => c.replace('return 3;', 'return 33;')),
     };
     const captureReverse = [];
-    const patched = await applyNamedPatches(ORIGINAL, patches, ['a', 'b', 'c'], silent, { captureReverse });
+    const { code: patched } = await applyNamedPatches(ORIGINAL, patches, ['a', 'b', 'c'], silent, { captureReverse });
     assert.notEqual(patched, ORIGINAL);
 
     let current = patched;
@@ -99,7 +99,7 @@ describe('ccpatch revert / diff — CLI round-trip', () => {
       b: mkPatch((c) => c.replace('return 2;', 'return 22;')),
     };
     const captureReverse = [];
-    const patched = await applyNamedPatches(ORIGINAL, patches, ['a', 'b'], silent, { captureReverse });
+    const { code: patched } = await applyNamedPatches(ORIGINAL, patches, ['a', 'b'], silent, { captureReverse });
     fs.writeFileSync(patchedPath, patched, 'utf8');
     fs.writeFileSync(patchedPath + '.ccp-revert.json', JSON.stringify({
       version: 1,
@@ -137,7 +137,7 @@ describe('ccpatch revert / diff — CLI round-trip', () => {
       b: mkPatch((c) => c.replace('return 2;', 'return 22;')),
     };
     const captureReverse = [];
-    const patched = await applyNamedPatches(ORIGINAL, patches, ['a', 'b'], silent, { captureReverse });
+    const { code: patched } = await applyNamedPatches(ORIGINAL, patches, ['a', 'b'], silent, { captureReverse });
     fs.writeFileSync(patchedPath, patched, 'utf8');
     fs.writeFileSync(patchedPath + '.ccp-revert.json', JSON.stringify({
       version: 1,

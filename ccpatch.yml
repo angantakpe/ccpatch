@@ -267,6 +267,30 @@ profiles:
     - loop_dynamic
     - webhook
     - save_conversations
+    - assistant_stream_events
+    - headless_bridge
+
+  daemon_native:
+    # Same as `daemon`, minus esm_compat + fix_bun_shim. Use this for the
+    # native-binary repack path (patch-claude-code-native) where those two
+    # rewrite the CJS wrapper into ESM `import` form that can't be re-embedded
+    # back into the Bun SEA binary.
+    - react_singleton
+    - contracts
+    - overlay_loader
+    - fetch_interceptor
+    - fix_stdin_da1_leak
+    - fix_message_normalizer
+    - fix_project_root
+    - tool_result_error_content
+    - subagent_hooks_stub
+    - event_bus
+    - auth_token
+    - expose_api_client
+    - expose_submit_input
+    - expose_tool_dispatch
+    - expose_agent_tool
+    - capture_interactive_request
     - headless_bridge
 
   orchestrator:

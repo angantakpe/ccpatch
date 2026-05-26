@@ -156,7 +156,7 @@ describe('auto-injection of __ccpCovHit at apply time', () => {
         coverageMarker: 'marked-hit',
       },
     };
-    const out = await applyNamedPatches('seed-code', patches, ['marked'], silent);
+    const { code: out } = await applyNamedPatches('seed-code', patches, ['marked'], silent);
     assert.ok(out.includes('__ccpCovHit'), `expected __ccpCovHit in output, got: ${out}`);
     assert.ok(out.includes('"marked-hit"'), `expected marker name in output`);
   }));
@@ -172,7 +172,7 @@ describe('auto-injection of __ccpCovHit at apply time', () => {
         coverageMarker: 'ghost-hit',
       },
     };
-    const out = await applyNamedPatches('x', patches, ['ghost'], logger);
+    const { code: out } = await applyNamedPatches('x', patches, ['ghost'], logger);
     // No injection on no-change: the marker should not appear in code.
     assert.equal(out.includes('ghost-hit'), false);
   }));
