@@ -5,6 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import http from 'node:http';
+
 import {
   hashPatchesTree,
   installModuleFromPath,
@@ -12,6 +14,8 @@ import {
   removeModule,
   verifyModule,
   readModuleManifest,
+  resolveContentHash,
+  fetchAndExtractTarball,
 } from '../runner/modules.mjs';
 import { runModuleCommand } from '../runner/cli.mjs';
 import { loadPatches } from '../runner/loader.mjs';
@@ -271,7 +275,7 @@ describe('module install — high-risk capability gate', () => {
 });
 
 describe('module install — unsigned module loads but warns', () => {
-  it('logs an UNSIGNED warning at install time', async () => {
+  it('logs a no-contentHash warning at install time', async () => {
     const project = newProject();
     const logger = captureLogger();
     const code = await runModuleCommand(
@@ -281,8 +285,129 @@ describe('module install — unsigned module loads but warns', () => {
     );
     assert.equal(code, 0);
     assert.ok(
-      logger._out.some(l => l.toLowerCase().includes('unsigned')),
-      `expected unsigned warning, got:\n${logger._out.join('\n')}`,
+      logger._out.some(l => /no contenthash|content hash/i.test(l)),
+      `expected a no-contentHash warning, got:\n${logger._out.join('\n')}`,
     );
+  });
+});
+
+// S1: contentHash is the modern field; signature is a deprecated alias.
+describe('module contentHash / signature alias (S1)', () => {
+  it('accepts the modern contentHash field', () => {
+    const src = copyFixture();
+    const hash = hashPatchesTree(path.join(src, 'patches'));
+    const mf = readModuleManifest(src);
+    delete mf.signature;
+    mf.contentHash = hash;
+    fs.writeFileSync(path.join(src, 'ccpatch-module.json'), JSON.stringify(mf, null, 2));
+    const project = newProject();
+    installModuleFromPath(src, { projectRoot: project });
+    const r = verifyModule('@ccpatch-test/example-module', { projectRoot: project });
+    assert.equal(r.signed, true);
+    assert.equal(r.ok, true);
+    assert.equal(r.hashSource, 'contentHash');
+  });
+
+  it('accepts the legacy signature alias and flags it', () => {
+    const src = copyFixture();
+    const hash = hashPatchesTree(path.join(src, 'patches'));
+    const mf = readModuleManifest(src);
+    mf.signature = hash;
+    fs.writeFileSync(path.join(src, 'ccpatch-module.json'), JSON.stringify(mf, null, 2));
+    const project = newProject();
+    installModuleFromPath(src, { projectRoot: project });
+    const r = verifyModule('@ccpatch-test/example-module', { projectRoot: project });
+    assert.equal(r.signed, true);
+    assert.equal(r.ok, true);
+    assert.equal(r.hashSource, 'signature');
+  });
+
+  it('rejects a manifest where contentHash and signature disagree', () => {
+    const src = copyFixture();
+    const hash = hashPatchesTree(path.join(src, 'patches'));
+    const mf = readModuleManifest(src);
+    mf.contentHash = hash;
+    mf.signature = 'f'.repeat(64);
+    fs.writeFileSync(path.join(src, 'ccpatch-module.json'), JSON.stringify(mf, null, 2));
+    assert.throws(() => readModuleManifest(src), /disagree/i);
+  });
+
+  it('resolveContentHash prefers contentHash and reports the source', () => {
+    assert.deepEqual(resolveContentHash({ contentHash: 'a'.repeat(64) }), { hash: 'a'.repeat(64), source: 'contentHash' });
+    assert.deepEqual(resolveContentHash({ signature: 'b'.repeat(64) }), { hash: 'b'.repeat(64), source: 'signature' });
+    assert.deepEqual(resolveContentHash({}), { hash: null, source: null });
+  });
+});
+
+// S3c: copyTree must refuse to install module trees containing symlinks.
+describe('module install — symlink rejection (S3c)', () => {
+  it('refuses to install a module that ships a symlink', () => {
+    const src = copyFixture();
+    // Plant a symlink pointing outside the module tree (e.g. at a secret).
+    const link = path.join(src, 'patches', 'evil-link');
+    try {
+      fs.symlinkSync('/etc/passwd', link);
+    } catch (_err) {
+      return; // platform without symlink support — skip.
+    }
+    const project = newProject();
+    assert.throws(
+      () => installModuleFromPath(src, { projectRoot: project }),
+      /symlink/i,
+    );
+    assert.equal(listModules(project).length, 0, 'module must not be installed when a symlink is present');
+  });
+});
+
+// S2/S3: network fetch hardening.
+describe('fetchAndExtractTarball — scheme + size guards (S2/S3)', () => {
+  it('refuses cleartext http:// without --insecure (S2)', async () => {
+    await assert.rejects(
+      () => fetchAndExtractTarball('http://example.com/mod.tgz'),
+      /cleartext|insecure|https/i,
+    );
+  });
+
+  it('refuses non-http(s) schemes (S2)', async () => {
+    await assert.rejects(
+      () => fetchAndExtractTarball('file:///etc/passwd'),
+      /https/i,
+    );
+  });
+
+  it('rejects an oversize body via content-length before buffering (S3a)', async () => {
+    const big = Buffer.alloc(1024, 0x41);
+    const server = http.createServer((_req, res) => {
+      res.setHeader('content-length', String(big.length));
+      res.end(big);
+    });
+    await new Promise(r => server.listen(0, '127.0.0.1', r));
+    const { port } = server.address();
+    try {
+      await assert.rejects(
+        () => fetchAndExtractTarball(`http://127.0.0.1:${port}/mod.tgz`, { insecure: true, maxBytes: 256 }),
+        /exceed|cap/i,
+      );
+    } finally {
+      await new Promise(r => server.close(r));
+    }
+  });
+
+  it('rejects an oversize body mid-stream when content-length lies (S3a)', async () => {
+    const big = Buffer.alloc(4096, 0x42);
+    const server = http.createServer((_req, res) => {
+      // No content-length header → forces the streaming cap path.
+      res.end(big);
+    });
+    await new Promise(r => server.listen(0, '127.0.0.1', r));
+    const { port } = server.address();
+    try {
+      await assert.rejects(
+        () => fetchAndExtractTarball(`http://127.0.0.1:${port}/mod.tgz`, { insecure: true, maxBytes: 512 }),
+        /exceed|cap|mid-stream/i,
+      );
+    } finally {
+      await new Promise(r => server.close(r));
+    }
   });
 });
