@@ -1,3 +1,5 @@
+import { spliceBoot } from '../runner/patch-helpers.mjs';
+
 // Module-level so `preloadCode` can expose it without duplication.
 const logHook = `
 // ══════════════════════════════════════════════════════════════════════════
@@ -72,11 +74,6 @@ export default {
   preload: true,
   preloadCode: logHook,
   apply: (code) => {
-    const _SHEBANG_ = '#!/usr/bin/env node';
-    const _CJS_IIFE_ = '(function(exports, require, module, __filename, __dirname)';
-    if (code.includes(_SHEBANG_)) return code.replace(_SHEBANG_, _SHEBANG_ + '\n' + logHook);
-    if (code.includes(_CJS_IIFE_)) return code.replace(_CJS_IIFE_, () => logHook + _CJS_IIFE_);
-    console.warn('  [!] tools_log: anchor not found — skipping');
-    return code;
+    return spliceBoot(code, logHook);
   },
 };

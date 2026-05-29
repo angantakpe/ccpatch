@@ -15,6 +15,8 @@
  *     tools: { [name]: count },
  *     children: [ ...nodes ] }
  */
+import { spliceBoot } from '../runner/patch-helpers.mjs';
+
 export default {
   category: 'observe',
   description: 'Per-subagent cost + tool accounting tree exposed as __ccpAgentTree.',
@@ -111,11 +113,9 @@ export default {
   }
 })();
 `;
-    const SHEBANG = '#!/usr/bin/env node';
-    const IIFE = '(function(exports, require, module, __filename, __dirname)';
-    if (code.includes(SHEBANG)) return code.replace(SHEBANG, () => SHEBANG + '\n' + hook);
-    if (code.includes(IIFE)) return code.replace(IIFE, () => hook + IIFE);
-    console.warn('  [!] agent_tree: anchor not found — skipping');
-    return code;
+    // spliceBoot prepends at the shebang (Node-script bundle) or the CJS-IIFE
+    // seam (npm bundle) — same boot site as before — and throws on anchor miss
+    // so the strict-mode runner catches drift instead of silently no-oping.
+    return spliceBoot(code, hook);
   },
 };

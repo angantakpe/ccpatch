@@ -10,6 +10,8 @@
  *
  * Rotation: on SIGHUP, re-reads the file source.
  */
+import { spliceBoot } from '../runner/patch-helpers.mjs';
+
 export default {
   category: 'infrastructure',
   description: 'Shared-secret loader + constant-time compare exposed as __ccpAuth.',
@@ -81,11 +83,6 @@ export default {
   }
 })();
 `;
-    const SHEBANG = '#!/usr/bin/env node';
-    const IIFE = '(function(exports, require, module, __filename, __dirname)';
-    if (code.includes(SHEBANG)) return code.replace(SHEBANG, () => SHEBANG + '\n' + hook);
-    if (code.includes(IIFE)) return code.replace(IIFE, () => hook + IIFE);
-    console.warn('  [!] auth_token: anchor not found — skipping');
-    return code;
+    return spliceBoot(code, hook);
   },
 };

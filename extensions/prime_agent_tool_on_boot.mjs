@@ -57,6 +57,7 @@
  *     (invoke() uses tmpl.options?.mainLoopModel ?? XH anyway — safe)
  * This is sufficient for vC7.call() to resolve agentDefinitions and dispatch.
  */
+import { spliceAfter } from '../runner/patch-helpers.mjs';
 
 export default {
   category: 'expose',
@@ -133,8 +134,10 @@ export default {
       + `return ()=>{try{clearInterval(_ccpIv);}catch(_){}};`
       + `},[]);`;
 
-    code = code.replace(mountAnchor, mountAnchor + mountInjection);
-
-    return code;
+    // spliceAfter inserts the injection immediately after the mount anchor via
+    // a slice (no String.replace `$&` hazard from the injected code) and throws
+    // on a missing anchor — but the anchor presence is already guarded above, so
+    // a throw here would only signal a mid-apply invariant break.
+    return spliceAfter(code, mountAnchor, mountInjection);
   },
 };

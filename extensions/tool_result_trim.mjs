@@ -1,3 +1,5 @@
+import { spliceBoot } from '../runner/patch-helpers.mjs';
+
 export default {
   category: 'observe',
 
@@ -58,11 +60,6 @@ try {
 }
 
 `;
-    const _SHEBANG_ = '#!/usr/bin/env node';
-    const _CJS_IIFE_ = '(function(exports, require, module, __filename, __dirname)';
-    if (code.includes(_SHEBANG_)) return code.replace(_SHEBANG_, _SHEBANG_ + '\n' + hook);
-    if (code.includes(_CJS_IIFE_)) return code.replace(_CJS_IIFE_, () => hook + _CJS_IIFE_);
-    console.warn('  [!] tool_result_trim: anchor not found — skipping');
-    return code;
+    return spliceBoot(code, hook);
   },
 };

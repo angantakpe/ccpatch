@@ -1,3 +1,8 @@
+import { spliceAfter } from '../runner/patch-helpers.mjs';
+
+// The CJS-IIFE wrapper header. The hook is spliced *inside* the wrapper (after
+// the opening brace) so its lexical declarations share the wrapper scope.
+const CJS_IIFE_HEAD = '(function(exports, require, module, __filename, __dirname) {';
 
 export default {
     category: 'optional',
@@ -71,6 +76,6 @@ if (BLOCKED_TOOLS.size > 0) {
 }
 
 `;
-      return code.replace('(function(exports, require, module, __filename, __dirname) {', '(function(exports, require, module, __filename, __dirname) {' + hook);
+      return spliceAfter(code, CJS_IIFE_HEAD, hook);
     }
   };

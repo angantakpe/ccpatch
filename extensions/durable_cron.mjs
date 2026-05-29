@@ -1,4 +1,6 @@
-import { findFunctionByLiteral } from '../runner/ast-anchor.mjs';
+import { forceFeatureFlag, spliceAfter } from '../runner/patch-helpers.mjs';
+
+const SHEBANG = '#!/usr/bin/env node';
 
 export default {
     category: 'feature',
@@ -10,31 +12,21 @@ export default {
       label: 'Durable Cron',
     },
     // Declarative anchor — the runner resolves this to a HEAD site before
-    // calling apply(); opts.atSites is then available for splicing. We still
-    // rebuild the function body wholesale (replacing it with `return !0`), so
-    // the apply() does its own range lookup via the resolved site.
+    // calling apply(). forceFeatureFlag re-walks the same literal to find the
+    // enclosing function and rewrites its body to `return !0`, sharing the
+    // override logic with the other feature-flag patches.
     at: {
       kind: 'HEAD',
       target: { function: { literal: 'tengu_kairos_cron_durable' } },
     },
-    apply: (code, opts) => {
-      // Prefer the runner-resolved @At site if present; otherwise fall back to
-      // findFunctionByLiteral directly (keeps the patch standalone-testable).
-      let fn;
-      if (opts && Array.isArray(opts.atSites) && opts.atSites.length > 0) {
-        // The HEAD site sits just after the opening brace of the body. Locate
-        // the surrounding function by walking the same literal.
-        fn = findFunctionByLiteral(code, 'tengu_kairos_cron_durable');
-      } else {
-        fn = findFunctionByLiteral(code, 'tengu_kairos_cron_durable');
-      }
-      if (!fn) {
+    apply: (code) => {
+      const res = forceFeatureFlag(code, 'tengu_kairos_cron_durable', { allowMissing: true });
+      if (!res.fnName) {
         console.error('  [durable_cron] WARNING: isDurableCronEnabled anchor not matched — update runner/anchors.mjs for this version');
         return code;
       }
-      const fnName = fn.name;
-      console.log(`  [durable_cron] patched ${fnName}() → always true`);
-      code = code.slice(0, fn.start) + 'function ' + fnName + '(){return !0}' + code.slice(fn.end);
+      code = res.code;
+      console.log(`  [durable_cron] patched ${res.fnName}() → always true`);
 
       // H-3: Register /cron slash command so the feature is accessible from the prompt.
       // We register a simple handler on globalThis.__ccpRegisterSlashCommand (installed
@@ -64,7 +56,9 @@ export default {
   }
 })();
 `;
-      code = code.replace('#!/usr/bin/env node', '#!/usr/bin/env node\n' + cronCmd);
-      return code;
+      // Shebang-only registration: on npm CJS bundles (no shebang) this is a
+      // no-op, matching the prior `.replace` behavior. spliceAfter avoids the
+      // String.replace `$&` hazard and keeps "missing anchor → skip" semantics.
+      return spliceAfter(code, SHEBANG, '\n' + cronCmd, { allowMissing: true });
     }
   };
