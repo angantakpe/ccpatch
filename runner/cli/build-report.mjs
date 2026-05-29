@@ -51,13 +51,20 @@ export function buildJsonReport({ ok, durationMs, report, patchNames }) {
     patches.push(entry);
   }
 
-  return {
+  const out = {
     ok: !!ok,
     durationMs,
     patches,
     drifts,
     summary: { applied, skipped, failed },
   };
+  // Coarse wall-clock phase timers (ms), when the caller supplied them. These
+  // attribute total wall time across phases the per-patch transform sums can't
+  // see (apply orchestration, bundle write, sidecar write, etc.).
+  if (r.phases && typeof r.phases === 'object') {
+    out.phases = { ...r.phases };
+  }
+  return out;
 }
 
 /**
@@ -73,6 +80,7 @@ export function renderTextSummary({ ok, durationMs, report, outputPath, drySugge
   const r = report || {};
   const timings = Array.isArray(r.timings) ? r.timings.slice() : [];
   const drifts = Array.isArray(r.drifts) ? r.drifts : [];
+  const phases = (r.phases && typeof r.phases === 'object') ? r.phases : null;
 
   const lines = [];
   lines.push('─'.repeat(64));
@@ -81,10 +89,45 @@ export function renderTextSummary({ ok, durationMs, report, outputPath, drySugge
   if (timings.length > 0) {
     timings.sort((a, b) => (b.ms || 0) - (a.ms || 0));
     const top = timings.slice(0, 3);
-    lines.push('Slowest patches:');
+    // These are PER-PATCH transform times only (the apply() of each patch),
+    // NOT wall-clock. Historically this said "Slowest patches" which implied
+    // patches dominated the build — but the bulk of wall time is harness work
+    // (doctor pre-pass, diff, verify, bundle write). Make that explicit below.
+    lines.push('Slowest patch transforms (apply() only):');
     const w = Math.max(...top.map(t => (t.name || '').length), 8);
     for (const t of top) {
       lines.push(`  ${String(t.name).padEnd(w)}  ${String(t.ms ?? '?').padStart(5)} ms`);
+    }
+
+    // Harness overhead = total wall-clock minus the sum of per-patch transform
+    // times. This is the doctor/diff/verify/write scaffolding around the actual
+    // patching. Surface it so "2.3s of patches" doesn't get blamed for a 28s build.
+    const patchMsTotal = timings.reduce((sum, t) => sum + (Number(t.ms) || 0), 0);
+    const overheadMs = Math.max(0, (Number(durationMs) || 0) - patchMsTotal);
+    lines.push(
+      `Harness overhead: ${(overheadMs / 1000).toFixed(1)}s ` +
+      `(doctor/diff/verify/write; patches summed ${(patchMsTotal / 1000).toFixed(1)}s)`
+    );
+  }
+
+  // Coarse wall-clock phase breakdown, when the build path supplied phase
+  // timers. Shown even without per-patch timings so users still see where the
+  // big phases went. Labels are friendly; unknown keys fall back to the key.
+  if (phases) {
+    const labels = {
+      apply: 'apply patches',
+      bundleWrite: 'bundle write',
+      sidecarWrite: 'sidecar write',
+    };
+    const entries = Object.entries(phases)
+      .filter(([, ms]) => Number.isFinite(Number(ms)))
+      .sort((a, b) => (Number(b[1]) || 0) - (Number(a[1]) || 0));
+    if (entries.length > 0) {
+      lines.push('Phase wall-clock:');
+      const w = Math.max(...entries.map(([k]) => (labels[k] || k).length), 8);
+      for (const [k, ms] of entries) {
+        lines.push(`  ${String(labels[k] || k).padEnd(w)}  ${String(Math.round(Number(ms))).padStart(6)} ms`);
+      }
     }
   }
 

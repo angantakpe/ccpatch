@@ -8,6 +8,38 @@
  * Pure, side-effect free. Imported by runner.mjs.
  */
 
+// Perf#3: lineStarts cache. diffSpansFromPatch is called once per changed patch
+// (~24x on a real build), and each call previously rescanned the entire ~15MB
+// preCode to rebuild the line-start index. Since every call in a phase shares
+// the same preCode string, memoise the index keyed by string identity — same
+// last-seen pattern as runner/ast-cache.mjs (JS can't weak-ref a string, so we
+// keep the last `code` seen plus its index and drop it when `code` changes).
+let cachedLineStartsCode = null;
+let cachedLineStarts = null;
+
+function lineStartsFor(preCode) {
+  if (cachedLineStartsCode === preCode && cachedLineStarts !== null) {
+    return cachedLineStarts;
+  }
+  const lineStarts = [0];
+  for (let i = 0; i < preCode.length; i++) {
+    if (preCode.charCodeAt(i) === 10 /* \n */) lineStarts.push(i + 1);
+  }
+  cachedLineStartsCode = preCode;
+  cachedLineStarts = lineStarts;
+  return lineStarts;
+}
+
+/**
+ * Clear the lineStarts cache. Useful for test isolation; not required for
+ * correctness in production since the identity check invalidates automatically
+ * when the bundle string changes.
+ */
+export function resetLineStartsCache() {
+  cachedLineStartsCode = null;
+  cachedLineStarts = null;
+}
+
 /**
  * Convert a structuredPatch into byte ranges in the *pre-apply* code.
  *
@@ -28,11 +60,9 @@
 export function diffSpansFromPatch(preCode, sp) {
   const ranges = [];
   if (!sp || !Array.isArray(sp.hunks)) return ranges;
-  // Build a line-start index once.
-  const lineStarts = [0];
-  for (let i = 0; i < preCode.length; i++) {
-    if (preCode.charCodeAt(i) === 10 /* \n */) lineStarts.push(i + 1);
-  }
+  // Build (or reuse) the line-start index. Perf#3: memoised by preCode identity
+  // so a phase's worth of diffSpansFromPatch calls share one ~15MB scan.
+  const lineStarts = lineStartsFor(preCode);
   const lineOffset = (lineNum1) => {
     const idx = Math.max(0, Math.min(lineStarts.length - 1, lineNum1 - 1));
     return lineStarts[idx];
@@ -81,6 +111,19 @@ export function rangesIntersect(a, b) {
 }
 
 /**
+ * Arch#1: a range whose shifted start is negative lives in the "prepend region"
+ * — a patch that injected near offset 0 (esm_compat / fetch_interceptor /
+ * bun_shim / contracts). Subtracting the shared-frame delta drives such a span
+ * NEGATIVE, collapsing every prepend onto a sentinel range like [-233,-232], so
+ * they all falsely intersect each other. A prepend has no meaningful original-
+ * bundle coordinate, so it cannot meaningfully conflict — drop it before
+ * comparison.
+ */
+function isPrependRange(r) {
+  return r[0] < 0;
+}
+
+/**
  * Detect overlap conflicts among patches that ran in the same phase.
  *   trace: array of { name, phase, atSites, diffSpans, allowOverlapWith }
  * Where:
@@ -99,10 +142,23 @@ export function rangesIntersect(a, b) {
  */
 export function detectOverlapsInPhase(traces) {
   const conflicts = [];
-  for (let i = 0; i < traces.length; i++) {
-    for (let j = i + 1; j < traces.length; j++) {
-      const A = traces[i];
-      const B = traces[j];
+  // Arch#1: drop prepend-region ranges (shifted start < 0) up front. These are
+  // near-offset-0 injections whose shared-frame translation made them negative;
+  // they share a meaningless sentinel range and would all false-overlap. A
+  // prepend has no original-bundle coordinate, so it can't truly conflict.
+  const cleaned = traces.map((t) => ({
+    ...t,
+    atSites: Array.isArray(t.atSites)
+      ? t.atSites.filter((s) => (s.start ?? 0) >= 0)
+      : t.atSites,
+    diffSpans: Array.isArray(t.diffSpans)
+      ? t.diffSpans.filter((r) => !isPrependRange(r))
+      : t.diffSpans,
+  }));
+  for (let i = 0; i < cleaned.length; i++) {
+    for (let j = i + 1; j < cleaned.length; j++) {
+      const A = cleaned[i];
+      const B = cleaned[j];
       // at-vs-at: compare resolved sites (in the shared original frame).
       if (A.atSites && B.atSites) {
         for (const sa of A.atSites) {

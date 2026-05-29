@@ -307,6 +307,194 @@ export function writeApplyArtifacts({ results, patches, phaseTraces, patchOption
   }
 }
 
+/**
+ * Arch#2: apply ONE patch's synchronous body and return an ApplyResult struct.
+ *
+ * This is the ~10-things-in-one-try block extracted verbatim: call apply()
+ * (declarative kinds via compileKind, free kinds via patch.apply), classify the
+ * outcome (applied / applied-fallback / no-change / no-change-ok / error),
+ * compute anchor-drift forensics on a real no-change, capture the reverse diff,
+ * inject the coverage marker, and build the overlap trace. Side-effects that
+ * were already inline (slow-patch logging, the anchor-drift.jsonl append,
+ * drift-candidate logging) stay here so behavior is byte-identical; the CALLER
+ * drives `results`/`failures`/`nextCode`/`phaseTraces`/`drifts`/`timings` off
+ * the returned struct, plus the async onAfterApply hook and the verify push
+ * which must stay in the loop (they need `await` and loop control).
+ *
+ * Returns an ApplyResult:
+ *   { name, status, effectiveCode, timingMs, failReason, trace, driftEntry }
+ * where `status` is the results[name] value, `failReason` (or null) is passed
+ * to the caller's fail(), `trace` (or null) is pushed into the phase's trace
+ * array, and `driftEntry` (or null) is pushed into `drifts`.
+ */
+function applySinglePatch({
+  name, patch, normalized, preCode, beforeOpts, atSites,
+  origLength, globalStrict, patchOptions, logger, warnStorageOnce,
+}) {
+  const _patchStart = Date.now();
+  // For declarative kinds (prefix/postfix/transpiler), synthesize apply()
+  // from the manifest. Free-kind patches use their own apply unchanged.
+  const applyFn = (normalized.kind && normalized.kind !== 'free')
+    ? compileKind(patch)
+    : patch.apply;
+  const callOpts = atSites ? { ...beforeOpts, atSites } : beforeOpts;
+  const appliedCode = applyFn(preCode, callOpts);
+  const timingMs = Date.now() - _patchStart;
+  if (timingMs > 5000) {
+    logger.warn(`  [!] SLOW PATCH: "${name}" took ${timingMs}ms — check for catastrophic regex backtracking`);
+  } else if (timingMs > 1000) {
+    logger.log(`  [~] ${name}: ${timingMs}ms`);
+  }
+  if (typeof appliedCode !== 'string') {
+    logger.error(`  [!] Patch "${name}" returned non-string (${typeof appliedCode}) — keeping code unchanged`);
+    return {
+      name, status: 'error', effectiveCode: null, timingMs,
+      failReason: `apply() returned non-string (${typeof appliedCode})`,
+      trace: null, driftEntry: null,
+    };
+  }
+
+  const noChange = appliedCode === preCode;
+  // A patch with only `verify.absent` describes a *desired end state*, not
+  // a transformation — if the bad string is already absent upstream, the
+  // correct outcome is no-change. Only flag no-change as drift when the
+  // patch lacks a verify (it must have transformed something) or declares
+  // `verify.present` (it had a positive thing to inject).
+  // DX2: read normalized.verify (post-validation truth), not raw patch.verify.
+  const hasOnlyAbsentVerify = normalized.verify
+    && !normalized.verify.present
+    && normalized.verify.absent;
+  // Fallback diff: when structured apply() returns no change, attempt the
+  // stored unified diff captured against a known bundle version. This is
+  // a stop-gap — drift is still real, but a good build shouldn't fail
+  // when one patch's anchor moved if the textual diff still applies.
+  // ARCH1: extracted into applyFallbackDiff() (pure except logging).
+  let fallbackAppliedCode = null;
+  if (noChange && !hasOnlyAbsentVerify) {
+    fallbackAppliedCode = applyFallbackDiff(preCode, normalized, name, patchOptions, logger);
+  }
+
+  // If the fallback succeeded, treat the fallback result as the effective
+  // applied code for the rest of this iteration (verify, capture, etc.).
+  let effectiveCode = appliedCode;
+  let usedFallback = false;
+  if (noChange && !hasOnlyAbsentVerify && fallbackAppliedCode !== null
+      && fallbackAppliedCode !== preCode) {
+    effectiveCode = fallbackAppliedCode;
+    usedFallback = true;
+  }
+
+  let status;
+  let failReason = null;
+  let driftEntry = null;
+  if (usedFallback) {
+    status = 'applied-fallback';
+  } else if (noChange && !hasOnlyAbsentVerify) {
+    logger.warn(`  [!] Patch "${name}" produced no changes. (check anchors)`);
+    status = 'no-change';
+    failReason = 'no-change (anchor likely drifted)';
+    // Tag anchor-drift alert with patch name so patch-heal can route it.
+    // ARCH1: forensic computation lives in the pure detectDrift() helper;
+    // this block keeps the fs write + logging + report push.
+    try {
+      const { candidates, probesCount, alertLine } = detectDrift(preCode, normalized, name, patchOptions);
+      // S5: surface only the FIRST storage failure of the run; the
+      // candidate logging below still runs regardless of the write.
+      try {
+        mkdirSync('storage/outputs', { recursive: true });
+        appendFileSync(join('storage/outputs', 'anchor-drift.jsonl'), alertLine + '\n', 'utf8');
+      } catch (err) { warnStorageOnce('anchor-drift.jsonl', err); }
+
+      if (candidates.length > 0) {
+        driftEntry = { name, candidates: candidates.slice() };
+        for (const c of candidates) {
+          logger.warn(`      Closest candidate (score ${c.score.toFixed(2)}, from ${c.source}): \`${c.snippet.slice(0, 80)}\` at offset ${c.offset}`);
+        }
+      } else if (probesCount === 0) {
+        logger.warn(`      [drift] no anchor.literal or verify.present declared — cannot offer candidates. Add verify.present to "${name}" to enable drift hints.`);
+      }
+    } catch (_) { /* non-fatal */ }
+  } else {
+    status = noChange ? 'no-change-ok' : 'applied';
+  }
+  // Capture a reverse diff from the effective post-apply code back to
+  // `preCode` so the patched bundle can be restored byte-for-byte later.
+  // Skip no-change applies — they contribute nothing to a revert.
+  //
+  // Perf#2: createPatch over the ~15MB bundle is the most expensive thing
+  // per patch and ran ~24x per build. A --dry-run never writes the bundle
+  // OR the .ccp-revert.json sidecar (cmd-build returns before the sidecar
+  // write), so the captured diffs would be thrown away — pass nothing so
+  // captureReverseDiff's explicit-request gate skips the whole computation.
+  // Real (non-dry-run) builds still capture exactly as before, so the
+  // revert feature and sidecar schema are untouched.
+  const reverseSink = patchOptions.dryRun ? undefined : patchOptions.captureReverse;
+  captureReverseDiff(name, preCode, effectiveCode, reverseSink);
+  // Auto-inject __ccpCovHit() for patches that opted in via coverageMarker.
+  // Best-effort: only attempt when the patch actually changed code, and
+  // skip silently (with a notice) when no hook site is findable.
+  if (normalized.coverageMarker && effectiveCode !== preCode) {
+    const instrumented = injectCoverageHit(
+      preCode, effectiveCode, normalized.coverageMarker, atSites,
+    );
+    if (instrumented === null) {
+      logger.log?.(`  [coverage] ${name}: marker "${normalized.coverageMarker}" — no instrumentation site found, skipping`);
+    } else {
+      effectiveCode = instrumented;
+    }
+  }
+  // Record per-patch trace for overlap detection.
+  //
+  // A2: all recorded ranges are translated into ONE shared coordinate
+  // frame — original-bundle offsets — by subtracting `deltaBefore`, the
+  // net length change all prior patches introduced (preCode.length minus
+  // the original bundle length). preCode for this patch is exactly
+  // original+prior-deltas, so this collapses every patch's spans/at-sites
+  // into the same frame and detectOverlapsInPhase() can compare them
+  // like-for-like.
+  //
+  // S4: in non-strict mode the actual diffSpans scan is DEFERRED. Overlap
+  // is impossible in a phase with <2 traced patches, so for those the scan
+  // never runs — the trace only needs a cheap changed/0-or-1 count for the
+  // coverage-apply manifest. Strict mode still computes exact per-hunk spans
+  // eagerly (they back FATAL overlaps).
+  let trace = null;
+  try {
+    const phaseKey = phaseOf(patch);
+    const changed = typeof effectiveCode === 'string' && effectiveCode !== preCode;
+    // Net delta introduced before this patch ran (shared-frame shift).
+    const deltaBefore = preCode.length - origLength;
+    const shift = (spans) => spans.map(([s, e]) => [s - deltaBefore, e - deltaBefore]);
+    let diffSpans = null;        // null => not yet computed (non-strict, lazy)
+    let diffSpanCount = changed ? 1 : 0; // cheap count for the coverage manifest
+    if (changed && globalStrict) {
+      const sp = structuredPatch(name, name, preCode, effectiveCode, 'pre', 'post', { context: 0 });
+      diffSpans = shift(diffSpansFromPatch(preCode, sp));
+      diffSpanCount = diffSpans.length;
+    }
+    // at-sites resolved on beforeCode (== preCode frame) → shift to original.
+    const atSitesShifted = atSites
+      ? atSites.map(s => ({ ...s, start: s.start - deltaBefore, end: (s.end ?? s.start) - deltaBefore }))
+      : null;
+    trace = {
+      name,
+      phase: phaseKey,
+      atSites: atSitesShifted,
+      diffSpans,        // resolved now (strict) or lazily (non-strict, see below)
+      diffSpanCount,    // S4: cheap 1/0 count for coverage-apply manifest
+      changed,
+      // Lazy-span inputs (non-strict): kept so detectOverlaps can compute
+      // spans only when the phase has ≥2 patches.
+      _preCode: changed ? preCode : null,
+      _effectiveCode: changed ? effectiveCode : null,
+      _deltaBefore: deltaBefore,
+      allowOverlapWith: Array.isArray(normalized.allowOverlapWith) ? normalized.allowOverlapWith : [],
+    };
+  } catch (_) { /* trace is best-effort */ }
+
+  return { name, status, effectiveCode, timingMs, failReason, trace, driftEntry };
+}
+
 export async function applyNamedPatches(code, patches, patchNames, logger = console, patchOptions = {}) {
   let nextCode = code;
   const results = {};
@@ -520,157 +708,30 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
     }
 
     try {
-      const _patchStart = Date.now();
       const preCode = beforeCode;
-      // For declarative kinds (prefix/postfix/transpiler), synthesize apply()
-      // from the manifest. Free-kind patches use their own apply unchanged.
-      const applyFn = (normalized.kind && normalized.kind !== 'free')
-        ? compileKind(patch)
-        : patch.apply;
-      const callOpts = atSites ? { ...beforeOpts, atSites } : beforeOpts;
-      const appliedCode = applyFn(preCode, callOpts);
-      const _patchMs = Date.now() - _patchStart;
-      timings.push({ name, ms: _patchMs });
-      if (_patchMs > 5000) {
-        logger.warn(`  [!] SLOW PATCH: "${name}" took ${_patchMs}ms — check for catastrophic regex backtracking`);
-      } else if (_patchMs > 1000) {
-        logger.log(`  [~] ${name}: ${_patchMs}ms`);
+      // Arch#2: the ~10-things-in-one-try body now lives in applySinglePatch(),
+      // which returns an ApplyResult struct. We drive the run-level state
+      // (results / failures / timings / drifts / phaseTraces / nextCode) off the
+      // struct here, then run the async onAfterApply hook + verify push (which
+      // need `await` and loop control and so must stay in the loop).
+      const r = applySinglePatch({
+        name, patch, normalized, preCode, beforeOpts, atSites,
+        origLength: code.length, globalStrict, patchOptions, logger, warnStorageOnce,
+      });
+      timings.push({ name, ms: r.timingMs });
+      results[name] = r.status;
+      if (r.failReason) fail(r.failReason);
+      if (r.driftEntry) drifts.push(r.driftEntry);
+      if (r.trace) {
+        phaseTraces[r.trace.phase] = phaseTraces[r.trace.phase] || [];
+        phaseTraces[r.trace.phase].push(r.trace);
       }
-      if (typeof appliedCode !== 'string') {
-        logger.error(`  [!] Patch "${name}" returned non-string (${typeof appliedCode}) — keeping code unchanged`);
-        results[name] = 'error';
-        fail(`apply() returned non-string (${typeof appliedCode})`);
-      } else {
-        const noChange = appliedCode === preCode;
-        // A patch with only `verify.absent` describes a *desired end state*, not
-        // a transformation — if the bad string is already absent upstream, the
-        // correct outcome is no-change. Only flag no-change as drift when the
-        // patch lacks a verify (it must have transformed something) or declares
-        // `verify.present` (it had a positive thing to inject).
-        // DX2: read normalized.verify (post-validation truth), not raw patch.verify.
-        const hasOnlyAbsentVerify = normalized.verify
-          && !normalized.verify.present
-          && normalized.verify.absent;
-        // Fallback diff: when structured apply() returns no change, attempt the
-        // stored unified diff captured against a known bundle version. This is
-        // a stop-gap — drift is still real, but a good build shouldn't fail
-        // when one patch's anchor moved if the textual diff still applies.
-        // ARCH1: extracted into applyFallbackDiff() (pure except logging).
-        let fallbackAppliedCode = null;
-        if (noChange && !hasOnlyAbsentVerify) {
-          fallbackAppliedCode = applyFallbackDiff(preCode, normalized, name, patchOptions, logger);
-        }
 
-        // If the fallback succeeded, treat the fallback result as the effective
-        // applied code for the rest of this iteration (verify, capture, etc.).
-        let effectiveCode = appliedCode;
-        let usedFallback = false;
-        if (noChange && !hasOnlyAbsentVerify && fallbackAppliedCode !== null
-            && fallbackAppliedCode !== preCode) {
-          effectiveCode = fallbackAppliedCode;
-          usedFallback = true;
-        }
-
-        if (usedFallback) {
-          results[name] = 'applied-fallback';
-        } else if (noChange && !hasOnlyAbsentVerify) {
-          logger.warn(`  [!] Patch "${name}" produced no changes. (check anchors)`);
-          results[name] = 'no-change';
-          fail('no-change (anchor likely drifted)');
-          // Tag anchor-drift alert with patch name so patch-heal can route it.
-          // ARCH1: forensic computation lives in the pure detectDrift() helper;
-          // this block keeps the fs write + logging + report push.
-          try {
-            const { candidates, probesCount, alertLine } = detectDrift(preCode, normalized, name, patchOptions);
-            // S5: surface only the FIRST storage failure of the run; the
-            // candidate logging below still runs regardless of the write.
-            try {
-              mkdirSync('storage/outputs', { recursive: true });
-              appendFileSync(join('storage/outputs', 'anchor-drift.jsonl'), alertLine + '\n', 'utf8');
-            } catch (err) { warnStorageOnce('anchor-drift.jsonl', err); }
-
-            if (candidates.length > 0) {
-              drifts.push({ name, candidates: candidates.slice() });
-              for (const c of candidates) {
-                logger.warn(`      Closest candidate (score ${c.score.toFixed(2)}, from ${c.source}): \`${c.snippet.slice(0, 80)}\` at offset ${c.offset}`);
-              }
-            } else if (probesCount === 0) {
-              logger.warn(`      [drift] no anchor.literal or verify.present declared — cannot offer candidates. Add verify.present to "${name}" to enable drift hints.`);
-            }
-          } catch (_) { /* non-fatal */ }
-        } else {
-          results[name] = noChange ? 'no-change-ok' : 'applied';
-        }
-        // Capture a reverse diff from the effective post-apply code back to
-        // `preCode` so the patched bundle can be restored byte-for-byte later.
-        // Skip no-change applies — they contribute nothing to a revert.
-        captureReverseDiff(name, preCode, effectiveCode, patchOptions.captureReverse);
-        // Auto-inject __ccpCovHit() for patches that opted in via coverageMarker.
-        // Best-effort: only attempt when the patch actually changed code, and
-        // skip silently (with a notice) when no hook site is findable.
-        if (normalized.coverageMarker && effectiveCode !== preCode) {
-          const instrumented = injectCoverageHit(
-            preCode, effectiveCode, normalized.coverageMarker, atSites,
-          );
-          if (instrumented === null) {
-            logger.log?.(`  [coverage] ${name}: marker "${normalized.coverageMarker}" — no instrumentation site found, skipping`);
-          } else {
-            effectiveCode = instrumented;
-          }
-        }
-        // Record per-patch trace for overlap detection.
-        //
-        // A2: all recorded ranges are translated into ONE shared coordinate
-        // frame — original-bundle offsets — by subtracting `deltaBefore`, the
-        // net length change all prior patches introduced (preCode.length minus
-        // the original bundle length). preCode for this patch is exactly
-        // original+prior-deltas, so this collapses every patch's spans/at-sites
-        // into the same frame and detectOverlapsInPhase() can compare them
-        // like-for-like. (The old code compared A's preCode offsets to B's
-        // post-A offsets and "corrected" by skipping wide envelopes via an
-        // IMPRECISE_SPAN_BYTES heuristic; correct coordinates make that
-        // unnecessary, so both the heuristic and the `imprecise` flag are gone.)
-        //
-        // S4: in non-strict mode the actual diffSpans scan is DEFERRED. Overlap
-        // is impossible in a phase with <2 traced patches, so for those the scan
-        // never runs — the trace only needs a cheap changed/0-or-1 count for the
-        // coverage-apply manifest. We stash the raw inputs (preCode, effective
-        // code, frame offset) and resolve spans lazily at detection time, and
-        // only for phases that actually have ≥2 patches. Strict mode still
-        // computes exact per-hunk spans eagerly (they back FATAL overlaps).
-        try {
-          const phaseKey = phaseOf(patch);
-          const changed = typeof effectiveCode === 'string' && effectiveCode !== preCode;
-          // Net delta introduced before this patch ran (shared-frame shift).
-          const deltaBefore = preCode.length - code.length;
-          const shift = (spans) => spans.map(([s, e]) => [s - deltaBefore, e - deltaBefore]);
-          let diffSpans = null;        // null => not yet computed (non-strict, lazy)
-          let diffSpanCount = changed ? 1 : 0; // cheap count for the coverage manifest
-          if (changed && globalStrict) {
-            const sp = structuredPatch(name, name, preCode, effectiveCode, 'pre', 'post', { context: 0 });
-            diffSpans = shift(diffSpansFromPatch(preCode, sp));
-            diffSpanCount = diffSpans.length;
-          }
-          // at-sites resolved on beforeCode (== preCode frame) → shift to original.
-          const atSitesShifted = atSites
-            ? atSites.map(s => ({ ...s, start: s.start - deltaBefore, end: (s.end ?? s.start) - deltaBefore }))
-            : null;
-          phaseTraces[phaseKey] = phaseTraces[phaseKey] || [];
-          phaseTraces[phaseKey].push({
-            name,
-            phase: phaseKey,
-            atSites: atSitesShifted,
-            diffSpans,        // resolved now (strict) or lazily (non-strict, see below)
-            diffSpanCount,    // S4: cheap 1/0 count for coverage-apply manifest
-            changed,
-            // Lazy-span inputs (non-strict): kept so detectOverlaps can compute
-            // spans only when the phase has ≥2 patches.
-            _preCode: changed ? preCode : null,
-            _effectiveCode: changed ? effectiveCode : null,
-            _deltaBefore: deltaBefore,
-            allowOverlapWith: Array.isArray(normalized.allowOverlapWith) ? normalized.allowOverlapWith : [],
-          });
-        } catch (_) { /* trace is best-effort */ }
+      // Only patches that produced a usable string continue into the
+      // onAfterApply hook and verify push; an 'error' status (non-string apply
+      // result) leaves nextCode untouched, matching the old else-branch.
+      if (r.status !== 'error') {
+        let effectiveCode = r.effectiveCode;
         // onAfterApply: patch may mutate ctx.appliedCode for last-mile fixups.
         lifecycleCtx.appliedCode = effectiveCode;
         {
@@ -727,14 +788,21 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
     if (traces.length < 2) continue;
     // S4: only NOW — with ≥2 patches in this phase, so an overlap is actually
     // possible — do we materialise the non-strict diffSpans that were deferred
-    // at apply time. cheapEditSpans is the ~16MB two-ended scan we were trying
-    // to avoid; running it lazily skips it entirely for single-patch phases.
-    // Spans are translated into the shared original-bundle frame via the stored
-    // _deltaBefore so detectOverlapsInPhase compares like-for-like (A2).
+    // at apply time. The structuredPatch scan is what we deferred to avoid
+    // paying it for single-patch phases; running it lazily skips it entirely
+    // there. Spans are translated into the shared original-bundle frame via the
+    // stored _deltaBefore so detectOverlapsInPhase compares like-for-like (A2).
     for (const t of traces) {
       if (t.diffSpans !== null) continue; // strict already computed (and shifted)
       if (!t.changed || t._preCode === null) { t.diffSpans = []; continue; }
-      const raw = cheapEditSpans(t._preCode, t._effectiveCode);
+      // Arch#1(b): decompose into per-hunk spans the SAME way strict mode does
+      // (structuredPatch context:0 → diffSpansFromPatch) instead of the single
+      // first-to-last-changed-byte envelope cheapEditSpans returns. A scatter
+      // patch (e.g. unhide_features) then yields many small REAL spans rather
+      // than one ~3.5MB envelope that intersects almost anything — so non-strict
+      // overlaps now match what strict mode would flag as FATAL.
+      const sp = structuredPatch(t.name, t.name, t._preCode, t._effectiveCode, 'pre', 'post', { context: 0 });
+      const raw = diffSpansFromPatch(t._preCode, sp);
       t.diffSpans = raw.map(([s, e]) => [s - t._deltaBefore, e - t._deltaBefore]);
     }
     const conflicts = detectOverlapsInPhase(traces);
@@ -756,14 +824,20 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
                   ` rangeA=[${c.rangeA[0]},${c.rangeA[1]}] rangeB=[${c.rangeB[0]},${c.rangeB[1]}]`;
       if (allowed) {
         logger.warn(`  [overlap] ${msg} (allowlisted)`);
-      } else {
+      } else if (globalStrict) {
+        // Strict: FATAL overlaps stay loud and unchanged.
         logger.warn(`  [overlap] ${msg}`);
-        if (globalStrict) {
-          failures.push(
-            `overlap: ${c.a} and ${c.b} touch overlapping ranges (${c.kind}) in phase="${c.phase}". ` +
-            `Add allowOverlapWith: ['${c.b}'] to ${c.a} (or vice versa) to acknowledge.`
-          );
-        }
+        failures.push(
+          `overlap: ${c.a} and ${c.b} touch overlapping ranges (${c.kind}) in phase="${c.phase}". ` +
+          `Add allowOverlapWith: ['${c.b}'] to ${c.a} (or vice versa) to acknowledge.`
+        );
+      } else {
+        // DX#2: in non-strict mode an overlap is informational — it does not
+        // abort the build. Keep a single concise line so a tail of the log still
+        // shows something happened, and route the full range detail to the
+        // verbose (debug-level) sink so a normal successful build isn't spammed.
+        logger.warn(`  [overlap] ${c.a} <-> ${c.b} phase="${c.phase}" (informational — non-fatal; run --log-level=debug for ranges, or --strict to gate)`);
+        logger.debug?.(`  [overlap] ${msg} (informational — non-fatal)`);
       }
     }
   }

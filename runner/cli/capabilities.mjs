@@ -27,6 +27,19 @@ export function parseAllowCapabilities(value) {
 }
 
 /**
+ * S1: detect the blunt `--allow-capabilities=all` opt-out. When true, BOTH the
+ * default-strict ack gate (network/exec/env) and the legacy high-risk gate are
+ * short-circuited with no per-patch acknowledgement. Callers use this to print
+ * a prominent warning and to persist a `capabilitiesGateBypassed` audit marker
+ * into the release manifest, so a bundle built with the gate waved through is
+ * traceable after the fact. Returns a plain boolean for an `allow` object as
+ * produced by parseAllowCapabilities() (null-safe).
+ */
+export function isCapabilityGateBypassed(allow) {
+  return !!(allow && allow.all === true);
+}
+
+/**
  * Given the patches selected for apply and the allow list, return list of
  * { name, capabilities, risk, missing } describing high-risk patches whose
  * capabilities are NOT all permitted by the allow list.

@@ -10,6 +10,7 @@ import {
   parseAllowCapabilities,
   findGateViolations,
   findUnackedAckRequired,
+  isCapabilityGateBypassed,
 } from './capabilities.mjs';
 import { sha256, sidecarPathFor, REVERT_SIDECAR_VERSION } from './sidecar.mjs';
 import { applyNamedPatches } from '../runner.mjs';
@@ -74,6 +75,7 @@ export async function runBuild(ctx) {
   // ccpatch.yml (or via --allow-capabilities). `--allow-unacked` restores
   // legacy warn-and-proceed behaviour. Other high-risk caps (tools, telemetry)
   // continue to follow the legacy strict-mode-only gate below.
+  let capabilitiesGateBypassed = false;
   {
     const allow = parseAllowCapabilities(patchOptions.allowCapabilitiesRaw);
     if (allow && allow.unknown.length > 0) {
@@ -84,10 +86,23 @@ export async function runBuild(ctx) {
       return 1;
     }
 
-    // S6: `--allow-capabilities=all` is a blunt opt-out that waves every
+    // S6/S1: `--allow-capabilities=all` is a blunt opt-out that waves every
     // high-risk cap through and short-circuits both gates below. Leave an audit
     // trail in CI logs by enumerating the CONCRETE (patch -> capabilities) set
-    // it is actually covering, instead of silently proceeding.
+    // it is actually covering, instead of silently proceeding — AND set a flag
+    // so a `capabilitiesGateBypassed` marker can be persisted into the manifest.
+    capabilitiesGateBypassed = isCapabilityGateBypassed(allow);
+    if (capabilitiesGateBypassed) {
+      // Prominent, hard-to-miss warning: the entire ack/high-risk gate is being
+      // skipped. Routed through logger.warn so it lands on stderr (and under
+      // --json stays off the machine-readable stdout payload).
+      logger.warn('');
+      logger.warn('  ⚠ ─────────────────────────────────────────────────────────────────');
+      logger.warn('  ⚠ CAPABILITY GATE BYPASSED via --allow-capabilities=all');
+      logger.warn('  ⚠ all network/exec/env acks skipped — no per-patch acknowledgement');
+      logger.warn('  ⚠ ─────────────────────────────────────────────────────────────────');
+      logger.warn('');
+    }
     if (allow && allow.all) {
       const covered = patchesToApply
         .map(name => ({ name, caps: Array.isArray(patches[name]?.capabilities) ? patches[name].capabilities : [] }))
@@ -180,6 +195,12 @@ export async function runBuild(ctx) {
   let runnerReport = {};
   const captureReverse = [];
   patchOptions.captureReverse = captureReverse;
+  // Coarse wall-clock phase timers (ms). Filled in as each major phase runs so
+  // the end-of-run report can attribute wall time beyond the per-patch
+  // transform sums. Defensive: applyNamedPatches may later expose its own
+  // finer-grained timings under report.phases — we merge ours, never assume its.
+  const phaseMs = {};
+  const applyStartedAt = Date.now();
   try {
     const ret = await applyNamedPatches(code, patches, patchesToApply, activeLogger, patchOptions);
     if (ret && typeof ret === 'object' && typeof ret.code === 'string') {
@@ -197,6 +218,7 @@ export async function runBuild(ctx) {
       throw err;
     }
   }
+  phaseMs.apply = Date.now() - applyStartedAt;
 
   if (patchOptions.dryRun) {
     const { createPatch } = await import('diff');
@@ -231,9 +253,27 @@ export async function runBuild(ctx) {
     return 0;
   }
 
+  const bundleWriteStartedAt = Date.now();
   fs.writeFileSync(options.outputPath, patchedCode, 'utf8');
   fs.chmodSync(options.outputPath, 0o755);
+  phaseMs.bundleWrite = Date.now() - bundleWriteStartedAt;
   logger.log(`\nSuccessfully saved patched bundle to: ${options.outputPath}`);
+
+  // S1: persist a capability-gate-bypass sentinel next to the output bundle.
+  // The make step (scripts/mk/cli.mk) reads this to set the manifest's
+  // `capabilitiesGateBypassed` field, so a bundle built with the gate waved
+  // through stays traceable after the fact. We always write the sentinel (true
+  // OR false) so a stale marker from a prior build can't leak into this one.
+  try {
+    const sentinelPath = options.outputPath + '.capgate.json';
+    fs.writeFileSync(
+      sentinelPath,
+      JSON.stringify({ capabilitiesGateBypassed }) + '\n',
+      'utf8',
+    );
+  } catch (err) {
+    logger.warn(`  [!] Could not write capability-gate sentinel: ${err.message}`);
+  }
 
   // Emit the overlay sibling file (Magisk-style overlay-don't-mutate). The
   // core/overlay_loader patch injects a single require() into the bundle that
@@ -256,6 +296,7 @@ export async function runBuild(ctx) {
   }
 
   // Write the reverse-diff sidecar so `ccpatch revert` can restore the input.
+  const sidecarStartedAt = Date.now();
   if (captureReverse.length > 0) {
     const sidecar = {
       version: REVERT_SIDECAR_VERSION,
@@ -273,6 +314,7 @@ export async function runBuild(ctx) {
       logger.warn(`  [!] Could not write reverse-diff sidecar: ${err.message}`);
     }
   }
+  phaseMs.sidecarWrite = Date.now() - sidecarStartedAt;
 
   if (options.preloadPath) {
     const preload = buildPreload(patches, patchesToApply);
@@ -287,6 +329,14 @@ export async function runBuild(ctx) {
 
   // ── End-of-run summary / --json report ──────────────────────────────────
   const durationMs = Date.now() - buildStartedAt;
+  // Merge our coarse CLI-level phase timers into the runner report so the
+  // summary box can show where wall time went. Defensive merge: if a future
+  // applyNamedPatches already populates report.phases, keep its entries and
+  // layer ours on top only where it left gaps.
+  const reportWithPhases = {
+    ...runnerReport,
+    phases: { ...(runnerReport.phases || {}), ...phaseMs },
+  };
   if (options.json) {
     // JSON path: a single JSON object on stdout. The leveled logger has
     // already routed informational text to stderr when --json was set, so
@@ -294,7 +344,7 @@ export async function runBuild(ctx) {
     const payload = buildJsonReport({
       ok: true,
       durationMs,
-      report: runnerReport,
+      report: reportWithPhases,
       patchNames: patchesToApply,
     });
     process.stdout.write(JSON.stringify(payload) + '\n');
@@ -303,7 +353,7 @@ export async function runBuild(ctx) {
     logger.log(renderTextSummary({
       ok: true,
       durationMs,
-      report: runnerReport,
+      report: reportWithPhases,
       outputPath: options.outputPath,
       drySuggest: false,
     }));

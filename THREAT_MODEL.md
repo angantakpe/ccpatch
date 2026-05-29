@@ -144,6 +144,67 @@ ccpatch apply ... --strict --allow-capabilities=all
 
 Any high-risk patch whose capabilities aren't fully covered by `--allow-capabilities` is rejected up front, before any code is rewritten. In non-strict mode the CLI emits a `[capabilities] WARN` line and proceeds — the gate exists to make capability acknowledgement a first-class, auditable step in CI / release pipelines, not to be a barrier in interactive use.
 
+## Dangerous combinations & full-bypass flags
+
+The per-patch table treats each patch in isolation, but some combinations are
+materially more dangerous than the sum of their parts. Read this section before
+enabling anything in the "expose internals" or "optional integrations" groups.
+
+### Remote tool/code-execution surface
+
+Enabling **`expose_tool_dispatch`**, **`expose_api_client`**, or
+**`expose_agent_tool`** alongside **`headless_bridge`** turns the patched CLI
+into an **authenticated remote tool/code-execution surface**.
+
+Individually these patches only publish `__ccp*` globals for in-process
+introspection. But `headless_bridge` accepts *external* requests (gated by the
+`__ccpAuth` shared secret) and can route them at those globals. Combined blast
+radius:
+
+- `expose_tool_dispatch` + bridge → a remote caller who holds the bridge token
+  can invoke **any tool the CLI has** (Bash, Write, Edit, file reads, MCP tools).
+  That is arbitrary command and filesystem execution on the host, as the user
+  running the CLI.
+- `expose_api_client` + bridge → a remote caller can drive the Anthropic SDK
+  client directly, spending your credits and exfiltrating whatever the client
+  can read.
+- `expose_agent_tool` + bridge → a remote caller can spawn sub-agents, which in
+  turn have the full tool surface above — recursively.
+
+In other words: with this combination, **anyone who obtains the bridge token
+gets the same power over the host as the local user**. Treat the bridge token
+as a root-equivalent credential. Only enable this combination on a host you
+fully control, never expose the bridge port to an untrusted network, and rotate
+the token (SIGHUP re-reads it) if it may have leaked. The compare path is
+constant-time and length-independent, but that only protects the token, not the
+blast radius behind it.
+
+### `--allow-capabilities=all` is a full bypass
+
+`--allow-capabilities=all` **disables the entire per-patch capability
+acknowledgement gate in a single flag.** Instead of acknowledging
+`network`, `exec`, `env`, `telemetry`, etc. per patch, `all` blanket-approves
+every high-risk capability of every patch being applied — there is no remaining
+prompt or refusal for network egress, subprocess execution, or env access.
+
+Because it collapses the whole safety model to one token, it should **never
+appear in scripts, CI pipelines, or shared Makefile targets**. In automation,
+enumerate the exact capabilities you intend to allow
+(`--allow-capabilities network,fs`) so the acknowledgement stays auditable and
+a newly-introduced high-risk patch fails closed instead of being silently
+waved through. Reserve `all` for interactive, one-off local use where a human
+has just read the capability table.
+
+### Webhook egress (`CLAUDE_WEBHOOK_URL`)
+
+The `webhook` patch, when enabled and `CLAUDE_WEBHOOK_URL` is set, sends
+**unredacted conversation/event data outbound** to that URL — CLI args, working
+directory, process id, and per-event payloads, with no redaction layer. The
+patch restricts the destination scheme to `https:` (or `http://localhost` for
+dev) and refuses anything else, but it does **not** filter what is sent. Point
+it only at an endpoint you control and trust, and assume that endpoint sees the
+full content of your session.
+
 ## How to disable a patch
 
 Three options, any of them is fine:
