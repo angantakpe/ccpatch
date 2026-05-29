@@ -94,6 +94,9 @@ import {
   PHASES_LIST,
   KINDS_LIST,
   AT_KINDS_LIST,
+  FIELD_HINTS,
+  fieldHint,
+  missingField,
 } from './manifest-schema.mjs';
 
 // Enum sets are derived from the ONE declarative schema in manifest-schema.mjs,
@@ -146,13 +149,14 @@ export function validateManifest(mod, filename, ctx = {}) {
   const variant = ctx.variant ?? 'default';
 
   // Required: description
+  // U3: rejection teaches the field name, expected type and a correct example.
   if (!mod.description || typeof mod.description !== 'string') {
-    errors.push('missing required field: description (string)');
+    errors.push(missingField('description'));
   }
 
   // verify is required. At least one of present/absent/count must be specified.
   if (!mod.verify || typeof mod.verify !== 'object') {
-    errors.push(`patch ${stem}: missing required 'verify' export — see CONTRIBUTING.md`);
+    errors.push(`patch ${stem}: ${missingField('verify')} — see CONTRIBUTING.md`);
   } else {
     const v = mod.verify;
     const hasPresent = v.present !== undefined && v.present !== null
@@ -161,29 +165,29 @@ export function validateManifest(mod, filename, ctx = {}) {
       && (Array.isArray(v.absent) ? v.absent.length > 0 : true);
     const hasCount = v.count !== undefined && v.count !== null;
     if (!hasPresent && !hasAbsent && !hasCount) {
-      errors.push(`patch ${stem}: 'verify' must specify at least one of present/absent/count — see CONTRIBUTING.md`);
+      errors.push(`patch ${stem}: ${fieldHint('verify', 'must specify at least one of present/absent/count')} — see CONTRIBUTING.md`);
     }
     // Weak-verify guard: present-only verify cannot detect wrong-location apply
     // or double-apply. Require opt-in via verify.weak:true.
     if (hasPresent && !hasAbsent && !hasCount && v.weak !== true) {
-      errors.push(`weak verify: declare verify.absent or verify.count, or opt in with verify.weak: true`);
+      errors.push(`weak verify: declare verify.absent or verify.count, or opt in with verify.weak: true — e.g. ${FIELD_HINTS['verify.weak'].example}`);
     }
     if (v.weak !== undefined && typeof v.weak !== 'boolean') {
-      errors.push('verify.weak must be a boolean');
+      errors.push(fieldHint('verify.weak'));
     }
     if (hasCount) {
       const c = v.count;
       if (typeof c === 'number') {
-        if (!Number.isFinite(c) || c < 0) errors.push(`verify.count (number) must be a non-negative integer`);
+        if (!Number.isFinite(c) || c < 0) errors.push(fieldHint('verify.count', '(number) must be a non-negative integer'));
       } else if (typeof c === 'object') {
         if (c.present !== undefined && (!Number.isFinite(c.present) || c.present < 0)) {
-          errors.push(`verify.count.present must be a non-negative integer`);
+          errors.push(fieldHint('verify.count', '.present must be a non-negative integer'));
         }
         if (c.absent !== undefined && (!Number.isFinite(c.absent) || c.absent < 0)) {
-          errors.push(`verify.count.absent must be a non-negative integer`);
+          errors.push(fieldHint('verify.count', '.absent must be a non-negative integer'));
         }
       } else {
-        errors.push(`verify.count must be a number or { present?, absent? }`);
+        errors.push(fieldHint('verify.count', 'must be a number or { present?, absent? }'));
       }
     }
   }
@@ -195,85 +199,85 @@ export function validateManifest(mod, filename, ctx = {}) {
   // Optional. When present, both fields are required and non-empty strings.
   if (mod.overlay !== undefined) {
     if (!mod.overlay || typeof mod.overlay !== 'object' || Array.isArray(mod.overlay)) {
-      errors.push('overlay must be an object: { register: string, code: string }');
+      errors.push(fieldHint('overlay', 'must be an object: { register: string, code: string }'));
     } else {
       if (typeof mod.overlay.register !== 'string' || mod.overlay.register.length === 0) {
-        errors.push('overlay.register is required and must be a non-empty string');
+        errors.push(fieldHint('overlay', '.register is required and must be a non-empty string'));
       }
       if (typeof mod.overlay.code !== 'string' || mod.overlay.code.length === 0) {
-        errors.push('overlay.code is required and must be a non-empty string');
+        errors.push(fieldHint('overlay', '.code is required and must be a non-empty string'));
       }
     }
   }
 
   // preload consistency
   if (mod.preload === true && !mod.preloadCode) {
-    errors.push('preload:true requires a preloadCode string');
+    errors.push('preload:true requires a preloadCode string — e.g. preloadCode: \'globalThis.__x = 1;\'');
   }
   if (mod.preloadCode && mod.preload !== true) {
-    errors.push('preloadCode is set but preload:true is missing');
+    errors.push('preloadCode is set but preload:true is missing — add preload: true to enable the --require variant');
   }
 
   // Optional category
   if (mod.category !== undefined) {
     if (!CATEGORIES.has(mod.category)) {
-      errors.push(`category must be one of: ${[...CATEGORIES].join(', ')} (got "${mod.category}")`);
+      errors.push(fieldHint('category', `must be one of: ${[...CATEGORIES].join(', ')} (got "${mod.category}")`));
     }
   }
 
   // Optional enabled hint (ccpatch.yml is authoritative; this is documentation)
   if (mod.enabled !== undefined && typeof mod.enabled !== 'boolean') {
-    errors.push('enabled must be a boolean');
+    errors.push(fieldHint('enabled'));
   }
 
   // Optional required flag — promotes failures to fatal even outside --strict.
   if (mod.required !== undefined && typeof mod.required !== 'boolean') {
-    errors.push('required must be a boolean');
+    errors.push(fieldHint('required'));
   }
 
   // Optional name — if present, must match stem
   if (mod.name !== undefined) {
     if (typeof mod.name !== 'string') {
-      errors.push('name must be a string');
+      errors.push(fieldHint('name', 'must be a string'));
     } else if (mod.name !== stem) {
-      errors.push(`name mismatch: manifest says "${mod.name}", filename stem is "${stem}"`);
+      errors.push(`name mismatch: manifest says "${mod.name}", filename stem is "${stem}" — set name: '${stem}' or rename the file`);
     }
   }
 
   // Optional applyMode — must be enum if present
   const applyMode = mod.applyMode ?? 'build';
   if (!APPLY_MODES.has(applyMode)) {
-    errors.push(`applyMode must be one of: ${[...APPLY_MODES].join(', ')} (got "${applyMode}")`);
+    errors.push(fieldHint('applyMode', `must be one of: ${[...APPLY_MODES].join(', ')} (got "${applyMode}")`));
   }
 
   // kind — declarative patch shape (default 'free' = the apply() escape hatch).
   const kind = mod.kind ?? 'free';
   if (!KIND_SET.has(kind)) {
-    errors.push(`kind must be one of: ${[...KIND_SET].join(', ')} (got "${kind}")`);
+    errors.push(fieldHint('kind', `must be one of: ${[...KIND_SET].join(', ')} (got "${kind}")`));
   }
 
   if (kind === 'free') {
     // apply() required for free kind.
     if (typeof mod.apply !== 'function') {
-      errors.push(`apply must be a function when applyMode is "${applyMode}"`);
+      errors.push(`apply must be a function when kind is "free" / applyMode is "${applyMode}" — e.g. apply(code) { return code; }`);
     }
   } else {
     // Non-free kinds synthesize apply() from declarative fields. A user-supplied
     // apply() is rejected to avoid two sources of truth.
     if (mod.apply !== undefined) {
-      errors.push(`kind="${kind}" patches must not export apply() — the runner synthesizes apply from kind/target/code`);
+      errors.push(`kind="${kind}" patches must not export apply() — the runner synthesizes apply from kind/target/code; drop apply() and keep target/code/transform`);
     }
     if (!mod.target || typeof mod.target !== 'object' || !mod.target.function) {
-      errors.push(`kind="${kind}" requires target.function (either { literal: 'STR' } or a function name)`);
+      errors.push(`kind="${kind}" requires ${fieldHint('target.function')}`);
     }
     if (kind === 'prefix' || kind === 'postfix') {
       if (typeof mod.code !== 'string') {
-        errors.push(`kind="${kind}" requires code: string (verbatim JS to inject)`);
+        errors.push(`kind="${kind}" requires ${fieldHint('code', 'a code: string (verbatim JS to inject)')}`);
       }
     }
     if (kind === 'transpiler') {
       if (typeof mod.transform !== 'function') {
-        errors.push(`kind="transpiler" requires transform: (functionBody, opts) => string`);
+        errors.push(`kind="transpiler" requires ${fieldHint('transform', 'a transform: (functionBody, opts) => string')}`);
       }
     }
   }
@@ -281,7 +285,7 @@ export function validateManifest(mod, filename, ctx = {}) {
   // anchor — if present, must have literal string
   if (mod.anchor !== undefined) {
     if (!mod.anchor || typeof mod.anchor.literal !== 'string') {
-      errors.push('anchor must be { literal: string, byteOffset?: number }');
+      errors.push(fieldHint('anchor', 'must be { literal: string, byteOffset?: number }'));
     }
   }
 
@@ -289,11 +293,11 @@ export function validateManifest(mod, filename, ctx = {}) {
   let at = null;
   if (mod.at !== undefined) {
     if (!mod.at || typeof mod.at !== 'object' || Array.isArray(mod.at)) {
-      errors.push('at must be an object: { kind, target }');
+      errors.push(fieldHint('at', 'must be an object: { kind, target }'));
     } else if (!AT_KIND_SET.has(mod.at.kind)) {
-      errors.push(`at.kind must be one of: ${[...AT_KIND_SET].join(', ')} (got "${mod.at.kind}")`);
+      errors.push(fieldHint('at.kind', `must be one of: ${[...AT_KIND_SET].join(', ')} (got "${mod.at.kind}")`));
     } else if (!mod.at.target || typeof mod.at.target !== 'object') {
-      errors.push('at.target is required and must be an object');
+      errors.push('at.target is required and must be an object — e.g. target: { function: \'foo\' }');
     } else {
       const k = mod.at.kind;
       const t = mod.at.target;
@@ -332,13 +336,13 @@ export function validateManifest(mod, filename, ctx = {}) {
   // dependsOn — default []
   const dependsOn = mod.dependsOn ?? [];
   if (!Array.isArray(dependsOn)) {
-    errors.push('dependsOn must be an array');
+    errors.push(fieldHint('dependsOn', 'must be an array'));
   }
 
   // phase — default 'main'
   const phase = mod.phase ?? 'main';
   if (!PHASES.has(phase)) {
-    errors.push(`phase must be one of: ${[...PHASES].join(', ')} (got "${phase}")`);
+    errors.push(fieldHint('phase', `must be one of: ${[...PHASES].join(', ')} (got "${phase}")`));
   }
 
   // Optional priority — lower runs first within a phase, breaks topo ties.
@@ -347,7 +351,7 @@ export function validateManifest(mod, filename, ctx = {}) {
   let priority = 1000;
   if (mod.priority !== undefined) {
     if (typeof mod.priority !== 'number' || !Number.isFinite(mod.priority) || !Number.isInteger(mod.priority)) {
-      errors.push('priority must be a finite integer (lower runs first within a phase; default 1000)');
+      errors.push(fieldHint('priority', 'must be a finite integer (lower runs first within a phase; default 1000)'));
     } else {
       priority = mod.priority;
     }
@@ -359,7 +363,7 @@ export function validateManifest(mod, filename, ctx = {}) {
   if (mod.allowOverlapWith !== undefined) {
     if (!Array.isArray(mod.allowOverlapWith)
         || mod.allowOverlapWith.some(x => typeof x !== 'string' || !x.trim())) {
-      errors.push('allowOverlapWith must be an array of non-empty strings (patch names)');
+      errors.push(fieldHint('allowOverlapWith', 'must be an array of non-empty strings (patch names)'));
     } else {
       allowOverlapWith = [...new Set(mod.allowOverlapWith.map(s => s.trim()))];
     }
@@ -369,13 +373,13 @@ export function validateManifest(mod, filename, ctx = {}) {
   let capabilities = [];
   if (mod.capabilities !== undefined) {
     if (!Array.isArray(mod.capabilities)) {
-      errors.push('capabilities must be an array of strings');
+      errors.push(fieldHint('capabilities', 'must be an array of strings'));
     } else {
       const bad = mod.capabilities.filter(c => !CAPABILITY_SET.has(c));
       if (bad.length > 0) {
         errors.push(
           `capabilities contains unknown value(s): ${bad.join(', ')}. ` +
-          `Allowed: ${CAPABILITIES.join(', ')}`
+          `Allowed: ${CAPABILITIES.join(', ')} — e.g. capabilities: ['prompt', 'fs']`
         );
       }
       // Dedupe while preserving declared order.
@@ -388,18 +392,18 @@ export function validateManifest(mod, filename, ctx = {}) {
   let fallbackDiff = null;
   if (mod.fallbackDiff !== undefined) {
     if (!mod.fallbackDiff || typeof mod.fallbackDiff !== 'object' || Array.isArray(mod.fallbackDiff)) {
-      errors.push('fallbackDiff must be an object: { patch: string, capturedAgainst: string, fuzz?: number }');
+      errors.push(fieldHint('fallbackDiff', 'must be an object: { patch: string, capturedAgainst: string, fuzz?: number }'));
     } else {
       const fd = mod.fallbackDiff;
       if (typeof fd.patch !== 'string' || !fd.patch.trim()) {
-        errors.push('fallbackDiff.patch is required and must be a non-empty unified-diff string');
+        errors.push(fieldHint('fallbackDiff', '.patch is required and must be a non-empty unified-diff string'));
       }
       if (typeof fd.capturedAgainst !== 'string' || !fd.capturedAgainst.trim()) {
-        errors.push('fallbackDiff.capturedAgainst is required and must be a non-empty string (CC version it was captured against)');
+        errors.push(fieldHint('fallbackDiff', '.capturedAgainst is required and must be a non-empty string (CC version it was captured against)'));
       }
       if (fd.fuzz !== undefined) {
         if (typeof fd.fuzz !== 'number' || !Number.isFinite(fd.fuzz) || fd.fuzz < 0 || !Number.isInteger(fd.fuzz)) {
-          errors.push('fallbackDiff.fuzz must be a non-negative integer');
+          errors.push(fieldHint('fallbackDiff', '.fuzz must be a non-negative integer'));
         }
       }
       if (typeof fd.patch === 'string' && typeof fd.capturedAgainst === 'string') {
@@ -427,7 +431,7 @@ export function validateManifest(mod, filename, ctx = {}) {
   if (mod.forbiddenAfterPatch !== undefined) {
     if (!Array.isArray(mod.forbiddenAfterPatch)
         || mod.forbiddenAfterPatch.some(s => typeof s !== 'string' || s.length === 0)) {
-      errors.push('forbiddenAfterPatch must be an array of non-empty strings');
+      errors.push(fieldHint('forbiddenAfterPatch', 'must be an array of non-empty strings'));
     } else {
       forbiddenAfterPatch = [...mod.forbiddenAfterPatch];
     }
@@ -440,7 +444,7 @@ export function validateManifest(mod, filename, ctx = {}) {
   let coverageMarker = null;
   if (mod.coverageMarker !== undefined) {
     if (typeof mod.coverageMarker !== 'string' || mod.coverageMarker.trim().length === 0) {
-      errors.push('coverageMarker must be a non-empty string');
+      errors.push(fieldHint('coverageMarker', 'must be a non-empty string'));
     } else {
       coverageMarker = mod.coverageMarker.trim();
     }
@@ -452,13 +456,13 @@ export function validateManifest(mod, filename, ctx = {}) {
   let deprecated = null;
   if (mod.deprecated !== undefined) {
     if (!mod.deprecated || typeof mod.deprecated !== 'object' || Array.isArray(mod.deprecated)) {
-      errors.push('deprecated must be an object: { reason: string, since?: string }');
+      errors.push(fieldHint('deprecated', 'must be an object: { reason: string, since?: string }'));
     } else {
       if (typeof mod.deprecated.reason !== 'string' || !mod.deprecated.reason.trim()) {
-        errors.push('deprecated.reason is required and must be a non-empty string');
+        errors.push(fieldHint('deprecated', '.reason is required and must be a non-empty string'));
       }
       if (mod.deprecated.since !== undefined && typeof mod.deprecated.since !== 'string') {
-        errors.push('deprecated.since must be a string if defined');
+        errors.push(fieldHint('deprecated', '.since must be a string if defined'));
       }
       if (typeof mod.deprecated.reason === 'string' && mod.deprecated.reason.trim()) {
         deprecated = {
@@ -472,10 +476,10 @@ export function validateManifest(mod, filename, ctx = {}) {
   // Optional revisit — forensic-patch metadata
   if (mod.revisit !== undefined) {
     if (!mod.revisit || typeof mod.revisit !== 'object' || Array.isArray(mod.revisit)) {
-      errors.push('revisit must be an object: { note: string, addedIn?: string, until?: string }');
+      errors.push(fieldHint('revisit', 'must be an object: { note: string, addedIn?: string, until?: string }'));
     } else {
       if (typeof mod.revisit.note !== 'string' || !mod.revisit.note.trim()) {
-        errors.push('revisit.note is required and must be a non-empty string');
+        errors.push(fieldHint('revisit', '.note is required and must be a non-empty string'));
       }
       for (const k of ['addedIn', 'until']) {
         if (mod.revisit[k] !== undefined && typeof mod.revisit[k] !== 'string') {
@@ -494,7 +498,7 @@ export function validateManifest(mod, filename, ctx = {}) {
   if (mod.testedAgainst !== undefined) {
     if (!Array.isArray(mod.testedAgainst) || mod.testedAgainst.length === 0
         || mod.testedAgainst.some(x => typeof x !== 'string' || !x.trim())) {
-      errors.push('testedAgainst must be a non-empty array of strings (e.g. ["2.1.148"] or [">=2.1.150"])');
+      errors.push(fieldHint('testedAgainst', 'must be a non-empty array of strings (e.g. ["2.1.148"] or [">=2.1.150"])'));
     } else {
       testedAgainst = mod.testedAgainst.map(s => s.trim());
       for (const entry of testedAgainst) {

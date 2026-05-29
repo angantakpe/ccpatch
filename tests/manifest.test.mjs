@@ -275,4 +275,33 @@ describe('validateManifest', () => {
     assert.equal(ok, false);
     assert.ok(errors.some(e => e.includes('deprecated.since')), `errors: ${errors}`);
   });
+
+  // U3: rejection messages TEACH — they cite the field name and a one-line
+  // correct example (driven from the declarative schema's FIELD_HINTS).
+  it('teaches: a bad enum field error names the field AND shows an example', () => {
+    const mod = {
+      description: 'bad phase',
+      phase: 'beforehand',
+      verify: { present: 'x', weak: true },
+      apply: () => '',
+    };
+    const { ok, errors } = validateManifest(mod, 'p.mjs');
+    assert.equal(ok, false);
+    const msg = errors.find(e => e.includes('phase'));
+    assert.ok(msg, `expected a phase error: ${errors}`);
+    // Names the field, AND carries an "e.g." example the author can copy.
+    assert.ok(msg.includes('phase'), `should name the field: ${msg}`);
+    assert.ok(msg.includes('e.g.') && msg.includes("phase: 'pre'"),
+      `should include a correct example: ${msg}`);
+  });
+
+  it('teaches: a missing required field error shows the type and an example', () => {
+    const mod = { verify: { present: 'x', weak: true }, apply: () => '' };
+    const { ok, errors } = validateManifest(mod, 'p.mjs');
+    assert.equal(ok, false);
+    const msg = errors.find(e => e.includes('description'));
+    assert.ok(msg, `expected a description error: ${errors}`);
+    assert.ok(msg.includes('description') && msg.includes('e.g.')
+      && msg.includes("description:"), `should teach the shape + example: ${msg}`);
+  });
 });

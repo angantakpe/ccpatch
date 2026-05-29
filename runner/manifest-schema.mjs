@@ -247,6 +247,80 @@ export const PATCH_FIELDS = Object.freeze([
   { section: 'Coverage', name: 'coverageMarker?', type: 'string', doc: 'Opt-in runtime coverage marker.' },
 ]);
 
+// ── Teaching hints for validateManifest rejections (U3) ──────────────────────
+// A single declarative source for the *guidance* half of a rejection message:
+// each field's expected shape plus a one-line correct example. validateManifest
+// imports these and interpolates them so the error TEACHES (field name + shape +
+// example), matching the quality bar of the dependsOn errors in runner.mjs.
+//
+// Keyed by the field/path the validator reports on. Each descriptor:
+//   { shape: string, example: string }
+//     shape   — the expected type/shape, in the same vocabulary the docs use.
+//     example — a one-line, copy-pasteable correct value.
+// Drive the message text through fieldHint()/missingField() below so the wording
+// (and the example) lives in ONE place and cannot drift across call sites.
+export const FIELD_HINTS = Object.freeze({
+  description:  { shape: 'string', example: "description: 'Force the thinking feature flag on'" },
+  verify:       { shape: '{ present?, absent?, count?, weak? }', example: "verify: { present: '__marker__', absent: '__marker____marker__' }" },
+  'verify.count': { shape: 'number | { present?: number, absent?: number }', example: 'verify: { count: { present: 1 } }' },
+  'verify.weak':  { shape: 'boolean', example: 'verify: { present: \'__m__\', weak: true }' },
+  overlay:      { shape: '{ register: string, code: string }', example: "overlay: { register: 'sidecar.mjs', code: 'export const x = 1;' }" },
+  category:     { shape: `one of ${CATEGORIES_LIST.join(' | ')}`, example: "category: 'feature'" },
+  enabled:      { shape: 'boolean', example: 'enabled: false' },
+  required:     { shape: 'boolean', example: 'required: true' },
+  name:         { shape: 'string (must equal the filename stem)', example: "name: 'force_thinking'  // in force_thinking.mjs" },
+  applyMode:    { shape: `one of ${APPLY_MODES_LIST.join(' | ')}`, example: "applyMode: 'build'" },
+  kind:         { shape: `one of ${KINDS_LIST.join(' | ')}`, example: "kind: 'prefix'" },
+  'target.function': { shape: "{ literal: 'STABLE_SUBSTR' } | 'functionName'", example: "target: { function: { literal: 'alwaysThinkingEnabled' } }" },
+  code:         { shape: 'string (verbatim JS to inject)', example: "code: 'console.log(\"entered\");'" },
+  transform:    { shape: '(functionBody: string, opts) => string', example: 'transform: (body) => body.replace(/return!1/, \'return!0\')' },
+  anchor:       { shape: '{ literal: string, byteOffset?: number }', example: "anchor: { literal: 'STABLE_SUBSTR' }" },
+  at:           { shape: '{ kind, target }', example: "at: { kind: 'HEAD', target: { function: 'foo' } }" },
+  'at.kind':    { shape: `one of ${AT_KINDS_LIST.join(' | ')}`, example: "at: { kind: 'INVOKE', target: { call: 'fetch' } }" },
+  dependsOn:    { shape: 'string[] (other patch names)', example: "dependsOn: ['expose_agent_tool']" },
+  phase:        { shape: `one of ${PHASES_LIST.join(' | ')}`, example: "phase: 'pre'" },
+  priority:     { shape: 'finite integer (lower runs first; default 1000)', example: 'priority: 500' },
+  allowOverlapWith: { shape: 'string[] of non-empty patch names', example: "allowOverlapWith: ['other_patch']" },
+  capabilities: { shape: `string[] — any of ${CAPABILITIES_LIST.join(' | ')}`, example: "capabilities: ['prompt', 'fs']" },
+  fallbackDiff: { shape: '{ patch: string, capturedAgainst: string, fuzz?: number }', example: "fallbackDiff: { patch: '--- a\\n+++ b\\n…', capturedAgainst: '2.1.156' }" },
+  forbiddenAfterPatch: { shape: 'string[] of non-empty strings', example: "forbiddenAfterPatch: ['debugger', 'console.log']" },
+  coverageMarker: { shape: 'non-empty string', example: "coverageMarker: 'force_thinking_hit'" },
+  deprecated:   { shape: '{ reason: string, since?: string }', example: "deprecated: { reason: 'upstream fixed in 2.1.146', since: '2.1.146' }" },
+  revisit:      { shape: '{ note: string, addedIn?: string, until?: string }', example: "revisit: { note: 'recheck when flag stabilizes', until: '2.2.0' }" },
+  testedAgainst: { shape: 'non-empty string[] of versions/ranges', example: "testedAgainst: ['2.1.156', '>=2.1.150']" },
+});
+
+/**
+ * Format a teaching rejection for a malformed field. Produces:
+ *   `<field> must be <shape> — e.g. <example>`
+ * `detail` (optional) is appended before the example to explain the specific
+ * problem (e.g. which sub-field is wrong). Driven by FIELD_HINTS so the shape +
+ * example are defined once.
+ */
+export function fieldHint(field, detail) {
+  const h = FIELD_HINTS[field];
+  const shape = h ? h.shape : 'a valid value';
+  // A detail that begins with a sub-field accessor (".reason", ".patch") joins
+  // without a space so the message reads "deprecated.reason …" (a single token
+  // authors can grep for); otherwise insert a space ("verify must specify …").
+  const sep = detail && detail.startsWith('.') ? '' : ' ';
+  const lead = detail ? `${field}${sep}${detail}` : `${field} must be ${shape}`;
+  return h ? `${lead} — e.g. ${h.example}` : lead;
+}
+
+/**
+ * Format a teaching rejection for a *missing required* field. Produces:
+ *   `missing required field: <field> (<shape>) — e.g. <example>`
+ */
+export function missingField(field, detail) {
+  const h = FIELD_HINTS[field];
+  const shape = h ? h.shape : 'required';
+  const lead = detail
+    ? `missing required field: ${field} — ${detail}`
+    : `missing required field: ${field} (${shape})`;
+  return h ? `${lead} — e.g. ${h.example}` : lead;
+}
+
 // ── The NormalizedPatch interface (validateManifest output) ──────────────────
 
 export const NORMALIZED_FIELDS = Object.freeze([

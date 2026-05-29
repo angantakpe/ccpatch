@@ -3,17 +3,27 @@
  * scaffold-patch.mjs — Generate a new patch file with the contract pre-filled.
  *
  * Usage:
- *   node bin/scaffold-patch.mjs <name> [--category=extension|core] [--kind=splice|flag|free] [--force]
+ *   node bin/scaffold-patch.mjs <name> [--category=extension|core] [--kind=<kind>] [--force]
  *
  * Examples:
  *   node bin/scaffold-patch.mjs my_logger
  *   node bin/scaffold-patch.mjs unlock_thing --kind=flag
  *   node bin/scaffold-patch.mjs my_fix --category=core --kind=free
+ *   node bin/scaffold-patch.mjs entry_log --kind=prefix
  *
  * --kind options:
- *   splice (default) — uses spliceBoot() to inject a boot-time IIFE
- *   flag             — uses forceFeatureFlag() to override a tengu_* feature flag
- *   free             — empty apply() body, no helper import
+ *   Declarative kinds (preferred — the runner synthesizes apply() from the
+ *   target/code/transform fields; see runner/manifest-schema.mjs KIND_ENUM):
+ *     free       — apply()-based escape hatch (the declarative default `kind`)
+ *     prefix     — inject `code` right after the target function's opening brace
+ *     postfix    — wrap the target function's return value via `code`
+ *     transpiler — rewrite the target function's whole body via `transform()`
+ *   apply()-helper kinds (imperative; use the patch-helpers toolbox):
+ *     splice     — uses spliceBoot() to inject a boot-time IIFE
+ *     flag       — uses forceFeatureFlag() to override a tengu_* feature flag
+ *
+ * Every template is lint-passing and passes validateManifest as-is, so the
+ * only thing to fill in is the TODO-marked anchor/body.
  */
 
 import fs from 'node:fs';
@@ -37,7 +47,8 @@ function parseArgs(argv) {
 }
 
 const USAGE =
-  'Usage: node bin/scaffold-patch.mjs <name> [--category=extension|core] [--kind=splice|flag|free] [--force]';
+  'Usage: node bin/scaffold-patch.mjs <name> [--category=extension|core] ' +
+  '[--kind=free|prefix|postfix|transpiler|splice|flag] [--force]';
 
 function templateSplice(name) {
   return `import { spliceBoot } from '../runner/patch-helpers.mjs';
@@ -47,9 +58,12 @@ export default {
   category: 'optional',
   enabled: false,
   description: 'TODO: one-line summary of what this patch does',
-  capabilities: [], // declare any of: network|fs|env|prompt|telemetry|exec|process
+  capabilities: [], // declare any of: network|fs|env|prompt|tools|exec|telemetry
   verify: {
+    // present-only is a WEAK verify; opt in so the stub validates, then tighten
+    // with absent/count (e.g. absent the un-installed form) once it is stable.
     present: '__ccp_${name}_installed__',
+    weak: true,
   },
   apply(code) {
     if (code.includes('__ccp_${name}_installed__')) return code; // idempotent guard
@@ -101,7 +115,11 @@ export default {
   capabilities: [],
   verify: {
     // At least one of present/absent/count is required by the loader.
+    // present-only is a WEAK verify (can't detect double/wrong-location apply):
+    // prefer adding \`absent\` or \`count\`. We opt in with weak:true so the stub
+    // passes validation — tighten this once you know your real markers.
     present: '__ccp_${name}__',
+    weak: true,
   },
   apply(code) {
     // TODO: implement.
@@ -111,7 +129,88 @@ export default {
 `;
 }
 
-const TEMPLATES = { splice: templateSplice, flag: templateFlag, free: templateFree };
+// ── Declarative kinds (kind: 'prefix'|'postfix'|'transpiler') ────────────────
+// These synthesize apply() from target/code/transform — no apply() export, no
+// helper import. The runner locates `target.function` (a stable string literal
+// in the minified bundle, or a bare function name) and rewrites it per kind.
+// See runner/patch-kinds.mjs and CONTRIBUTING.md "Declarative patch kinds".
+
+function templatePrefix(name) {
+  return `/** @type {import('../types/patch').Patch} */
+export default {
+  category: 'feature',
+  enabled: false,
+  description: 'TODO: what does injecting code at this function entry achieve?',
+  capabilities: [], // declare any of: network|fs|env|prompt|tools|exec|telemetry
+  // prefix injects \`code\` exactly once at the function head; assert it landed once.
+  verify: { present: '__ccp_${name}__', count: { present: 1 } },
+
+  kind: 'prefix',
+  // Anchor the enclosing function by a STABLE substring. Prefer a quoted string
+  // literal that survives minification; use { body: '...' } to match on a
+  // property access / token inside the function instead of a quoted literal.
+  target: { function: { literal: 'TODO_STABLE_LITERAL' } },
+  // Verbatim JS spliced right after the opening brace. Keep it a single
+  // statement-ish blob; it runs first, every time the function is called.
+  code: 'var __ccp_${name}__=1;',
+};
+`;
+}
+
+function templatePostfix(name) {
+  return `/** @type {import('../types/patch').Patch} */
+export default {
+  category: 'feature',
+  enabled: false,
+  description: 'TODO: how do you want to transform this function return value?',
+  capabilities: [],
+  // postfix wraps each \`return X\` as (function(__r){ <code>; return __r })(X).
+  // \`__r\` is the original return value; mutate or replace it, then it is returned.
+  // present-only is WEAK (can't catch double-apply); opt in so the stub validates,
+  // then tighten with absent/count once your markers are stable.
+  verify: { present: '__ccp_${name}__', weak: true },
+
+  kind: 'postfix',
+  target: { function: { literal: 'TODO_STABLE_LITERAL' } },
+  // \`__r\` is in scope. TODO: inspect/replace it. The marker proves the wrap ran.
+  code: 'var __ccp_${name}__=__r;',
+};
+`;
+}
+
+function templateTranspiler(name) {
+  return `/** @type {import('../types/patch').Patch} */
+export default {
+  category: 'feature',
+  enabled: false,
+  description: 'TODO: what whole-body rewrite does this function need?',
+  capabilities: [],
+  // transpiler hands you the function body as a string and splices your result
+  // back in. Returning the body unchanged leaves the bundle byte-identical.
+  // present-only is WEAK; opt in so the stub validates, then tighten with
+  // absent/count once your markers are stable.
+  verify: { present: '__ccp_${name}__', weak: true },
+
+  kind: 'transpiler',
+  target: { function: { literal: 'TODO_STABLE_LITERAL' } },
+  // (functionBody, opts) => string. TODO: do a targeted .replace() — avoid
+  // wholesale rewrites so the patch survives minor upstream churn.
+  transform(body) {
+    // Example: short-circuit a guard. Replace with your real edit.
+    return body.replace(/return!1/, 'return!0 /* __ccp_${name}__ */');
+  },
+};
+`;
+}
+
+const TEMPLATES = {
+  free: templateFree,
+  prefix: templatePrefix,
+  postfix: templatePostfix,
+  transpiler: templateTranspiler,
+  splice: templateSplice,
+  flag: templateFlag,
+};
 
 function main(argv = process.argv) {
   const opts = parseArgs(argv);
@@ -180,4 +279,4 @@ const invokedFromCli = (() => {
 })();
 if (invokedFromCli) process.exit(main());
 
-export { main as runScaffoldCli, parseArgs };
+export { main as runScaffoldCli, parseArgs, TEMPLATES };
