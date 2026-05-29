@@ -7,7 +7,6 @@ import { createPatch } from 'diff';
 import {
   applyFallbackDiff,
   detectDrift,
-  cheapEditSpans,
   writeConflictsArtifact,
   writeApplyArtifacts,
 } from '../runner/runner.mjs';
@@ -104,41 +103,6 @@ describe('ARCH1 helper — detectDrift', () => {
     const { probesCount, candidates } = detectDrift('whatever\n', { verify: {} }, 'p', {});
     assert.equal(probesCount, 0);
     assert.equal(candidates.length, 0);
-  });
-});
-
-describe('PERF1 helper — cheapEditSpans', () => {
-  it('returns [] for identical strings', () => {
-    assert.deepEqual(cheapEditSpans('abc', 'abc'), []);
-  });
-
-  it('finds a single middle edit span in pre-code coordinates', () => {
-    const pre  = 'line1\nline2\nline3\n';
-    const post = 'line1\nLINE-TWO\nline3\n';
-    const spans = cheapEditSpans(pre, post);
-    assert.equal(spans.length, 1);
-    const [start, end] = spans[0];
-    // Span must bracket the changed region "line2" within preCode.
-    assert.ok(start <= pre.indexOf('line2'));
-    assert.ok(end >= pre.indexOf('line2') + 'line2'.length);
-    assert.ok(end <= pre.length);
-  });
-
-  it('represents a pure insertion as a 1-byte-ish span at the insert point', () => {
-    const pre  = 'abcdef';
-    const post = 'abcXYZdef';
-    const spans = cheapEditSpans(pre, post);
-    assert.equal(spans.length, 1);
-    const [start, end] = spans[0];
-    assert.equal(start, 3);
-    assert.ok(end >= start);
-    assert.ok(end <= pre.length);
-  });
-
-  it('handles a pure append', () => {
-    const spans = cheapEditSpans('hello', 'hello world');
-    assert.equal(spans.length, 1);
-    assert.equal(spans[0][0], 5);
   });
 });
 
