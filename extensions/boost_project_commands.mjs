@@ -90,6 +90,13 @@ export default {
           sortANew: `return l.sort((r,t)=>{const _ip=(s)=>s.loadedFrom==="commands_DEPRECATED";const _pR=_ip(r),_pT=_ip(t);if(_pR!==_pT)return _pR?-1:1;return(d.get(t)??0)-(d.get(r)??0)||A_(r).localeCompare(A_(t))})`,
           sortBNew: `return l.sort((d,r)=>{const _ip=(s)=>s.loadedFrom==="commands_DEPRECATED";const _aD=_ip(d)?0:1,_aR=_ip(r)?0:1;if(_aD!==_aR)return _aD-_aR;return String(d.source).localeCompare(String(r.source))||A_(d).localeCompare(A_(r))})`,
         },
+        {
+          // v2.1.156: l/(r,a)/O_, c.get, then l/(c,r)/O_
+          sortA: `return l.sort((r,a)=>(c.get(a)??0)-(c.get(r)??0)||O_(r).localeCompare(O_(a)))`,
+          sortB: `return l.sort((c,r)=>String(c.source).localeCompare(String(r.source))||O_(c).localeCompare(O_(r)))`,
+          sortANew: `return l.sort((r,a)=>{const _ip=(s)=>s.loadedFrom==="commands_DEPRECATED";const _pR=_ip(r),_pA=_ip(a);if(_pR!==_pA)return _pR?-1:1;return(c.get(a)??0)-(c.get(r)??0)||O_(r).localeCompare(O_(a))})`,
+          sortBNew: `return l.sort((c,r)=>{const _ip=(s)=>s.loadedFrom==="commands_DEPRECATED";const _aC=_ip(c)?0:1,_aR=_ip(r)?0:1;if(_aC!==_aR)return _aC-_aR;return String(c.source).localeCompare(String(r.source))||O_(c).localeCompare(O_(r))})`,
+        },
       ];
 
       for (const { sortA, sortB, sortANew, sortBNew } of variants) {
