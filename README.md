@@ -162,6 +162,22 @@ When Anthropic ships a new Claude Code version, anchors may drift. The runner lo
 
 ---
 
+## TUI — read-only patch browser
+
+```
+node bin/patch-tui.mjs
+```
+
+The TUI is a **read-only patch browser**: it lists every loadable patch with its
+enabled/ack state and the latest anchor drift, and lets you expand a patch to
+inspect its manifest. It never mutates `ccpatch.yml` or any patch file. It is
+intentionally narrow — for the rich operations (apply, `doctor`, `heal`,
+`capabilities`, `coverage`, `module`, `repl`, `revert`/`diff`, …) use the CLI
+(`node bin/patch-cli.mjs <command>`). Run `node bin/patch-tui.mjs --help` for
+keybindings.
+
+---
+
 ## Security
 
 Report vulnerabilities privately via GitHub Security Advisories or the email

@@ -90,7 +90,7 @@ if (!quiet) {
   // per build, not per patch" contract from the expert review.
   console.warn(
     `[ccpatch] ${findings.length} free-form patch(es) could be declarative ` +
-    `(kind: prefix | postfix | transpiler). See CONTRIBUTING.md "Declarative kinds".`
+    `(kind: prefix | postfix | transpiler). See docs/authoring-patches.md "Declarative kinds".`
   );
   for (const { name, reason } of findings) {
     console.warn(`  - ${name}: ${reason}`);

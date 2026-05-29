@@ -156,6 +156,51 @@ To audit what was actually injected, run `node bin/patch-cli.mjs <input.js> /tmp
 
 ---
 
+## Third-party module trust
+
+Third-party patch modules (installed via `ccpatch module install`) run with the
+same in-process trust as built-in patches once enabled. Two points matter for
+the threat model:
+
+- **The module "signature" is a content hash, not authenticity.** The
+  `signature` field in `ccpatch-module.json` is a hex sha256 over the sorted
+  `patches/` tree (file content only). It proves **integrity** — that the tree
+  matches a known digest — but says nothing about **who** authored it. There is
+  no public-key authorship signature. Trust comes from pinning a known-good hash
+  out-of-band, not from the field merely being present.
+
+- **`--expect-sha256` is the trust anchor for remote installs.** When installing
+  from a tarball, pass the content hash you obtained out-of-band:
+
+  ```
+  ccpatch module install https://example.com/my-patches-1.2.0.tgz \
+    --expect-sha256 <hex-sha256>
+  ```
+
+  The installer refuses to proceed if the downloaded `patches/` tree doesn't
+  hash to the value you supplied. Without `--expect-sha256` you are trusting the
+  transport and the endpoint.
+
+- **`http://` requires `--insecure`.** Plain HTTP offers no transport integrity,
+  so the installer refuses an `http://` URL unless you explicitly pass
+  `--insecure`. Prefer `https://` combined with `--expect-sha256`; reserve
+  `--insecure` for a trusted LAN where you control both ends.
+
+- **Capabilities are self-declared and imports happen in-process.** The
+  `capabilities` array is honoured by the `--allow-capabilities` gate at install
+  and apply time, but `module install` imports each patch to read those
+  capabilities — that is *disclosure*, not sandboxing. Auditing the source under
+  `modules/<name>/patches/` before enabling is the actual trust boundary.
+
+- **Update channels are not signed by ccpatch.** A compromised `updateChannel`
+  endpoint can serve a different tarball. Pin a known content hash locally if
+  that matters.
+
+See [docs/authoring-patches.md](./docs/authoring-patches.md#third-party-patch-modules)
+for the install workflow and the `module verify` command.
+
+---
+
 ## What ccpatch does NOT do
 
 - No telemetry from the patcher or the patched bundle.
