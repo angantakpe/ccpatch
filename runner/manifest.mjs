@@ -87,30 +87,31 @@
  */
 
 import { parseVariantStem } from './version-resolver.mjs';
-import { AT_KINDS } from './at-selector.mjs';
-import { KINDS } from './patch-kinds.mjs';
+import {
+  CAPABILITIES_LIST,
+  APPLY_MODES_LIST,
+  CATEGORIES_LIST,
+  PHASES_LIST,
+  KINDS_LIST,
+  AT_KINDS_LIST,
+} from './manifest-schema.mjs';
 
-const APPLY_MODES = new Set(['build', 'either']);
-const AT_KIND_SET = new Set(AT_KINDS);
-const CATEGORIES  = new Set(['infrastructure', 'fix', 'feature', 'observe', 'expose', 'optional']);
-const PHASES      = new Set(['pre', 'main', 'post']);
-const KIND_SET    = new Set(KINDS);
+// Enum sets are derived from the ONE declarative schema in manifest-schema.mjs,
+// which also drives the generated types/patch.d.ts (see scripts/gen-types.mjs).
+const APPLY_MODES = new Set(APPLY_MODES_LIST);
+const AT_KIND_SET = new Set(AT_KINDS_LIST);
+const CATEGORIES  = new Set(CATEGORIES_LIST);
+const PHASES      = new Set(PHASES_LIST);
+const KIND_SET    = new Set(KINDS_LIST);
 
 /**
  * Capability vocabulary — see THREAT_MODEL.md.
+ * Sourced from the declarative schema (manifest-schema.mjs CAPABILITY_ENUM).
  * Each value documents a power the runtime patch can exercise inside the
  * patched bundle. Listed honestly by the patch author so users can audit
  * what an enabled patch is allowed to do.
  */
-export const CAPABILITIES = Object.freeze([
-  'network',    // patch intercepts fetch / makes outbound requests
-  'fs',         // patch reads/writes files outside the bundle
-  'prompt',     // patch modifies system or user prompt content
-  'tools',      // patch alters tool dispatch or tool definitions
-  'env',        // patch reads env vars (beyond documented `env` field)
-  'exec',       // patch can execute subprocesses
-  'telemetry',  // patch sends data to external sinks (webhook, logging service)
-]);
+export const CAPABILITIES = CAPABILITIES_LIST;
 const CAPABILITY_SET = new Set(CAPABILITIES);
 
 const MEDIUM_RISK = new Set(['prompt', 'fs', 'env']);

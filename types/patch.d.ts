@@ -1,14 +1,13 @@
 /**
  * Patch type definitions for ccpatch.
  *
- * SOURCE OF TRUTH: runner/manifest.mjs (the validateManifest() function).
- * This file is hand-mirrored from the validator to give patch authors editor
- * type-hints without introducing a TypeScript build step. If you change
- * manifest.mjs you MUST update this file (and vice-versa).
+ * GENERATED FILE — do not edit by hand.
+ * SOURCE OF TRUTH: runner/manifest-schema.mjs
+ * Regenerate with: npm run gen:types -- --write
  *
- * CI guard: `npm run gen:types -- --check` re-runs scripts/gen-types.mjs and
- * fails if this file drifts from the validator's `CAPABILITIES` / kind / phase
- * enums.
+ * The same schema drives validateManifest() in runner/manifest.mjs at runtime,
+ * so this surface and the validator cannot drift. CI guard: `npm run gen:types`
+ * (and `npm run lint:types`) re-runs this generator in --check mode.
  *
  * Usage in a patch file:
  *   /** @type {import('../types/patch').Patch} *\/
@@ -19,9 +18,17 @@
  *   };
  */
 
-// ── Enums (mirror runner/manifest.mjs + at-selector.mjs + patch-kinds.mjs) ──
+// ── Enums (generated from runner/manifest-schema.mjs) ──
 
-/** Declared runtime powers — see THREAT_MODEL.md. */
+/**
+ * - network: patch intercepts fetch / makes outbound requests
+ * - fs: patch reads/writes files outside the bundle
+ * - prompt: patch modifies system or user prompt content
+ * - tools: patch alters tool dispatch or tool definitions
+ * - env: patch reads env vars (beyond documented `env` field)
+ * - exec: patch can execute subprocesses
+ * - telemetry: patch sends data to external sinks (webhook, logging service)
+ */
 export type Capability =
   | 'network'
   | 'fs'
@@ -31,13 +38,16 @@ export type Capability =
   | 'exec'
   | 'telemetry';
 
-/** Risk classification derived from `capabilities`. */
-export type Risk = 'low' | 'medium' | 'high';
+export type Risk =
+  | 'low'
+  | 'medium'
+  | 'high';
 
-/** Build phase. Patches run pre → main → post. */
-export type Phase = 'pre' | 'main' | 'post';
+export type Phase =
+  | 'pre'
+  | 'main'
+  | 'post';
 
-/** Patch category — informational, used by reporters. */
 export type Category =
   | 'infrastructure'
   | 'fix'
@@ -46,16 +56,24 @@ export type Category =
   | 'expose'
   | 'optional';
 
-/** Apply mode — 'build' runs at bundle build time, 'either' may also run at runtime. */
-export type ApplyMode = 'build' | 'either';
+export type ApplyMode =
+  | 'build'
+  | 'either';
 
-/** Declarative patch shape. 'free' is the apply()-escape-hatch default. */
-export type Kind = 'free' | 'prefix' | 'postfix' | 'transpiler';
+export type Kind =
+  | 'free'
+  | 'prefix'
+  | 'postfix'
+  | 'transpiler';
 
-/** @At selector kinds. See runner/at-selector.mjs. */
-export type AtKind = 'HEAD' | 'RETURN' | 'INVOKE' | 'BEFORE' | 'AFTER';
+export type AtKind =
+  | 'HEAD'
+  | 'RETURN'
+  | 'INVOKE'
+  | 'BEFORE'
+  | 'AFTER';
 
-// ── Sub-shapes ─────────────────────────────────────────────────────────────
+// ── Sub-shapes ──
 
 /** Function-spec: name or stable string literal anchor. */
 export type FunctionSpec =
@@ -72,10 +90,7 @@ export interface VerifyBlock {
   absent?: string | string[];
   /** Exact occurrence count. Number → present count; object → fine-grained. */
   count?: number | { present?: number; absent?: number };
-  /**
-   * Opt-in for present-only verifies. Present-only verifies cannot detect
-   * wrong-location apply or double-apply; set weak:true to acknowledge.
-   */
+  /** Opt-in for present-only verifies (cannot detect wrong-location / double apply). */
   weak?: boolean;
   /** Optional human label used in failure messages. */
   label?: string;
@@ -148,7 +163,7 @@ export interface KindTarget {
   function: FunctionSpec;
 }
 
-// ── Main Patch interface ───────────────────────────────────────────────────
+// ── Main Patch interface ──
 
 /**
  * A ccpatch patch module's `default` export.
