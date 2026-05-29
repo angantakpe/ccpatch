@@ -28,6 +28,8 @@ import { resolve, join } from 'node:path';
 import { loadPatches } from '../runner/loader.mjs';
 import { probeAnchor, fuzzyMatch } from '../runner/anchors.mjs';
 import { compileKind } from '../runner/patch-kinds.mjs';
+import { resolveProfile } from '../runner/manifest.mjs';
+import { readProfiles } from '../runner/config.mjs';
 
 const args = process.argv.slice(2);
 let bundlePath = null;
@@ -71,22 +73,33 @@ if (!jsonOut) {
 //    manifest validation + version variant selection.
 const patches = await loadPatches(version ? { version } : {});
 
-// Apply profile filter (if requested) by reading ccpatch.yml. Best-effort:
-// the doctor scans everything by default; --profile narrows the set.
+// Apply profile filter (if requested). Reuse the SAME profile→patch-list
+// resolution the build path uses (runner/config.mjs:readProfiles +
+// runner/manifest.mjs:resolveProfile) so the doctor pre-pass checks exactly the
+// patches the build will apply for that profile — not the full 51-patch catalog.
+// The previous hand-rolled YAML scrape produced wrong/inverted counts; this
+// resolver is the single source of truth the build already trusts.
+// The doctor scans everything by default; --profile narrows the set.
 let enabledNames = Object.keys(patches);
 if (profile) {
   try {
     const yamlPath = resolve(process.cwd(), 'ccpatch.yml');
-    const raw = readFileSync(yamlPath, 'utf8');
-    // Extremely simple YAML scrape: lines like "  - name: foo" under a profile.
-    // Avoid pulling in a YAML dep for a diagnostic tool.
-    const sec = raw.split(/^profile:\s*$/m)[1] ?? raw;
-    const profileBlock = sec.split(new RegExp(`^\\s*${profile}:\\s*$`, 'm'))[1];
-    if (profileBlock) {
-      const names = [...profileBlock.matchAll(/^\s*-\s*([\w_\-/]+)/gm)].map(m => m[1]);
-      if (names.length > 0) enabledNames = names.filter(n => patches[n]);
+    const profiles = readProfiles(yamlPath);
+    const { enabled, unknown } = resolveProfile(profile, profiles, enabledNames);
+    if (!jsonOut && unknown.length > 0) {
+      console.log(`[anchor_doctor] profile "${profile}": ${unknown.length} unknown patch name(s) skipped: ${unknown.join(', ')}`);
     }
-  } catch { /* fall through with full set */ }
+    enabledNames = enabled;
+    if (!jsonOut) {
+      console.log(`[anchor_doctor] profile=${profile} — checking ${enabledNames.length} of ${Object.keys(patches).length} patches`);
+    }
+  } catch (err) {
+    // Unknown profile (or unreadable ccpatch.yml): fail loud rather than
+    // silently scanning everything, since a typo'd --profile would otherwise
+    // masquerade as a full-catalog pass.
+    console.error(`[anchor_doctor] ${err.message}`);
+    process.exit(2);
+  }
 }
 
 // ── Probe ────────────────────────────────────────────────────────────────

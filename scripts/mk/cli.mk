@@ -182,7 +182,7 @@ patch-claude-code: ## Apply the standard profile: make patch-claude-code [VERSIO
 	@SRC=$(INPUT); [ ! -f "$$SRC" ] && SRC=$(CJS_EXTRACTED); \
 	if [ ! -f "$$SRC" ]; then echo "ERROR: Could not obtain cli.js for v$(VERSION)."; exit 1; fi; \
 	echo "Using: $$SRC"; \
-	node tools/anchor-doctor.mjs "$$SRC" || true; \
+	node tools/anchor-doctor.mjs "$$SRC" $(if $(PROFILE),--profile $(PROFILE),) || true; \
 	$(NODE) $(PATCH_TOOL) "$$SRC" $(OUTPUT) $(addprefix --patch ,$(subst $(comma), ,$(PATCH))) $(if $(PROFILE),--profile $(PROFILE),)
 	@SHA256=$$(sha256sum $(OUTPUT) | awk '{print $$1}'); \
 	echo "$$SHA256  cli.v$(VERSION).patched.mjs" > releases/$(VERSION)/cli.v$(VERSION).patched.mjs.sha256; \
@@ -190,16 +190,20 @@ patch-claude-code: ## Apply the standard profile: make patch-claude-code [VERSIO
 	SIZE_MB=$$(awk "BEGIN {printf \"%.1f\", $$SIZE/1048576}"); \
 	BUILD_TS=$$(date -u +"%Y-%m-%dT%H:%M:%SZ"); \
 	node -e " \
+	  const fs = require('fs'); \
 	  const patches = '$(PATCH)'.split(',').map(s=>s.trim()); \
+	  let capBypass = false; \
+	  try { capBypass = !!JSON.parse(fs.readFileSync('$(OUTPUT)' + '.capgate.json', 'utf8')).capabilitiesGateBypassed; } catch {} \
 	  const manifest = { \
 	    version: '$(VERSION)', \
 	    build_timestamp: process.env.BUILD_TS, \
 	    sha256: process.env.SHA256, \
 	    file_size_bytes: parseInt(process.env.SIZE, 10), \
 	    patches, \
+	    capabilitiesGateBypassed: capBypass, \
 	    node_required: '>=18.0.0' \
 	  }; \
-	  require('fs').writeFileSync('releases/$(VERSION)/cli.v$(VERSION).manifest.json', JSON.stringify(manifest, null, 2) + '\\n'); \
+	  fs.writeFileSync('releases/$(VERSION)/cli.v$(VERSION).manifest.json', JSON.stringify(manifest, null, 2) + '\\n'); \
 	" BUILD_TS=$$BUILD_TS SHA256=$$SHA256 SIZE=$$SIZE; \
 	echo "Artifacts: $(OUTPUT) ($$SIZE_MB MB, sha256:$$(echo $$SHA256 | cut -c1-12))"
 
@@ -268,16 +272,20 @@ release: repatch ## Package patched CLI as a versioned release artifact: make re
 	SIZE_MB=$$(awk "BEGIN {printf \"%.1f\", $$SIZE/1048576}"); \
 	BUILD_TS=$$(date -u +"%Y-%m-%dT%H:%M:%SZ"); \
 	node -e " \
+	  const fs = require('fs'); \
 	  const patches = '$(PATCH)'.split(',').map(s=>s.trim()); \
+	  let capBypass = false; \
+	  try { capBypass = !!JSON.parse(fs.readFileSync('$(OUTPUT)' + '.capgate.json', 'utf8')).capabilitiesGateBypassed; } catch {} \
 	  const manifest = { \
 	    version: '$(VERSION)', \
 	    build_timestamp: process.env.BUILD_TS, \
 	    sha256: process.env.SHA256, \
 	    file_size_bytes: parseInt(process.env.SIZE, 10), \
 	    patches, \
+	    capabilitiesGateBypassed: capBypass, \
 	    node_required: '>=18.0.0' \
 	  }; \
-	  require('fs').writeFileSync('releases/$(VERSION)/cli.v$(VERSION).manifest.json', JSON.stringify(manifest, null, 2) + '\\n'); \
+	  fs.writeFileSync('releases/$(VERSION)/cli.v$(VERSION).manifest.json', JSON.stringify(manifest, null, 2) + '\\n'); \
 	" BUILD_TS=$$BUILD_TS SHA256=$$SHA256 SIZE=$$SIZE; \
 	echo "Released: $(OUTPUT) ($$SIZE_MB MB, sha256:$$(echo $$SHA256 | cut -c1-12))"
 

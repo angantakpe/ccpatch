@@ -35,12 +35,19 @@ export default {
   const fs = __req('node:fs');
   const os = __req('node:os');
   const path = __req('node:path');
-  const { timingSafeEqual } = __req('node:crypto');
+  const { timingSafeEqual, createHash } = __req('node:crypto');
   let current = '';
   const load = () => {
     if (process.env.CC_BRIDGE_TOKEN) { current = process.env.CC_BRIDGE_TOKEN; return; }
     const file = process.env.CC_BRIDGE_TOKEN_FILE
       || path.join(os.homedir(), '.config', 'ccpatch', 'token');
+    // Best-effort: warn (non-fatal) if the secret file is group/world-readable.
+    try {
+      const st = fs.statSync(file);
+      if (st.mode & 0o077) {
+        console.error('[ccpatch] auth_token: token file ' + file + ' is group/world-readable (mode ' + (st.mode & 0o777).toString(8) + '); chmod 600 it');
+      }
+    } catch (_) {}
     try { current = fs.readFileSync(file, 'utf8').split(/\\r?\\n/)[0].trim(); }
     catch (_) { current = ''; }
   };
@@ -50,9 +57,15 @@ export default {
     has() { return current.length > 0; },
     verify(presented) {
       const got = (presented || '').replace(/^Bearer\\s+/i, '');
-      if (!current || current.length !== got.length) return false;
-      try { return timingSafeEqual(Buffer.from(current), Buffer.from(got)); }
-      catch (_) { return false; }
+      if (!current) return false;
+      // Hash both sides to a fixed 32-byte digest before comparing, so the
+      // compare is length-independent and never short-circuits on a length
+      // mismatch (which would leak the secret's length via timing).
+      try {
+        const a = createHash('sha256').update(current, 'utf8').digest();
+        const b = createHash('sha256').update(got, 'utf8').digest();
+        return timingSafeEqual(a, b);
+      } catch (_) { return false; }
     },
     reload: load,
   };

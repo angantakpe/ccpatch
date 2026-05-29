@@ -271,7 +271,30 @@ See the overlay loader section in [authoring-patches.md](./authoring-patches.md)
 
 ### `deprecated?: Deprecated`
 
-Marks a patch as no-longer-needed: `{ reason: string, since?: string }`.
+Marks a patch as no-longer-needed:
+`{ reason: string, since?: string, removeAfter?: string }`.
+
+- `reason` — required, one-line explanation (e.g. "upstream removed the feature flag").
+- `since` — optional CC version the patch became unnecessary (informational; shown in the detail column).
+- `removeAfter` — optional CC version that arms the **retirement lifecycle**. When a
+  build targets a CC version `>= removeAfter`, the runner emits a one-line
+  `[deprecated]` warning — *"patch X deprecated since `<since>`, scheduled for
+  removal after `<removeAfter>`; remove it"* — so dead no-ops can't silently
+  accumulate in the catalog. It stays a warning by default; under `--strict`
+  (release builds) it is promoted to a hard manifest error that fails the build
+  until the patch is deleted. Must be a parseable version string.
+
+```js
+deprecated: {
+  reason: 'upstream removed the feature flag',
+  since: '2.1.146',
+  removeAfter: '2.2.0',   // building against >= 2.2.0 nags you to delete this patch
+}
+```
+
+The check lives in `deprecationWarning()` (exported from `runner/manifest.mjs`)
+so reporters and the runner share one definition of "this no-op has overstayed
+its welcome".
 
 ### `revisit?: Revisit`
 

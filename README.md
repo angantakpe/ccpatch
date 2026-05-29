@@ -40,6 +40,22 @@ The Makefile auto-detects the locally installed `claude` binary's version. Overr
 
 ---
 
+## Which entry point should I use?
+
+There are three layers, and they wrap each other: **`make` targets → `bin/patch-cli.mjs` → the runner (`runner/`)**. `bin/patch-cli.mjs` *is* the `ccpatch` CLI (it just calls `runPatchCli` in `runner/cli.mjs`); the `make` targets are thin wrappers that invoke it with the version auto-detected and the right arguments filled in. Reach for the highest layer that does what you need:
+
+| Task | Canonical path | Notes |
+| --- | --- | --- |
+| Apply patches | `make patch-claude-code` | Auto-detects the installed `claude` version + standard profile. Drop to `node bin/patch-cli.mjs <in> <out>` only when you need an explicit input/output path or a flag the target doesn't expose. |
+| Drift / health check | `make doctor` | Read-only anchor-health check against the installed bundle (wraps `bin/patch-cli.mjs doctor`). |
+| Coverage | `make patch-coverage` | Apply + smoke-run + cross-reference apply-time results with runtime hits (wraps `bin/patch-cli.mjs coverage`). |
+| Revert a patched bundle | `node bin/patch-cli.mjs revert <bundle>` | No `make` wrapper — restores each patched region from the recorded pre-patch sha. |
+| Everything else | `node bin/patch-cli.mjs <subcommand>` | `explain`, `capabilities`, `diff`, `heal`, `fallback-capture`, … — subcommands without a dedicated `make` target. |
+
+Rule of thumb: prefer `make` for day-to-day work; drop to `bin/patch-cli.mjs` when you need a subcommand or argument the target doesn't pass through; touch the runner modules only when authoring or debugging patches.
+
+---
+
 ## Quick start
 
 Apply every patch enabled in `ccpatch.yml` to your locally installed Claude Code version:
@@ -110,7 +126,7 @@ The three curated profiles:
 | Profile | Intent | Contents |
 | --- | --- | --- |
 | **minimal** | Bug fixes plus the minimum infrastructure those fixes need to run. | `react_singleton`, `esm_compat`, `contracts`, `overlay_loader`, `fetch_interceptor`, `bun_shim`, `stdin_da1_leak`, `message_normalizer`, `project_root`, `tool_result_error_content`, `subagent_hooks_stub` |
-| **standard** _(default)_ | `minimal` plus quality-of-life features (model/command system, thinking unlocks, context guards, MCP lazy-load). | everything in `minimal`, plus `input_bar_color`, `model`, `custom_commands`, `slash_dispatch`, `context_budget_warn`, `recap_strip_hint`, `unhide_features`, `extended_thinking`, `force_thinking`, `plan_mode_interview`, `tool_result_trim`, `large_content_guard`, `hook_noise_mute`, `mcp_lazy`, `dotenv_loader`, `block_tools` |
+| **standard** _(default)_ | `minimal` plus quality-of-life features (model/command system, thinking unlocks, context guards, MCP lazy-load). | everything in `minimal`, plus `input_bar_color`, `model`, `custom_commands`, `slash_dispatch`, `context_budget_warn`, `recap_strip_hint`, `unhide_features`, `extended_thinking`, `force_thinking`, `tool_result_trim`, `large_content_guard`, `hook_noise_mute`, `mcp_lazy`, `dotenv_loader`, `block_tools` |
 | **power** | Every patch listed under `patches:` in `ccpatch.yml` — all features, observability, exposed internals, and optional integrations. | the full patch set (infrastructure, bug fixes, QoL, feature unlocks, command system, observability, exposed internals, and integrations such as `cost_tracker`, `webhook`, `save_conversations`, `cache_responses`) |
 
 Two additional vertical profiles ship for automation use cases: **daemon** (drive the running CLI headlessly via the event bus) and **orchestrator**. Profile membership is the source of truth in `ccpatch.yml`; an unknown patch name in a profile is skipped with a warning.
@@ -136,7 +152,7 @@ The current patch set, grouped by intent. Full list and toggles live in `ccpatch
 | **Infrastructure** (`core/`) | `react_singleton`, `esm_compat`, `contracts`, `fetch_interceptor` |
 | **Bug fixes** (`core/`) | `bun_shim`, `stdin_da1_leak`, `message_normalizer`, `project_root`, `tool_result_error_content` |
 | **Fixes / QoL** (`extensions/`) | `dotenv_loader`, `hook_noise_mute`, `cache_ttl`, `grep_shadow`, `rate_limit`, `large_content_guard`, `recap_strip_hint`, `input_bar_color` |
-| **Feature unlocks** | `durable_cron`, `loop_dynamic`, `plan_mode_interview` _(no-op on recent versions — upstream removed the flag)_, `unhide_features`, `extended_thinking`, `force_thinking`, `mcp_lazy` |
+| **Feature unlocks** | `durable_cron`, `loop_dynamic`, `unhide_features`, `extended_thinking`, `force_thinking`, `mcp_lazy` |
 | **Command system** | `custom_commands`, `slash_dispatch`, `subagent_hooks_stub` |
 | **Observability** | `cost_tracker`, `context_budget_warn`, `tool_result_trim`, `tools_log`, `boost_project_commands`, `session_timer`, `debug` |
 | **Expose internals** | `expose_tool_dispatch`, `expose_api_client`, `expose_submit_input`, `expose_agent_tool`, `prime_agent_tool_on_boot`, `capture_interactive_request` |

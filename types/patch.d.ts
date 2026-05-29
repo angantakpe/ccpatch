@@ -128,10 +128,13 @@ export interface Revisit {
   until?: string;
 }
 
-/** Marks patch as no-longer-needed. */
+/** Marks patch as no-longer-needed. `removeAfter` arms the retirement nudge. */
 export interface Deprecated {
   reason: string;
+  /** CC version the patch became unnecessary (e.g. flag removed upstream). */
   since?: string;
+  /** CC version past which the patch should be deleted; building against >= this emits a [deprecated] retirement warning. */
+  removeAfter?: string;
 }
 
 /** Magisk-style sibling-file shim. */

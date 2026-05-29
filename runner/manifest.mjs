@@ -27,11 +27,15 @@
  *                                     detect wrong-location apply / double apply.
  *
  * Optional top-level:
- *   deprecated   object    { reason: string, since?: string }
+ *   deprecated   object    { reason: string, since?: string, removeAfter?: string }
  *                          Marks the patch as deprecated. Reporters render the patch
  *                          row with a "deprecated" status (not "ok") and surface
  *                          `reason` in the detail column. `since` is informational
  *                          (e.g. CC version that removed the underlying feature).
+ *                          `removeAfter` arms the retirement lifecycle: building
+ *                          against a CC version >= removeAfter emits a [deprecated]
+ *                          warning ("scheduled for removal after <ver>; remove it"),
+ *                          fatal only under --strict. See deprecationWarning() below.
  *
  * Optional fields:
  *   name         string    Must match the filename stem if provided.
@@ -86,7 +90,7 @@
  *                                     the runner emits a [revisit] warning.
  */
 
-import { parseVariantStem } from './version-resolver.mjs';
+import { parseVariantStem, compareVersions } from './version-resolver.mjs';
 import {
   CAPABILITIES_LIST,
   APPLY_MODES_LIST,
@@ -135,12 +139,44 @@ export function classifyRisk(caps) {
 }
 
 /**
+ * Deprecation retirement lifecycle (DX#3). Given a normalized patch and the CC
+ * version the build is targeting, decide whether the patch has outlived its
+ * `deprecated.removeAfter` and should be deleted. Returns a one-line warning
+ * string when the build version is >= removeAfter, else null.
+ *
+ * Keeping the policy here (next to validateManifest) means both the runner and
+ * any reporter/CLI can share ONE definition of "this no-op has overstayed its
+ * welcome" rather than each re-deriving the comparison.
+ *
+ *   @param {object} normalized - validateManifest().normalized (or any object
+ *                                with { name, deprecated }).
+ *   @param {string} [version]  - target CC version, e.g. "2.1.156". When absent
+ *                                or unparseable, no warning is produced (we can't
+ *                                know whether removeAfter has been reached).
+ *   @returns {string|null}
+ */
+export function deprecationWarning(normalized, version) {
+  const dep = normalized && normalized.deprecated;
+  if (!dep || !dep.removeAfter || !version) return null;
+  const cmp = compareVersions(version, dep.removeAfter);
+  if (cmp === null || cmp < 0) return null;
+  const name = normalized.name ?? 'patch';
+  const since = dep.since ? ` since ${dep.since}` : '';
+  return `  [deprecated] ${name} deprecated${since}, scheduled for removal after ${dep.removeAfter}; remove it — ${dep.reason}`;
+}
+
+/**
  * @param {object} mod - the default export of a patch module
  * @param {string} filename - basename of the patch file, e.g. "hook_noise_mute.mjs"
  * @param {object} [ctx] - resolution context. ctx.variant is 'default' or a
  *                         variant stem like "2.1.148" / ">=2.1.150". When
  *                         variant !== 'default', testedAgainst must be present
  *                         and consistent with the stem.
+ *                         ctx.version (optional) is the target CC version; when
+ *                         supplied alongside ctx.logger, a deprecated patch past
+ *                         its removeAfter emits a [deprecated] retirement warning
+ *                         (see deprecationWarning). Under ctx.strict it is also
+ *                         pushed onto errors so a release build fails on dead no-ops.
  * @returns {{ ok: boolean, errors: string[], normalized: object }}
  */
 export function validateManifest(mod, filename, ctx = {}) {
@@ -464,11 +500,26 @@ export function validateManifest(mod, filename, ctx = {}) {
       if (mod.deprecated.since !== undefined && typeof mod.deprecated.since !== 'string') {
         errors.push(fieldHint('deprecated', '.since must be a string if defined'));
       }
+      // removeAfter arms the retirement lifecycle (see deprecationWarning). When
+      // present it must be a parseable version so the comparison can fire.
+      if (mod.deprecated.removeAfter !== undefined) {
+        if (typeof mod.deprecated.removeAfter !== 'string' || !mod.deprecated.removeAfter.trim()) {
+          errors.push(fieldHint('deprecated', '.removeAfter must be a non-empty version string if defined'));
+        } else if (parseVariantStem(mod.deprecated.removeAfter.trim()) == null) {
+          errors.push(fieldHint('deprecated', `.removeAfter "${mod.deprecated.removeAfter}" is not a valid version`));
+        }
+      }
       if (typeof mod.deprecated.reason === 'string' && mod.deprecated.reason.trim()) {
         deprecated = {
           reason: mod.deprecated.reason.trim(),
           since: typeof mod.deprecated.since === 'string' ? mod.deprecated.since : undefined,
         };
+        // Only attach removeAfter when actually present so the normalized shape
+        // stays { reason, since } for non-retiring deprecations (preserves
+        // existing deepEqual expectations).
+        if (typeof mod.deprecated.removeAfter === 'string') {
+          deprecated.removeAfter = mod.deprecated.removeAfter.trim();
+        }
       }
     }
   }
@@ -560,6 +611,21 @@ export function validateManifest(mod, filename, ctx = {}) {
     transform: typeof mod.transform === 'function' ? mod.transform : null,
     coverageMarker,
   };
+
+  // Retirement nudge (DX#3): a deprecated patch carried past its removeAfter
+  // version is dead weight. Warn (so no-ops can't silently accumulate), and
+  // under strict promote it to a hard error so release builds force the cleanup.
+  // Only fires when the caller supplies the target version via ctx.version.
+  if (errors.length === 0 && ctx.version) {
+    const retire = deprecationWarning(normalized, ctx.version);
+    if (retire) {
+      if (ctx.strict) {
+        errors.push(retire.trim());
+      } else if (ctx.logger && typeof ctx.logger.warn === 'function') {
+        ctx.logger.warn(retire);
+      }
+    }
+  }
 
   return { ok: errors.length === 0, errors, normalized };
 }

@@ -48,7 +48,6 @@ ack:
   context_budget_warn: [network, prompt]
   extended_thinking: [network, prompt, env]
   force_thinking: [env]
-  plan_mode_interview: [env]
   tool_result_trim: [network, tools]
   hook_noise_mute: [exec]
   mcp_lazy: [network, tools]
@@ -98,7 +97,6 @@ patches:
   # ── Feature Unlocks ─────────────────────────────────────────────────────────
   durable_cron: false        # force isDurableCronEnabled() → true
   loop_dynamic: false        # unlock self-pacing loop + richer loop prompts
-  plan_mode_interview: false # unlock plan-mode interview phase
   unhide_features: false     # expose client-side gated features (bedrock, web-setup, etc.)
   extended_thinking: false   # inject thinking/effort via CC_THINKING + CC_EFFORT_LEVEL
   force_thinking: false      # force thinking in interactive sessions when CC_THINKING is set
@@ -237,7 +235,6 @@ profiles:
     - subagent_hooks_stub
     - durable_cron
     - loop_dynamic
-    - plan_mode_interview
     - unhide_features
     - extended_thinking
     - force_thinking

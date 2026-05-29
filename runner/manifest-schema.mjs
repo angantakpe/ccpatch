@@ -155,10 +155,11 @@ export const INTERFACES = Object.freeze([
   },
   {
     name: 'Deprecated',
-    doc: 'Marks patch as no-longer-needed.',
+    doc: 'Marks patch as no-longer-needed. `removeAfter` arms the retirement nudge.',
     fields: [
-      { name: 'reason',  type: 'string' },
-      { name: 'since?',  type: 'string' },
+      { name: 'reason',       type: 'string' },
+      { name: 'since?',       type: 'string', doc: 'CC version the patch became unnecessary (e.g. flag removed upstream).' },
+      { name: 'removeAfter?', type: 'string', doc: 'CC version past which the patch should be deleted; building against >= this emits a [deprecated] retirement warning.' },
     ],
   },
   {
@@ -285,7 +286,7 @@ export const FIELD_HINTS = Object.freeze({
   fallbackDiff: { shape: '{ patch: string, capturedAgainst: string, fuzz?: number }', example: "fallbackDiff: { patch: '--- a\\n+++ b\\n…', capturedAgainst: '2.1.156' }" },
   forbiddenAfterPatch: { shape: 'string[] of non-empty strings', example: "forbiddenAfterPatch: ['debugger', 'console.log']" },
   coverageMarker: { shape: 'non-empty string', example: "coverageMarker: 'force_thinking_hit'" },
-  deprecated:   { shape: '{ reason: string, since?: string }', example: "deprecated: { reason: 'upstream fixed in 2.1.146', since: '2.1.146' }" },
+  deprecated:   { shape: '{ reason: string, since?: string, removeAfter?: string }', example: "deprecated: { reason: 'upstream fixed in 2.1.146', since: '2.1.146', removeAfter: '2.2.0' }" },
   revisit:      { shape: '{ note: string, addedIn?: string, until?: string }', example: "revisit: { note: 'recheck when flag stabilizes', until: '2.2.0' }" },
   testedAgainst: { shape: 'non-empty string[] of versions/ranges', example: "testedAgainst: ['2.1.156', '>=2.1.150']" },
 });
