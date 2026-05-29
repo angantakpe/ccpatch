@@ -341,8 +341,23 @@ try {
           const progressCb = null;
 
           // vC7.call returns a Promise (from async function)
+          // ───────────────────────────────────────────────────────────────────
+          // SECURITY: the third positional arg to call() is canUseTool, the
+          // permission gate Claude Code consults before running each tool. In an
+          // interactive session it renders an allow/deny prompt in the TUI. The
+          // background dispatch path here is HEADLESS by construction — there is
+          // no TUI surface (setToolJSX/emitToolProgress are stubbed to undefined
+          // above), so the real interactive callback would block forever waiting
+          // on a prompt nobody can answer. We therefore pass () => true, which
+          // INTENTIONALLY DISABLES the permission gate for any subagent spawned
+          // via __ccpAgentTool.invoke(): such subagents run every tool (Bash,
+          // Write, Edit, MCP, …) with NO allow/deny prompt — a privilege
+          // escalation beyond the interactive CLI. This is why expose_agent_tool
+          // is OFF by default, and why (in combination with headless_bridge) the
+          // bridge token is documented as root-equivalent. See THREAT_MODEL.md
+          // (expose_agent_tool / bridge entries) for the full disclosure.
           Promise.resolve()
-            .then(() => _self._callSelf(inputArgs, bgCtx, /* canUseTool */ () => true, requestCtx, progressCb))
+            .then(() => _self._callSelf(inputArgs, bgCtx, /* canUseTool — see SECURITY note above: gate intentionally bypassed for headless dispatch */ () => true, requestCtx, progressCb))
             .then((result) => {
               clearTimeout(timer);
               const text = (result && result.data && typeof result.data.result === 'string')

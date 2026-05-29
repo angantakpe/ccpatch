@@ -20,16 +20,52 @@ export default {
   const { join: _join2 } = await import('path');
   
   const CACHE_DIR = _join2(process.env.HOME || '.', '.cc-cache');
-  const CACHE_ENABLED = process.env.CLAUDE_CACHE === '1';
-  
+  // SECURITY: env-var name follows the CC_ convention (CC_CACHE_RESPONSES).
+  // The legacy CLAUDE_CACHE name is still accepted as a deprecated fallback.
+  const CACHE_ENABLED = process.env.CC_CACHE_RESPONSES === '1' || process.env.CLAUDE_CACHE === '1';
+
+  // SECURITY: dev/testing ONLY. The cache directory and its contents are
+  // trusted by the running CLI — a writable ~/.cc-cache is a response-injection
+  // (cache-poisoning) surface, so treat it as you would any code-equivalent
+  // input. Mitigations applied here:
+  //   - sha256 (not md5) keys → no collision-trivial predictable-path poisoning.
+  //   - an auth/identity dimension is mixed into the key (sha256 of the
+  //     Authorization / x-api-key header) so a response cached under one
+  //     account can never be replayed to a different account/credential. We
+  //     hash the secret; the raw token never lands in any on-disk path.
+  //   - cache files are written 0600 (owner read/write only), like auth_token.
+  const _hashHeaders = (headers) => {
+    // Pull the auth-bearing header out of whatever shape headers arrives in
+    // (plain object, Headers instance, or array of pairs), then return a
+    // sha256 of it. Never returns or stores the raw secret.
+    let auth = '';
+    try {
+      if (headers) {
+        const _get = (h, k) => {
+          if (typeof h.get === 'function') return h.get(k);
+          if (Array.isArray(h)) { const f = h.find(p => String(p[0]).toLowerCase() === k); return f ? f[1] : undefined; }
+          for (const kk of Object.keys(h)) { if (kk.toLowerCase() === k) return h[kk]; }
+          return undefined;
+        };
+        auth = _get(headers, 'authorization') || _get(headers, 'x-api-key') || '';
+      }
+    } catch {}
+    return _createHash('sha256').update(String(auth)).digest('hex');
+  };
+  const _cacheKey = (url, body, headers) =>
+    _createHash('sha256').update(JSON.stringify({ url, body, auth: _hashHeaders(headers) })).digest('hex');
+  const _writeCacheEntry = (file, payload) => {
+    _writeFileSync(file, payload, { mode: 0o600 });
+  };
+
   try { _mkdirSync2(CACHE_DIR, { recursive: true }); } catch {}
-  
+
   if (CACHE_ENABLED && typeof globalThis.__ccpOnFetchBefore === 'function') {
     globalThis.__ccpOnFetchBefore('cache_responses', async (ctx) => {
       // Only cache API POST requests
       if (!ctx.isApi || ctx.options?.method !== 'POST') return;
 
-      const hash = _createHash('md5').update(JSON.stringify({ url: ctx.url, body: ctx.options?.body })).digest('hex');
+      const hash = _cacheKey(ctx.url, ctx.options?.body, ctx.options?.headers);
       const cacheFile = _join2(CACHE_DIR, hash + '.json');
       
       if (_existsSync(cacheFile)) {
@@ -52,12 +88,12 @@ export default {
     globalThis.__ccpOnFetch('cache_responses_writer', async ({ url, options, events, isApi }) => {
       if (!isApi || options?.method !== 'POST' || !events || events.length === 0) return;
       // Re-serialize parsed SSE events back into SSE text and write to cache.
-      const hash = _createHash('md5').update(JSON.stringify({ url, body: options?.body })).digest('hex');
+      const hash = _cacheKey(url, options?.body, options?.headers);
       const cacheFile = _join2(CACHE_DIR, hash + '.json');
       if (_existsSync(cacheFile)) return; // already cached (e.g. from a parallel call)
       try {
         const sseText = events.map(e => 'data: ' + JSON.stringify(e) + '\\n\\n').join('');
-        _writeFileSync(cacheFile, JSON.stringify({ status: 200, headers: { 'content-type': 'text/event-stream' }, body: sseText }));
+        _writeCacheEntry(cacheFile, JSON.stringify({ status: 200, headers: { 'content-type': 'text/event-stream' }, body: sseText }));
         console.log('[CACHE] WRITE:', hash.slice(0, 8), '(' + events.length + ' events)');
       } catch (_e) {}
     });
@@ -70,19 +106,19 @@ export default {
         return originalFetch.apply(this, arguments);
       }
       
-      const hash = _createHash('md5').update(JSON.stringify({ url, body: options?.body })).digest('hex');
+      const hash = _cacheKey(url, options?.body, options?.headers);
       const cacheFile = _join2(CACHE_DIR, hash + '.json');
-      
+
       if (_existsSync(cacheFile)) {
         console.log('[CACHE] HIT:', hash.slice(0, 8));
         const cached = JSON.parse(_readFileSync(cacheFile, 'utf-8'));
         return new Response(cached.body, { status: cached.status, headers: cached.headers });
       }
-      
+
       const response = await originalFetch.apply(this, arguments);
       const body = await response.text();
-      
-      _writeFileSync(cacheFile, JSON.stringify({
+
+      _writeCacheEntry(cacheFile, JSON.stringify({
         status: response.status,
         headers: Object.fromEntries(response.headers),
         body
