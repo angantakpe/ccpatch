@@ -9,7 +9,6 @@ export default {
       absent: '"tengu_kairos_cron_durable",!0,',
       label: 'Durable Cron',
     },
-    allowOverlapWith: ['loop_dynamic'],
     // Declarative anchor — the runner resolves this to a HEAD site before
     // calling apply(); opts.atSites is then available for splicing. We still
     // rebuild the function body wholesale (replacing it with `return !0`), so

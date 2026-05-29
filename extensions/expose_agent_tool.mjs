@@ -118,26 +118,6 @@ export default {
   description: 'Expose native AgentTool (vC7.call) via globalThis.__ccpAgentTool for background heartbeat dispatch.',
   capabilities: ["tools"],
   dependsOn: ['subagent_hooks_stub'],
-  // G1: this patch shares benign injection seams (shebang/module-top prepend +
-  // shared registry/loop sites) with several other extension patches. The diff
-  // ranges intersect but the edits don't clobber each other — acknowledge the
-  // overlap with every benign peer here on the owned side.
-  allowOverlapWith: [
-    'project_root',
-    'grep_shadow',
-    'large_content_guard',
-    'durable_cron',
-    'loop_dynamic',
-    'unhide_features',
-    'force_thinking',
-    'expose_api_client',
-    'block_tools',
-    'save_conversations',
-    'session_timer',
-    'webhook',
-    'cache_responses',
-    'input_bar_color',
-  ],
   // G3: strengthened from present-only to a real count. Both present strings are
   // asserted, and count.present pins the TOTAL occurrences across them.
   //   - '_ccpBootErr_' = 3 (bootstrap IIFE catch + provide try/catch text):

@@ -39,7 +39,6 @@ export default {
     // Sentinel is injected exactly once.
     count: { present: 1 },
   },
-  allowOverlapWith: ['force_thinking'],
   apply: (code) => {
     if (code.includes('__ccpApiClientExposed_v1')) return code;
 

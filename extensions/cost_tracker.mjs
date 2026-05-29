@@ -110,6 +110,10 @@ export default {
   description: 'Track and display token usage and estimated costs',
   capabilities: ["network"],
   verify: { present: '__CLAUDE_COSTS__', count: { present: 7 } },
+  // Benign: injects its hook at the same module-top seam as context_budget_warn
+  // (both prepend at the shared injection point). The 1-byte spans coincide but
+  // the prepends are order-independent and don't clobber each other.
+  allowOverlapWith: ['context_budget_warn'],
   dependsOn: ['fetch_interceptor'],
   preload: true,
   preloadCode: hook,

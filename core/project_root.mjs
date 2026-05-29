@@ -4,10 +4,6 @@ export default {
 
     description: 'Fix projectRoot getter to fall back to originalCwd, so commands loader finds .cc/commands/',
     capabilities: ["env","fs"],
-    // Benign overspan: project_root rewrites a tiny getter that sits in the same
-    // injection seam as these peers. Their diff ranges touch but never clobber
-    // each other's edits, so acknowledge the overlap on this side.
-    allowOverlapWith: ['dotenv_loader', 'capture_interactive_request', 'model', 'subagent_hooks_stub'],
     // verify.absent lists every pre-patch marker; after apply(), the one that
     // matched has been rewritten and the rest were never present — so none
     // should remain. For the v2.1.146+ nullish-coalescing variant, the regex

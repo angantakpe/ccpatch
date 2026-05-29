@@ -4,12 +4,6 @@ export default {
 
     description: 'Boost loadedFrom:"commands_DEPRECATED" items to top of slash-command autocomplete',
     capabilities: ["tools"],
-    // BENIGN: both patches make scattered small string-rewrites in the same broad
-    // region of the bundle (the command-table / feature-flag area). The overlap
-    // detector compares per-edit byte spans approximately (offsets shift across
-    // patches and are not corrected) so two unrelated edits incidentally align.
-    // Both apply cleanly with correct verify counts; neither clobbers the other.
-    allowOverlapWith: ['unhide_features'],
     verify: {
       present: '_ip=(s)=>s.loadedFrom==="commands_DEPRECATED"',
       label: 'Boost Project Commands',
