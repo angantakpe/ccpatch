@@ -67,7 +67,7 @@ export default {
 
   description: 'Log all tool calls and results via SSE event subscriber',
   capabilities: ["network","fs","telemetry"],
-  verify: { present: '__CLAUDE_TOOL_LOG__', weak: true },
+  verify: { present: "'tools_log'", count: { present: 1 } },
   dependsOn: ['fetch_interceptor'],
   preload: true,
   preloadCode: logHook,

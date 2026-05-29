@@ -5,7 +5,7 @@ export default {
 
     description: 'Cache API responses for faster development/testing',
     capabilities: ["network","fs","env"],
-    verify: { present: "'cache_responses'", weak: true },
+    verify: { present: "'cache_responses'", count: { present: 1 } },
   dependsOn: ['fetch_interceptor'],
     apply: (code) => {
       const hook = `

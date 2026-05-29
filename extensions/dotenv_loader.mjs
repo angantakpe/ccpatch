@@ -9,8 +9,9 @@ export default {
   verify: {
     present: '__ccpDotenvLoaded',
     label: 'Dotenv Loader',
-    // weak: sentinel guards against double-apply via early-return; count is sufficient guard at runtime
-    weak: true,
+    // count: the include-guard early-return references the sentinel once + the
+    // assignment sets it once == 2 occurrences after a correct apply.
+    count: { present: 2 },
   },
   apply: (code) => {
     if (code.includes('__ccpDotenvLoaded')) return code;

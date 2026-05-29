@@ -109,7 +109,7 @@ export default {
 
   description: 'Track and display token usage and estimated costs',
   capabilities: ["network"],
-  verify: { present: '__CLAUDE_COSTS__', weak: true },
+  verify: { present: '__CLAUDE_COSTS__', count: { present: 7 } },
   dependsOn: ['fetch_interceptor'],
   preload: true,
   preloadCode: hook,

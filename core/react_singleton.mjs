@@ -10,6 +10,6 @@ export default {
   required: true,
   // The shim has 3 regex fallback paths plus a runtime-injection branch.
   // Every successful branch writes `globalThis.__hm_react` into the output.
-  verify: { present: 'globalThis.__hm_react', weak: true },
+  verify: { present: 'globalThis.__hm_react', count: { present: 1 } },
   apply: (code, _opts) => applyReactSingletonShim(code),
 };

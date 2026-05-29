@@ -3,7 +3,8 @@ export default {
 
   description: 'Inject context-full warning into system prompt when input tokens exceed 85% of 200k context limit',
   capabilities: ["network","prompt"],
-  verify: { present: "'context_budget_warn'", weak: true },
+  verify: { present: "'context_budget_warn'", count: { present: 1 } },
+  allowOverlapWith: ['custom_commands', 'slash_dispatch'],
   dependsOn: ['fetch_interceptor'],
   apply: (code) => {
     const hook = `

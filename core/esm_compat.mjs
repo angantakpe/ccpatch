@@ -9,6 +9,6 @@ export default {
   phase: 'post',
   required: true,
   // Both branches (CJS-IIFE rewrite and native-ESM shim) emit `globalThis.__hm_ink`.
-  verify: { present: 'globalThis.__hm_ink', weak: true },
+  verify: { present: 'globalThis.__hm_ink', count: { present: 2 } },
   apply: (code, _opts) => applyEsmCompatibilityShim(code),
 };

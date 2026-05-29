@@ -3,7 +3,7 @@ export default {
 
     description: 'Slash command registry primitives + generic commands (/clear-cache, /costs, /export, /stats)',
     capabilities: ["prompt","tools"],
-    verify: { present: '__ccpRegisterSlashCommand', weak: true },
+    verify: { present: '__ccpRegisterSlashCommand', count: { present: 2 } },
     apply: (code) => {
       const hook = `
 // ══════════════════════════════════════════════════════════════════════════

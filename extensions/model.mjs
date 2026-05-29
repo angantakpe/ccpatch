@@ -5,7 +5,9 @@ export default {
 
     description: 'Change the default model when an explicit override is supplied',
     capabilities: ["env","network"],
-    verify: { present: '[PATCH] Model', weak: true },
+    // count: exactly one of the two branches (Model Override / Model Sync) is
+    // injected, each containing a single '[PATCH] Model' banner == 1 occurrence.
+    verify: { present: '[PATCH] Model', count: { present: 1 } },
     apply: (code, options = {}) => {
       const model = options.model || null;
       const modelHook = model

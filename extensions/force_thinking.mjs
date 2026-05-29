@@ -6,7 +6,9 @@ export default {
   category: 'feature',
   description: 'Force thinking enabled when CC_THINKING env var is set (interactive sessions)',
   capabilities: ['prompt', 'env'],
-  verify: { present: 'CC_THINKING!=="disabled"', weak: true },
+  // count: prefix injects the env short-circuit once; the literal
+  // CC_THINKING!=="disabled" appears exactly once after a correct apply.
+  verify: { present: 'CC_THINKING!=="disabled"', count: { present: 1 } },
 
   kind: 'prefix',
   // Anchor: process.env.MAX_THINKING_TOKENS is a property access, not a quoted

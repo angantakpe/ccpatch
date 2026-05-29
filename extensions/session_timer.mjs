@@ -5,7 +5,7 @@ export default {
 
     description: 'Track session time and warn about long sessions',
     capabilities: [],
-    verify: { present: 'SESSION_START', weak: true },
+    verify: { present: 'SESSION_START', count: { present: 2 } },
     apply: (code) => {
       const hook = `
 // ══════════════════════════════════════════════════════════════════════════

@@ -3,7 +3,7 @@ export default {
 
   description: 'Lazy MCP tool list: serve cached tools/list immediately, refresh cache in background',
   capabilities: ["network","tools"],
-  verify: { present: '__mcpLazyInstalled__', weak: true },
+  verify: { present: '__mcpLazyInstalled__', count: { present: 2 } },
   dependsOn: ['fetch_interceptor'],
   apply: (code) => {
     const hook = `

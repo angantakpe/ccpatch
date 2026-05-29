@@ -3,8 +3,9 @@ export default {
 
     description: 'Rate limiting: skip retries on subscription usage limits, cap Retry-After at 30s, surface error immediately',
     capabilities: ["network","env"],
-    verify: { present: 'CC_RATE_LIMIT_PATCH_ENABLED', weak: true },
+    verify: { present: 'CC_RATE_LIMIT_PATCH_ENABLED', count: { present: 1 } },
   dependsOn: ['fetch_interceptor'],
+  allowOverlapWith: ['subagent_hooks_stub'],
     apply: (code) => {
       const hook = `
 // ══════════════════════════════════════════════════════════════════════════

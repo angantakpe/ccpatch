@@ -5,14 +5,14 @@ export default {
 
     description: 'Add debug logging for API calls and tool usage',
     capabilities: ["network","fs","env","telemetry"],
-    verify: { present: '__debugLog__', weak: true },
+    verify: { present: 'CLAUDE_DEBUG===', count: { present: 1 } },
     apply: (code) => {
       const debugHook = `
 // ══════════════════════════════════════════════════════════════════════════
 // [PATCH] Debug Logging (set CLAUDE_DEBUG=1 to enable, logs to ~/.claude-debug.log)
 // ══════════════════════════════════════════════════════════════════════════
 
-const __DEBUG_ENABLED__ = process.env.CLAUDE_DEBUG === '1';
+const __DEBUG_ENABLED__ = process.env.CLAUDE_DEBUG==='1';
 let __debugLog__ = () => {};
 let __debugReady__ = Promise.resolve();
 

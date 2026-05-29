@@ -25,7 +25,7 @@ export default {
   description:
     "Guard zr_() default case and RY$() against v2.1.131 display item types.",
   capabilities: [],
-  verify: { present: 'if(!H)return!1;', weak: true },
+  verify: { present: 'if(!H.message)return!0;', count: { present: 1 } },
   // Self-check after apply: the null-element guard must land *inside* the
   // display-item normalizer (right after its opening brace), not somewhere
   // else in the bundle. If the guard exists but its left-neighbour is not the

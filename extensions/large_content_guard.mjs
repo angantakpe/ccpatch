@@ -4,9 +4,11 @@ export default {
   description: 'Truncate oversized system-message content before lZ7 renders it, preventing terminal crash',
   capabilities: ["prompt"],
   verify: {
-    present: ['chars truncated'],
-    // weak: substring may legitimately appear once or twice across two render paths
-    weak: true,
+    present: 'length>50000',
+    // Validated against cli.v2.1.156.cjs: only the general content path anchor
+    // matches on this bundle, injecting `Y.length>50000` exactly once. The
+    // away_summary italic anchor (a second `length>50000`) is absent here.
+    count: { present: 1 },
   },
   apply: (code) => {
     // The lZ7 system-message renderer can crash on extremely large content

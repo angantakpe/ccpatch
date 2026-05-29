@@ -64,7 +64,7 @@ export default {
   description: 'Prime __ccpAgentTool._primed at React mount time (no user input required).',
   capabilities: ["tools"],
   dependsOn: ['expose_agent_tool'],
-  verify: { present: '_ccpBootPrime_', label: 'Prime AgentTool on Boot', weak: true },
+  verify: { present: '_ccpBootPrime_', label: 'Prime AgentTool on Boot', count: { present: 1 } },
 
   apply: (code) => {
     // Idempotency guard.
