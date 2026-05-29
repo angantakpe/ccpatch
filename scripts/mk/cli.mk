@@ -170,6 +170,7 @@ patch: ## Apply patches to CLI: make patch [VERSION=x.y.z] [PATCH=startup,debug]
 	$(NODE) $(PATCH_TOOL) $(INPUT) $(OUTPUT) $(addprefix --patch ,$(subst $(comma), ,$(PATCH)))
 
 patch-claude-code: ## Apply the standard profile: make patch-claude-code [VERSION=x.y.z] [PROFILE=minimal|standard|power] [INPUT=cli.js] [OUTPUT=out.js]
+	@$(NODE) scripts/print-banner.mjs --version $(VERSION) --profile $(PROFILE)
 	@mkdir -p releases/$(VERSION)
 	@if [ ! -f $(INPUT) ] && [ -f $(CJS_EXTRACTED) ]; then \
 		echo "Using extracted: $(CJS_EXTRACTED)"; \

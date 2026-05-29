@@ -28,23 +28,30 @@ function clip(s, n) {
 
 /**
  * Render a rounded box with a title embedded in the top border and a list of
- * [label, value] rows. Returns the multi-line string (no trailing newline).
+ * rows. Returns the multi-line string (no trailing newline).
  *
- * @param {{ title: string, rows?: Array<[string, string]>, cols?: number }} opts
+ * Each row may be:
+ *   - [label, value]  → aligned two-column line (`  label   value`)
+ *   - string          → plain left-indented line (use '' for a blank spacer)
+ *   - null            → a horizontal section divider (├──┤)
+ *
+ * @param {{ title: string, rows?: Array<[string,string]|string|null>, cols?: number, labelMax?: number }} opts
  * @returns {string}
  */
-export function renderBanner({ title, rows = [], cols } = {}) {
+export function renderBanner({ title, rows = [], cols, labelMax = 16 } = {}) {
   let width = Math.min(cols || termCols(), 100);
   if (width < 24) width = 24;
   const inner = width - 2;
 
   let labelW = 0;
-  for (const [label] of rows) {
-    const l = String(label == null ? '' : label).length;
+  for (const row of rows) {
+    if (!Array.isArray(row)) continue;
+    const l = String(row[0] == null ? '' : row[0]).length;
     if (l > labelW) labelW = l;
   }
-  if (labelW > 16) labelW = 16;
+  if (labelW > labelMax) labelW = labelMax;
 
+  const pad = (content) => '│' + content + rep(' ', inner - content.length) + '│';
   const out = [];
 
   let titleSeg = ' ' + String(title == null ? '' : title) + ' ';
@@ -52,13 +59,16 @@ export function renderBanner({ title, rows = [], cols } = {}) {
   const fill = inner - 1 - titleSeg.length;
   out.push('╭─' + titleSeg + rep('─', fill) + '╮');
 
-  for (const [label, value] of rows) {
-    const lab = clip(label, labelW);
-    const left = '  ' + lab + rep(' ', labelW - lab.length) + '  ';
-    const avail = inner - left.length;
-    let content = left + clip(value, avail);
-    content += rep(' ', inner - content.length);
-    out.push('│' + content + '│');
+  for (const row of rows) {
+    if (row === null) {
+      out.push('├' + rep('─', inner) + '┤');
+    } else if (Array.isArray(row)) {
+      const lab = clip(row[0], labelW);
+      const left = '  ' + lab + rep(' ', labelW - lab.length) + '  ';
+      out.push(pad(left + clip(row[1], inner - left.length)));
+    } else {
+      out.push(pad('  ' + clip(row, inner - 2)));
+    }
   }
 
   out.push('╰' + rep('─', inner) + '╯');
