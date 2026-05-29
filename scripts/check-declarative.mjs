@@ -15,13 +15,17 @@
  *      with a single regex/string substitution. Often expressible as
  *      kind: 'transpiler' scoped to the enclosing function.
  *
- * The warning is informational. The runner does NOT block on it. CI may
- * surface it via `npm run lint`.
+ * ENFORCING: this gate exits non-zero when any candidate is found, so
+ * `npm run lint` fails on it. The tree is currently at 0 findings (Lane C
+ * migrated the candidates); a NEW free-form patch that maps cleanly onto a
+ * declarative kind fails lint until it migrates — or is restructured so it no
+ * longer matches the heuristic (e.g. event_bus, which legitimately needs free
+ * form and does not match either pattern).
  *
  * Usage:
- *   node scripts/check-declarative.mjs            # plain text warning
- *   node scripts/check-declarative.mjs --json     # machine-readable list
- *   node scripts/check-declarative.mjs --quiet    # exit 0, suppress noise
+ *   node scripts/check-declarative.mjs            # gate: exit 1 if candidates found
+ *   node scripts/check-declarative.mjs --json     # machine-readable list (always exit 0)
+ *   node scripts/check-declarative.mjs --quiet    # suppress output, still exit 1 on findings
  */
 
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
@@ -87,15 +91,16 @@ if (findings.length === 0) {
 
 if (!quiet) {
   // Print the header ONCE, then a flat list. This is the "only printed once
-  // per build, not per patch" contract from the expert review.
-  console.warn(
+  // per build, not per patch" contract from the expert review. Routed to stderr
+  // since this is now a failing gate, not informational stdout.
+  console.error(
     `[ccpatch] ${findings.length} free-form patch(es) could be declarative ` +
     `(kind: prefix | postfix | transpiler). See docs/authoring-patches.md "Declarative kinds".`
   );
   for (const { name, reason } of findings) {
-    console.warn(`  - ${name}: ${reason}`);
+    console.error(`  - ${name}: ${reason}`);
   }
-  console.warn(`  Codemod: node scripts/codemod-declarative.mjs <patch-name>`);
+  console.error(`  Codemod: node scripts/codemod-declarative.mjs <patch-name>`);
 }
-// Informational only — never fail the build.
-process.exit(0);
+// Enforcing: fail the build when any candidate is found so `npm run lint` gates.
+process.exit(findings.length > 0 ? 1 : 0);
