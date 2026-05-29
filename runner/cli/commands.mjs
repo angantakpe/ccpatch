@@ -29,6 +29,12 @@
 
 import path from 'node:path';
 
+// U2: `explain` owns its own handler in cli/cmd-explain.mjs. Unlike the other
+// run* handlers (passed in via `impl` from cli.mjs to dodge a circular import),
+// cmd-explain.mjs is a leaf that only depends on config/manifest/runner, so we
+// can import it directly here without creating a cycle.
+import { runExplain } from './cmd-explain.mjs';
+
 export const DEFAULT_KEY = '__build__';
 
 /**
@@ -274,6 +280,24 @@ export function buildCommandTable(impl) {
         return { ack: true, ackPatch, ackAllCaps, ackDryRun };
       },
       run: (ctx) => impl.runAck(ctx),
+    },
+    {
+      name: 'explain',
+      resultKey: 'explain',
+      helpKey: 'explain',
+      needsPatches: true,
+      parse(rest) {
+        let profile = null;
+        let json = false;
+        const requestedPatches = [];
+        for (let i = 0; i < rest.length; i++) {
+          if (rest[i] === '--patch' && rest[i + 1]) requestedPatches.push(rest[++i]);
+          else if ((rest[i] === '--profile' || rest[i] === '-p') && rest[i + 1]) profile = rest[++i];
+          else if (rest[i] === '--json') json = true;
+        }
+        return { explain: true, requestedPatches, profile, json };
+      },
+      run: (ctx) => runExplain(ctx),
     },
     {
       // The default build path is NOT a named subcommand: it takes positional

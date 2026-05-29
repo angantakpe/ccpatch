@@ -76,6 +76,20 @@ export const HELP = Object.freeze({
     '  --suggest         Read anchor-drift.jsonl and print top-3 fuzzy candidates\n' +
     '                    plus a copy-pasteable patch stub for each drifted patch',
 
+  explain:
+    'Usage: ccpatch explain [--profile <name>] [--patch <name>] [--json]\n' +
+    '\n' +
+    'Print the FINAL resolved patch set and, for every known patch, WHY it is\n' +
+    'in or out (e.g. "in: profile=standard", "in: required infra",\n' +
+    '"out: disabled in ccpatch.yml", "out: not in profile", "excluded:\n' +
+    'native-incompatible"). Uses the SAME resolution the default build path\n' +
+    'applies, so it never drifts from what `ccpatch <in> <out>` would select.\n' +
+    '\n' +
+    'Options:\n' +
+    '  --profile <name>  Resolve as if building with this profile from ccpatch.yml\n' +
+    '  --patch <name>    Resolve an explicit --patch list (repeatable, bypasses YAML)\n' +
+    '  --json            Emit the resolution as JSON instead of a table',
+
   'fallback-capture':
     'Usage: ccpatch fallback-capture <patched.js> --against <unpatched.js> [--patch <name>]\n' +
     '\n' +
@@ -146,6 +160,7 @@ export const USAGE =
   '  node patch-cli.mjs repl <patched.js>\n' +
   '  node patch-cli.mjs versions [--target-version <x.y.z>]\n' +
   '  node patch-cli.mjs capabilities [--profile <name>] [--json]\n' +
+  '  node patch-cli.mjs explain [--profile <name>] [--patch <name>] [--json]\n' +
   '  node patch-cli.mjs ack <patch> [--all-caps] [--dry-run]\n' +
   '  node patch-cli.mjs refmap <bundle.js> [--out <path>] [--cc-version X.Y.Z] [--check]\n' +
   '  node patch-cli.mjs fallback-capture <patched.js> --against <unpatched.js> [--patch <name>]\n' +

@@ -1,6 +1,10 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { load as yamlLoad } from 'js-yaml';
 
+import { resolveProfile } from './manifest.mjs';
+import { resolvePatchNames } from './runner.mjs';
+import { applyNativeProfileFilter } from './cli/native-profile.mjs';
+
 /**
  * Parse ccpatch.yml and return a name → boolean map.
  *
@@ -161,4 +165,128 @@ export function readProfiles(yamlPath) {
     if (Array.isArray(val)) out[name] = val.filter(s => typeof s === 'string');
   }
   return out;
+}
+
+/**
+ * U2: single source of truth for "which patches end up selected, and why".
+ *
+ * Config has several overlapping selection mechanisms whose precedence used to
+ * live inline in runBuild only:
+ *   1. Explicit --patch list (bypasses ccpatch.yml entirely).
+ *   2. --profile (uses the profiles: map, ignores per-patch enabled flags).
+ *   3. ccpatch.yml per-patch enabled flags (yaml mode: no --patch / --patch all).
+ *   4. Auto-inclusion of `required: true` patches when an explicit list is used.
+ *   5. --profile=native auto-exclusion of esm_compat / bun_shim.
+ *
+ * This function reproduces that precedence exactly so BOTH `runBuild` and
+ * `ccpatch explain` call it and can't drift. It is pure: it reads ccpatch.yml
+ * only via the supplied `yamlPath` and returns its findings rather than logging.
+ *
+ * @param {object} args
+ * @param {Record<string, object>} args.patches  loaded patch registry
+ * @param {string[]} args.requested              options.requestedPatches (--patch values)
+ * @param {string|null} args.profile             --profile value (null when unset)
+ * @param {string} args.yamlPath                 absolute path to ccpatch.yml
+ * @returns {{
+ *   selected: string[],
+ *   reasons: Record<string, string>,
+ *   notices: string[],
+ *   yamlMode: boolean,
+ * }}
+ *   `selected` is the final ordered list to apply. `reasons[name]` explains why
+ *   EVERY known patch is in or out. `notices` are the human-readable log lines
+ *   runBuild historically printed (so it can emit them verbatim). `yamlMode`
+ *   indicates whether ccpatch.yml flags drove selection.
+ */
+export function resolveEffectivePatches({ patches, requested, profile, yamlPath }) {
+  const allNames = Object.keys(patches);
+  const reasons = {};
+  const notices = [];
+
+  const requestedPatches = Array.isArray(requested) ? requested : [];
+  const isYamlMode = requestedPatches.length === 0
+    || (requestedPatches.length === 1 && requestedPatches[0] === 'all');
+
+  let effectiveRequested = requestedPatches;
+
+  if (isYamlMode) {
+    if (profile) {
+      const profiles = readProfiles(yamlPath);
+      const { enabled, unknown } = resolveProfile(profile, profiles, allNames);
+      if (unknown.length > 0) {
+        notices.push(`  [config] profile "${profile}": ${unknown.length} unknown patch name(s) skipped: ${unknown.join(', ')}`);
+      }
+      notices.push(`[ccpatch] profile=${profile} patches=${enabled.length}`);
+      const enabledSet = new Set(enabled);
+      for (const name of allNames) {
+        reasons[name] = enabledSet.has(name)
+          ? `in: profile=${profile}`
+          : `out: not in profile ${profile}`;
+      }
+      effectiveRequested = enabled;
+    } else {
+      const yamlFlags = readPatchFlags(yamlPath);
+      if (yamlFlags) {
+        const unlisted = allNames.filter(name => !(name in yamlFlags));
+        if (unlisted.length > 0) {
+          notices.push(`  [config] ccpatch.yml: ${unlisted.length} unlisted patch(es) skipped (add to ccpatch.yml to enable): ${unlisted.join(', ')}`);
+        }
+        const enabled = allNames.filter(name => yamlFlags[name] === true);
+        const disabled = allNames.filter(name => name in yamlFlags && yamlFlags[name] !== true);
+        if (disabled.length > 0) {
+          notices.push(`  [config] ccpatch.yml: ${enabled.length} enabled, ${disabled.length} disabled (${disabled.join(', ')})`);
+        }
+        for (const name of allNames) {
+          if (yamlFlags[name] === true) reasons[name] = 'in: enabled in ccpatch.yml';
+          else if (name in yamlFlags) reasons[name] = 'out: disabled in ccpatch.yml';
+          else reasons[name] = 'out: unlisted in ccpatch.yml';
+        }
+        effectiveRequested = enabled;
+      } else {
+        // No ccpatch.yml flags block: apply everything.
+        for (const name of allNames) reasons[name] = 'in: no ccpatch.yml — applying all';
+        effectiveRequested = ['all'];
+      }
+    }
+  } else {
+    // Explicit --patch list bypasses ccpatch.yml entirely.
+    const requestedSet = new Set(effectiveRequested);
+    for (const name of allNames) {
+      reasons[name] = requestedSet.has(name)
+        ? 'in: requested via --patch'
+        : 'out: not in --patch list';
+    }
+  }
+
+  let patchesToApply = resolvePatchNames(patches, effectiveRequested);
+
+  // Explicit list (not yaml-mode, not "all"): auto-include `required: true`
+  // patches so picking a single extension doesn't drop infra patches.
+  if (!isYamlMode && !effectiveRequested.includes('all')) {
+    const selectedSet = new Set(patchesToApply);
+    const autoAdded = [];
+    for (const [name, patch] of Object.entries(patches)) {
+      if (patch && patch.required === true && !selectedSet.has(name)) {
+        selectedSet.add(name);
+        autoAdded.push(name);
+        reasons[name] = 'in: required infra';
+      }
+    }
+    if (autoAdded.length > 0) {
+      notices.push(`  [config] auto-including ${autoAdded.length} required patch(es): ${autoAdded.join(', ')}`);
+      patchesToApply = [...selectedSet];
+    }
+  }
+
+  // --profile=native: drop esm_compat / bun_shim (incompatible with Bun SEA).
+  {
+    const { patches: filtered, excluded } = applyNativeProfileFilter(patchesToApply, profile);
+    if (excluded.length > 0) {
+      notices.push(`  [native] auto-excluded ${excluded.join(', ')} — incompatible with Bun SEA repack`);
+      for (const name of excluded) reasons[name] = 'excluded: native-incompatible';
+      patchesToApply = filtered;
+    }
+  }
+
+  return { selected: patchesToApply, reasons, notices, yamlMode: isYamlMode };
 }
