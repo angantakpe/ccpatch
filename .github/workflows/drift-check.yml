@@ -58,6 +58,36 @@ jobs:
       - name: Run doctor against installed claude-code
         run: node bin/patch-cli.mjs doctor "$CC_BUNDLE" --version "$CC_VERSION"
 
+      # A3: Proactive drift sweep across @latest AND every known refmap'd
+      # version. The plain `doctor` step above is the @latest leading indicator
+      # but exits non-zero ONLY on MISSING (drift is a soft signal there). Here
+      # we want the nightly radar to be loud on DRIFT too, and to re-probe the
+      # versions we have hand-resolved refmaps for, so a regression in the
+      # refmap loader / anchor registry surfaces before a user hits it.
+      #
+      # This complements the per-patch `revisit.until` runtime nudge
+      # (runner/manifest.mjs + runner/runner.mjs): revisit.until reminds you
+      # about a patch you KNOW is temporary; this sweep catches anchors that
+      # moved when you DIDN'T expect them to. scripts/ci-drift-sweep.mjs only
+      # probes bundles already on disk, so download the refmap'd versions first.
+      - name: Fetch bundles for known refmap'd versions
+        run: |
+          for f in refmaps/*.json; do
+            [ -e "$f" ] || continue
+            v="$(basename "$f" .json)"
+            dir="storage/archives/claude-code-v${v}"
+            if [ ! -d "$dir" ] || ! ls "$dir"/cli*.cjs "$dir"/cli.js >/dev/null 2>&1; then
+              echo "Downloading refmap'd version v${v}"
+              make download VERSION="${v}" || echo "::warning::download for v${v} failed; sweep will skip it"
+            fi
+          done
+
+      - name: Proactive drift sweep (@latest + refmap'd versions)
+        # Distinct from the doctor step: this FAILS on DRIFT or MISSING for any
+        # probed bundle, and that is also distinct from the lagging PR guard in
+        # version-matrix.yml, where drift only comments and does not block.
+        run: node scripts/ci-drift-sweep.mjs --latest "$CC_BUNDLE" --latest-version "$CC_VERSION"
+
       - name: Strict apply (capability gate)
         # Fails if any enabled patch declares high-risk capabilities the
         # allowlist doesn't acknowledge. The allowlist below covers what
