@@ -10,7 +10,10 @@ import {
   parsePatchCliArgs,
   runPatchCli,
   runCapabilities,
+  runAck,
+  parseThreatModelTable,
 } from '../runner/cli.mjs';
+import { writeAck, readAcks } from '../runner/config.mjs';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Manifest validator: capabilities field
@@ -452,5 +455,166 @@ describe('Track B CLI ack gate', () => {
       `gate should not have rejected; errs: ${errs}`);
     assert.ok(outs.includes('unacked capabilities') || outs.includes('[capabilities] WARN'),
       `expected warn line; outs: ${outs}`);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UX3: `ccpatch ack <patch>` — THREAT_MODEL parsing + ack-write helper
+// ─────────────────────────────────────────────────────────────────────────────
+describe('parseThreatModelTable', () => {
+  const SRC = [
+    '# threat model',
+    '',
+    '| Patch | Touches | Reads | Writes / Sends | Default |',
+    '| --- | --- | --- | --- | --- |',
+    '| `fetch_interceptor` | global fetch | every request | in-process only | on |',
+    '| `bun_shim` | Bun polyfills | n/a | None | on |',
+    '',
+    'prose that is not a table',
+  ].join('\n');
+
+  it('captures the header row', () => {
+    const t = parseThreatModelTable(SRC);
+    assert.deepEqual(t.headers, ['Patch', 'Touches', 'Reads', 'Writes / Sends', 'Default']);
+  });
+
+  it('keys rows by de-backticked patch name', () => {
+    const t = parseThreatModelTable(SRC);
+    assert.ok(t.rows.fetch_interceptor);
+    assert.equal(t.rows.fetch_interceptor[0], '`fetch_interceptor`');
+    assert.equal(t.rows.fetch_interceptor[1], 'global fetch');
+    assert.equal(t.rows.bun_shim[3], 'None');
+  });
+
+  it('returns empty for non-string / empty input', () => {
+    assert.deepEqual(parseThreatModelTable(''), { headers: null, rows: {} });
+    assert.deepEqual(parseThreatModelTable(null), { headers: null, rows: {} });
+  });
+});
+
+describe('writeAck (config helper)', () => {
+  function tmp() {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ccpatch-writeack-'));
+    return { dir, ymlPath: path.join(dir, 'ccpatch.yml') };
+  }
+
+  it('creates ccpatch.yml when missing', () => {
+    const { ymlPath } = tmp();
+    const res = writeAck(ymlPath, 'fetch_interceptor', ['network']);
+    assert.equal(res.created, true);
+    assert.deepEqual(res.caps, ['network']);
+    assert.deepEqual(readAcks(ymlPath), { fetch_interceptor: ['network'] });
+  });
+
+  it('appends a new entry to an existing ack block', () => {
+    const { ymlPath } = tmp();
+    fs.writeFileSync(ymlPath,
+      'version: 1\nack:\n  bun_shim: [env, network]\n\npatches:\n  bun_shim: true\n');
+    const res = writeAck(ymlPath, 'webhook', ['network', 'env']);
+    assert.equal(res.created, false);
+    const acks = readAcks(ymlPath);
+    assert.deepEqual(acks.bun_shim, ['env', 'network']);
+    assert.deepEqual(acks.webhook, ['network', 'env']);
+    // patches block preserved.
+    assert.ok(fs.readFileSync(ymlPath, 'utf8').includes('patches:'));
+  });
+
+  it('rewrites an existing entry, merging caps (union, order-stable)', () => {
+    const { ymlPath } = tmp();
+    fs.writeFileSync(ymlPath, 'version: 1\nack:\n  webhook: [network]\n');
+    const res = writeAck(ymlPath, 'webhook', ['network', 'env']);
+    assert.deepEqual(res.caps, ['network', 'env']);
+    assert.deepEqual(readAcks(ymlPath), { webhook: ['network', 'env'] });
+    // No duplicate entry was created.
+    const occurrences = fs.readFileSync(ymlPath, 'utf8').match(/^\s+webhook:/gm) || [];
+    assert.equal(occurrences.length, 1);
+  });
+
+  it('inserts an ack block before patches: when none exists', () => {
+    const { ymlPath } = tmp();
+    fs.writeFileSync(ymlPath, '# header comment\nversion: 1\n\npatches:\n  bun_shim: true\n');
+    writeAck(ymlPath, 'bun_shim', ['env']);
+    const src = fs.readFileSync(ymlPath, 'utf8');
+    assert.ok(src.includes('# header comment'), 'comment preserved');
+    assert.ok(src.indexOf('ack:') < src.indexOf('patches:'), 'ack block precedes patches');
+    assert.deepEqual(readAcks(ymlPath), { bun_shim: ['env'] });
+  });
+
+  it('preserves the heavy comment block on update', () => {
+    const { ymlPath } = tmp();
+    const original =
+      '# big comment\n# line 2\nversion: 1\nack:\n  # ack comment\n  fetch_interceptor: [network]\n\npatches:\n  x: true\n';
+    fs.writeFileSync(ymlPath, original);
+    writeAck(ymlPath, 'webhook', ['network']);
+    const src = fs.readFileSync(ymlPath, 'utf8');
+    assert.ok(src.includes('# big comment'));
+    assert.ok(src.includes('# ack comment'));
+    assert.deepEqual(readAcks(ymlPath), {
+      fetch_interceptor: ['network'],
+      webhook: ['network'],
+    });
+  });
+});
+
+describe('ccpatch ack <patch> (CLI)', () => {
+  function tmpProject() {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ccpatch-ackcmd-'));
+    return { dir, ymlPath: path.join(dir, 'ccpatch.yml') };
+  }
+  function withCwd(dir, fn) {
+    const prev = process.cwd();
+    process.chdir(dir);
+    return Promise.resolve(fn()).finally(() => process.chdir(prev));
+  }
+
+  it('parses the subcommand into a locked option shape', () => {
+    assert.deepEqual(
+      parsePatchCliArgs(['ack', 'webhook']),
+      { ack: true, ackPatch: 'webhook', ackAllCaps: false, ackDryRun: false },
+    );
+    const dr = parsePatchCliArgs(['ack', 'webhook', '--dry-run', '--all-caps']);
+    assert.equal(dr.ackDryRun, true);
+    assert.equal(dr.ackAllCaps, true);
+  });
+
+  it('errors when no patch is given', () => {
+    const opts = parsePatchCliArgs(['ack']);
+    assert.ok(opts.error);
+  });
+
+  it('writes the ack entry and reports unknown patches', async () => {
+    const { loadPatches } = await import('../runner/loader.mjs');
+    const patches = await loadPatches();
+
+    // Unknown patch → exit 1.
+    const l1 = captureLogger();
+    const c1 = await runAck({ options: { ackPatch: 'does_not_exist' }, patches, logger: l1 });
+    assert.equal(c1, 1);
+    assert.ok(l1._err.join('\n').includes('unknown patch'));
+
+    // Real high-risk patch → writes ack + prints THREAT_MODEL row.
+    const { dir, ymlPath } = tmpProject();
+    const l2 = captureLogger();
+    const c2 = await withCwd(dir, () =>
+      runAck({ options: { ackPatch: 'webhook' }, patches, logger: l2 }));
+    assert.equal(c2, 0);
+    const outs = l2._out.join('\n');
+    assert.ok(outs.includes('Capabilities:'), `expected caps line; got ${outs}`);
+    assert.ok(outs.includes('THREAT_MODEL.md'), `expected threat-model section; got ${outs}`);
+    const acks = readAcks(ymlPath);
+    // webhook declares network, env, telemetry → only ack-required caps written.
+    assert.deepEqual([...acks.webhook].sort(), ['env', 'network']);
+  });
+
+  it('--dry-run does not modify ccpatch.yml', async () => {
+    const { loadPatches } = await import('../runner/loader.mjs');
+    const patches = await loadPatches();
+    const { dir, ymlPath } = tmpProject();
+    const logger = captureLogger();
+    const code = await withCwd(dir, () =>
+      runAck({ options: { ackPatch: 'webhook', ackDryRun: true }, patches, logger }));
+    assert.equal(code, 0);
+    assert.ok(logger._out.join('\n').includes('[dry-run]'));
+    assert.equal(fs.existsSync(ymlPath), false);
   });
 });

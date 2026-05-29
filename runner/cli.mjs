@@ -3,13 +3,14 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 
 import { HELP, USAGE, maybePrintSubcommandHelp } from './cli/help.mjs';
+import { buildCommandTable, namedSubcommands, DEFAULT_KEY } from './cli/commands.mjs';
 import { extractGlobalFlags, makeLogger } from './cli/logger.mjs';
 import { applyNativeProfileFilter } from './cli/native-profile.mjs';
 import { buildJsonReport, renderTextSummary } from './cli/build-report.mjs';
 import { runDoctorSuggest } from './cli/doctor-suggest.mjs';
 import { loadPatches } from './loader.mjs';
 import { applyNamedPatches, resolvePatchNames } from './runner.mjs';
-import { readPatchFlags, readProfiles, readAcks } from './config.mjs';
+import { readPatchFlags, readProfiles, readAcks, writeAck } from './config.mjs';
 import { resolveProfile, classifyRisk, CAPABILITIES } from './manifest.mjs';
 import { probeAnchor, fuzzyMatch } from './anchors.mjs';
 import { compileKind } from './patch-kinds.mjs';
@@ -137,142 +138,14 @@ export function findUnackedAckRequired(patches, names, acks, allow) {
   return violations;
 }
 
-export function parsePatchCliArgs(args) {
-  if (args.includes('--list')) {
-    return { list: true };
-  }
-  if (args[0] === 'revert') {
-    const rest = args.slice(1);
-    if (rest.length < 1) {
-      return { error: 'Usage: node patch-cli.mjs revert <patched.js> [--output <restored.js>]' };
-    }
-    const patchedPath = path.resolve(rest[0]);
-    let outputPath = null;
-    for (let i = 1; i < rest.length; i++) {
-      if ((rest[i] === '--output' || rest[i] === '-o') && rest[i + 1]) outputPath = path.resolve(rest[++i]);
-    }
-    return { revert: true, patchedPath, outputPath };
-  }
-  if (args[0] === 'diff') {
-    const rest = args.slice(1);
-    if (rest.length < 1) {
-      return { error: 'Usage: node patch-cli.mjs diff <patched.js>' };
-    }
-    return { diff: true, patchedPath: path.resolve(rest[0]) };
-  }
-  if (args[0] === 'repl') {
-    const rest = args.slice(1);
-    if (rest.length < 1) {
-      return { error: 'Usage: node patch-cli.mjs repl <patched.js>' };
-    }
-    return { repl: true, patchedPath: path.resolve(rest[0]) };
-  }
-  if (args[0] === 'versions') {
-    const rest = args.slice(1);
-    let targetVersion = null;
-    for (let i = 0; i < rest.length; i++) {
-      if (rest[i] === '--target-version' && rest[i + 1]) targetVersion = rest[++i];
-    }
-    if (!targetVersion && process.env.CCPATCH_CLI_VERSION) {
-      targetVersion = process.env.CCPATCH_CLI_VERSION;
-    }
-    return { versions: true, targetVersion };
-  }
-  if (args[0] === 'capabilities') {
-    const rest = args.slice(1);
-    let profile = null;
-    let json = false;
-    for (let i = 0; i < rest.length; i++) {
-      if ((rest[i] === '--profile' || rest[i] === '-p') && rest[i + 1]) profile = rest[++i];
-      else if (rest[i] === '--json') json = true;
-    }
-    return { capabilities: true, profile, json };
-  }
-  if (args[0] === 'refmap') {
-    const rest = args.slice(1);
-    if (rest.length < 1) {
-      return { error: 'Usage: node patch-cli.mjs refmap <bundle.js> [--out <path>] [--cc-version X.Y.Z] [--check]' };
-    }
-    const bundlePath = path.resolve(rest[0]);
-    let outPath = null;
-    let ccVersion = null;
-    let check = false;
-    for (let i = 1; i < rest.length; i++) {
-      if (rest[i] === '--out' && rest[i + 1]) outPath = path.resolve(rest[++i]);
-      else if (rest[i] === '--cc-version' && rest[i + 1]) ccVersion = rest[++i];
-      else if (rest[i] === '--check') check = true;
-    }
-    if (!ccVersion && process.env.CCPATCH_CLI_VERSION) ccVersion = process.env.CCPATCH_CLI_VERSION;
-    return { refmap: true, bundlePath, outPath, ccVersion, check };
-  }
-  if (args[0] === 'fallback-capture') {
-    const rest = args.slice(1);
-    if (rest.length < 1) {
-      return { error: 'Usage: node patch-cli.mjs fallback-capture <patched.js> --against <unpatched.js> --patch <name>' };
-    }
-    const patchedPath = path.resolve(rest[0]);
-    let againstPath = null;
-    let patchName = null;
-    for (let i = 1; i < rest.length; i++) {
-      if (rest[i] === '--against' && rest[i + 1]) againstPath = path.resolve(rest[++i]);
-      else if (rest[i] === '--patch' && rest[i + 1]) patchName = rest[++i];
-    }
-    if (!againstPath) {
-      return { error: 'fallback-capture: --against <unpatched.js> is required' };
-    }
-    return { fallbackCapture: true, patchedPath, againstPath, patchName };
-  }
-  if (args[0] === 'watch') {
-    const rest = args.slice(1);
-    if (rest.length < 2) {
-      return { error: 'Usage: node patch-cli.mjs watch <input.js> <output.js> [--patch <name>] [--profile <name>] [--debounce <ms>]' };
-    }
-    const inputPath = path.resolve(rest[0]);
-    const outputPath = path.resolve(rest[1]);
-    let profile = null;
-    let debounceMs = 200;
-    const requestedPatches = [];
-    for (let i = 2; i < rest.length; i++) {
-      if (rest[i] === '--patch' && rest[i + 1]) requestedPatches.push(rest[++i]);
-      else if ((rest[i] === '--profile' || rest[i] === '-p') && rest[i + 1]) profile = rest[++i];
-      else if (rest[i] === '--debounce' && rest[i + 1]) debounceMs = parseInt(rest[++i], 10) || 200;
-    }
-    return { watch: true, inputPath, outputPath, requestedPatches, profile, debounceMs };
-  }
-  if (args[0] === 'coverage') {
-    const rest = args.slice(1);
-    if (rest.length < 1) {
-      return { error: 'Usage: node patch-cli.mjs coverage <patched-bundle> [--smoke <cmd>] [--out <report.json>] [--cc-version X.Y.Z]' };
-    }
-    const bundlePath = path.resolve(rest[0]);
-    let smoke = null;
-    let outPath = null;
-    let ccVersion = null;
-    for (let i = 1; i < rest.length; i++) {
-      if (rest[i] === '--smoke' && rest[i + 1]) smoke = rest[++i];
-      else if (rest[i] === '--out' && rest[i + 1]) outPath = path.resolve(rest[++i]);
-      else if (rest[i] === '--cc-version' && rest[i + 1]) ccVersion = rest[++i];
-    }
-    if (!ccVersion && process.env.CCPATCH_CLI_VERSION) ccVersion = process.env.CCPATCH_CLI_VERSION;
-    return { coverage: true, bundlePath, smoke, outPath, ccVersion };
-  }
-  if (args[0] === 'doctor') {
-    const rest = args.slice(1);
-    if (rest.length < 1) {
-      return { error: 'Usage: node patch-cli.mjs doctor <input.js> [--profile <name>] [--strict]' };
-    }
-    const inputPath = path.resolve(rest[0]);
-    let profile = null;
-    let strict = false;
-    let suggest = false;
-    for (let i = 1; i < rest.length; i++) {
-      if ((rest[i] === '--profile' || rest[i] === '-p') && rest[i + 1]) profile = rest[++i];
-      else if (rest[i] === '--strict') strict = true;
-      else if (rest[i] === '--suggest') suggest = true;
-    }
-    if (!strict && process.env.CCPATCH_STRICT === '1') strict = true;
-    return { doctor: true, inputPath, profile, strict, suggest };
-  }
+/**
+ * Parse the default (no-subcommand) build invocation: positional
+ * `<input.js> <output.js>` plus the apply flags. Lives in its own function so
+ * the command table (cli/commands.mjs) can register it as the DEFAULT_KEY
+ * entry. parsePatchCliArgs delegates here when args[0] is not a named
+ * subcommand.
+ */
+export function parseBuildArgs(args) {
   if (args.length < 2) {
     return { error: USAGE };
   }
@@ -331,6 +204,55 @@ export function parsePatchCliArgs(args) {
   return { inputPath, outputPath, requestedPatches, patchOptions, preloadPath, profile };
 }
 
+/**
+ * The declarative command table (ARCH4). Bundles each subcommand's parser and
+ * executor in one place so the parse-time and execution-time dispatch stay in
+ * sync. The run* handlers are threaded in here (they're hoisted function
+ * declarations later in this module) to avoid a circular import with
+ * cli/commands.mjs, which owns only the *structure* of the table.
+ *
+ * `parseBuild`/`runBuild` cover the default (no-subcommand) positional build
+ * invocation; everything else maps a subcommand token → { parse, run }.
+ */
+const COMMANDS = buildCommandTable({
+  parseBuild: parseBuildArgs,
+  runBuild,
+  runRevert,
+  runDiff,
+  runReplCommand,
+  runVersions,
+  runRefmap,
+  runFallbackCapture,
+  runWatch,
+  runCoverage,
+  runDoctor,
+  runCapabilities,
+  runHealCommand,
+  runAck,
+});
+
+const NAMED_SUBCOMMANDS = new Set(namedSubcommands(COMMANDS));
+
+/**
+ * Parse argv into an options object carrying a discriminator key (e.g.
+ * `revert: true`, or the default build shape). Dispatch is generated from the
+ * command table: if args[0] names a subcommand, its parser handles args.slice(1);
+ * otherwise the default build parser handles the full args array.
+ *
+ * Exported and exercised directly by tests — the returned shapes are a locked
+ * contract (e.g. parsePatchCliArgs(['repl','x']) === { repl: true, patchedPath }).
+ */
+export function parsePatchCliArgs(args) {
+  if (args.includes('--list')) {
+    return { list: true };
+  }
+  const head = args[0];
+  if (head && NAMED_SUBCOMMANDS.has(head)) {
+    return COMMANDS.byName.get(head).parse(args.slice(1));
+  }
+  return COMMANDS.byName.get(DEFAULT_KEY).parse(args);
+}
+
 export async function runPatchCli(args, logger = console) {
   // Pull off global flags (--log-level, --quiet, --json) before any
   // subcommand-specific parsing. We re-wrap `logger` with a leveled logger so
@@ -349,6 +271,8 @@ export async function runPatchCli(args, logger = console) {
   // subcommand's usage block; falls back to the global banner otherwise.
   if (maybePrintSubcommandHelp(args, leveled)) return 0;
 
+  // `module` keeps its own subdispatch (runModuleCommand) — it has nested
+  // subcommands rather than fitting the flat parse/run table.
   if (args[0] === 'module') {
     return await runModuleCommand(args.slice(1), leveled);
   }
@@ -361,41 +285,9 @@ export async function runPatchCli(args, logger = console) {
     return 1;
   }
 
-  if (options.revert) {
-    return await runRevert(options, logger);
-  }
-  if (options.diff) {
-    return await runDiff(options, logger);
-  }
-  if (options.repl) {
-    return await runReplCommand(options, logger);
-  }
-  if (options.versions) {
-    return runVersions(options, logger);
-  }
-  if (options.refmap) {
-    return await runRefmap(options, logger);
-  }
-  if (options.fallbackCapture) {
-    return await runFallbackCapture(options, logger);
-  }
-  if (options.watch) {
-    return await runWatch(options, logger);
-  }
-  if (options.coverage) {
-    return await runCoverage(options, logger);
-  }
-
-  // For apply flows we want to load patches with the target version so the
-  // correct variant is selected before validateManifest runs. For --list and
-  // doctor we still load defaults only (variant dirs without defaults will
-  // surface a clear load error).
-  let loadVersion;
-  if (options.patchOptions?.version) loadVersion = options.patchOptions.version;
-  else if (process.env.CCPATCH_CLI_VERSION) loadVersion = process.env.CCPATCH_CLI_VERSION;
-  const patches = await loadPatches({ version: loadVersion });
-
+  // `--list` is a flag, not a table subcommand: it still needs patches loaded.
   if (options.list) {
+    const patches = await loadPatches({ version: pickLoadVersion(options) });
     for (const name of Object.keys(patches).sort()) {
       const desc = patches[name].description ?? '';
       logger.log(`${name.padEnd(32)} ${desc}`);
@@ -403,19 +295,45 @@ export async function runPatchCli(args, logger = console) {
     return 0;
   }
 
-  if (options.doctor) {
-    const rc = await runDoctor(options, patches, logger);
-    if (options.suggest) {
-      logger.log('');
-      runDoctorSuggest(logger);
-    }
-    return rc;
+  // Table-generated dispatch (ARCH4). The discriminator key set by the parser
+  // (options.revert, options.doctor, …) selects the matching command; the
+  // default build invocation maps to DEFAULT_KEY.
+  let cmd = null;
+  for (const c of COMMANDS.table) {
+    if (c.resultKey === DEFAULT_KEY) continue;
+    if (options[c.resultKey]) { cmd = c; break; }
   }
+  if (!cmd) cmd = COMMANDS.byName.get(DEFAULT_KEY);
 
-  if (options.capabilities) {
-    return await runCapabilities(options, patches, logger);
-  }
+  // Commands that touch the patch registry load it (with the target version so
+  // the correct variant is selected before validateManifest runs); the rest
+  // run without loading patches.
+  const patches = cmd.needsPatches
+    ? await loadPatches({ version: pickLoadVersion(options) })
+    : null;
 
+  return await cmd.run({ options, patches, logger });
+}
+
+/**
+ * Resolve the Claude Code version used to load patch variants: explicit
+ * --version wins, else CCPATCH_CLI_VERSION. Returns undefined when neither is
+ * set (loadPatches then uses defaults). Shared by --list and the table.
+ */
+function pickLoadVersion(options) {
+  if (options.patchOptions?.version) return options.patchOptions.version;
+  if (process.env.CCPATCH_CLI_VERSION) return process.env.CCPATCH_CLI_VERSION;
+  return undefined;
+}
+
+/**
+ * The default (no-subcommand) build invocation: apply patches and write the
+ * patched bundle (plus overlay/sidecar/preload/report). Extracted from the old
+ * runPatchCli tail so the command table (DEFAULT_KEY) can dispatch to it.
+ * ctx = { options, patches, logger }.
+ */
+async function runBuild(ctx) {
+  const { options, patches, logger } = ctx;
   let code = fs.readFileSync(options.inputPath, 'utf8');
 
   // ── Feature flags via ccpatch.yml ──────────────────────────────────────────
@@ -845,7 +763,23 @@ function runVersions(options, logger) {
   return 0;
 }
 
-async function runDoctor(options, patches, logger) {
+/**
+ * `ccpatch doctor` command entry (table run). Wraps the probe core so the
+ * `--suggest` follow-up (read anchor-drift.jsonl + print candidates) stays
+ * attached to the command exactly as the old runPatchCli dispatch did.
+ * ctx = { options, patches, logger }.
+ */
+async function runDoctor(ctx) {
+  const { options, patches, logger } = ctx;
+  const rc = await runDoctorCore(options, patches, logger);
+  if (options.suggest) {
+    logger.log('');
+    runDoctorSuggest(logger);
+  }
+  return rc;
+}
+
+async function runDoctorCore(options, patches, logger) {
   if (!fs.existsSync(options.inputPath)) {
     logger.error(`Error: cli.js not found at ${options.inputPath}`);
     return 1;
@@ -973,6 +907,59 @@ async function runDoctor(options, patches, logger) {
   if (unverified > 0 && options.strict) {
     logger.error(`  [strict] UNVERIFIED treated as failure: ${unverifiedNames.join(', ')}`);
     return 1;
+  }
+  return 0;
+}
+
+/**
+ * `ccpatch heal [--write] [--drift <path>] [--anchors <path>]`
+ *
+ * Read the recorded anchor-drift stream (storage/outputs/anchor-drift.jsonl),
+ * group by patch, take the top-scoring candidate per drifted anchor, and
+ * PROPOSE a rewritten runner/anchors.mjs registry entry as a unified diff on
+ * stdout. With --write, apply the edit in place. Pure logic lives in
+ * runner/heal.mjs; this is thin wiring.
+ * ctx = { options, logger }.
+ */
+export async function runHealCommand(ctx) {
+  const { options, logger } = ctx;
+  const { runHeal } = await import('./heal.mjs');
+  const res = runHeal({
+    driftPath: options.driftPath || undefined,
+    anchorsPath: options.anchorsPath || undefined,
+    write: !!options.write,
+  });
+  if (!res.ok) {
+    logger.error(`Error: ${res.error}`);
+    return 1;
+  }
+  if (res.empty) {
+    if (res.driftCount === 0) {
+      logger.log('[heal] no anchor-drift.jsonl entries found. Run `ccpatch doctor <bundle>` first.');
+    } else {
+      logger.log('[heal] no healable anchors — every drifted entry is already up to date or lacks a registry target.');
+    }
+    for (const s of res.skipped) {
+      logger.log(`  [skip] ${s.patch} (${s.id ?? '?'}): ${s.reason}`);
+    }
+    return 0;
+  }
+  if (options.write && res.wrote) {
+    for (const c of res.changes) {
+      logger.log(`  [heal] ${c.patch} → anchors.${c.id}.literal = ${JSON.stringify(c.literal)}`);
+    }
+    for (const s of res.skipped) {
+      logger.log(`  [skip] ${s.patch} (${s.id ?? '?'}): ${s.reason}`);
+    }
+    logger.log(`[heal] applied ${res.changes.length} registry edit(s) to runner/anchors.mjs.`);
+    return 0;
+  }
+  // Default: propose the diff on stdout. Informational lines go to the logger
+  // (stderr under --quiet/--json); the diff is the stdout payload.
+  process.stdout.write(res.diff);
+  logger.log(`\n[heal] proposed ${res.changes.length} registry edit(s). Re-run with --write to apply.`);
+  for (const s of res.skipped) {
+    logger.log(`  [skip] ${s.patch} (${s.id ?? '?'}): ${s.reason}`);
   }
   return 0;
 }
@@ -1182,6 +1169,126 @@ export async function runCapabilities(options, patches, logger) {
     .map(c => `${tally[c]} ${c}`);
   logger.log(`\nSummary: ${rows.length} patch(es)` +
     (summaryParts.length ? ` — ${summaryParts.join(', ')}` : ''));
+  return 0;
+}
+
+/**
+ * Parse the per-patch risk table from THREAT_MODEL.md into a name → row map.
+ *
+ * The doc contains GitHub-flavored markdown tables whose first column is the
+ * patch name wrapped in backticks (e.g. `| `fetch_interceptor` | global ... |`).
+ * We pull out the header row (to label the columns) and every data row keyed by
+ * the de-backticked patch name. Best-effort: a malformed/absent file yields an
+ * empty map and callers degrade gracefully.
+ *
+ * Returns { headers: string[]|null, rows: { [patchName]: string[] } } where each
+ * row is the list of trimmed cell strings (including the leading patch-name cell).
+ */
+export function parseThreatModelTable(src) {
+  const out = { headers: null, rows: {} };
+  if (typeof src !== 'string' || src.length === 0) return out;
+  const splitRow = (line) =>
+    line.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map(c => c.trim());
+  for (const raw of src.split('\n')) {
+    const line = raw.trim();
+    if (!line.startsWith('|')) continue;
+    const cells = splitRow(line);
+    if (cells.length < 2) continue;
+    // Header row: first cell literally "Patch".
+    if (!out.headers && /^patch$/i.test(cells[0])) {
+      out.headers = cells;
+      continue;
+    }
+    // Separator row (| --- | --- |).
+    if (cells.every(c => /^:?-{2,}:?$/.test(c) || c === '')) continue;
+    const m = cells[0].match(/^`([^`]+)`$/);
+    if (!m) continue;
+    out.rows[m[1]] = cells;
+  }
+  return out;
+}
+
+/**
+ * Render the THREAT_MODEL.md row for a patch as human-readable lines. Falls
+ * back to a "not documented" notice when the patch has no table row.
+ */
+function formatThreatModelEntry(table, patchName) {
+  const row = table.rows[patchName];
+  if (!row) {
+    return [`  (no THREAT_MODEL.md row found for "${patchName}")`];
+  }
+  const headers = table.headers || [];
+  const lines = [];
+  // Skip the first column (the patch name itself); pair the rest with headers.
+  for (let i = 1; i < row.length; i++) {
+    const label = headers[i] || `col${i}`;
+    lines.push(`  ${label}: ${row[i]}`);
+  }
+  return lines.length ? lines : [`  ${row.join(' | ')}`];
+}
+
+/**
+ * `ccpatch ack <patch>` — show the THREAT_MODEL.md row + declared capabilities
+ * for a patch, then write/update its `ack:` entry in ccpatch.yml.
+ *
+ * Acknowledges the ack-required capabilities (network/exec/env) the patch
+ * declares. With --dry-run it prints what would be written without touching the
+ * file. ctx = { options, patches, logger }.
+ */
+export async function runAck(ctx) {
+  const { options, patches, logger } = ctx;
+  const patchName = options.ackPatch;
+  if (!patchName) {
+    logger.error('Usage: ccpatch ack <patch> [--all-caps] [--dry-run]');
+    return 1;
+  }
+  const p = patches[patchName];
+  if (!p) {
+    logger.error(`Error: unknown patch "${patchName}". Run \`ccpatch --list\` to see available patches.`);
+    return 1;
+  }
+
+  const caps = Array.isArray(p.capabilities) ? p.capabilities : [];
+  const risk = classifyRisk(caps);
+  const ackTargets = caps.filter(c => ACK_REQUIRED_CAPS.includes(c));
+  // By default we ack only the ack-required caps; --all-caps acks the full set.
+  const toAck = options.ackAllCaps ? [...caps] : ackTargets;
+
+  // Show the THREAT_MODEL.md context.
+  const tmPath = path.resolve(PROJECT_ROOT, 'THREAT_MODEL.md');
+  let table = { headers: null, rows: {} };
+  if (fs.existsSync(tmPath)) {
+    table = parseThreatModelTable(fs.readFileSync(tmPath, 'utf8'));
+  }
+  logger.log(`Patch: ${patchName}`);
+  logger.log(`Capabilities: ${caps.length ? caps.join(', ') : '(none)'} — risk: ${risk}`);
+  logger.log('THREAT_MODEL.md:');
+  for (const line of formatThreatModelEntry(table, patchName)) logger.log(line);
+
+  if (toAck.length === 0) {
+    logger.log(
+      `\n"${patchName}" declares no acknowledgement-required capabilities ` +
+      `(${ACK_REQUIRED_CAPS.join('/')}); nothing to write.`
+    );
+    return 0;
+  }
+
+  const yamlPath = path.resolve(process.cwd(), 'ccpatch.yml');
+  if (options.ackDryRun) {
+    const existing = readAcks(yamlPath) || {};
+    const prior = Array.isArray(existing[patchName]) ? existing[patchName] : [];
+    const merged = [...prior];
+    for (const c of toAck) if (!merged.includes(c)) merged.push(c);
+    logger.log(`\n[dry-run] would write to ${yamlPath}:`);
+    logger.log(`  ${patchName}: [${merged.join(', ')}]`);
+    return 0;
+  }
+
+  const res = writeAck(yamlPath, patchName, toAck);
+  logger.log(
+    `\nAcknowledged ${patchName} → [${res.caps.join(', ')}] ` +
+    `(${res.created ? 'created' : 'updated'} ${path.basename(yamlPath)}).`
+  );
   return 0;
 }
 

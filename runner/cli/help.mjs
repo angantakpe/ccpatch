@@ -7,6 +7,20 @@
 // the bare `ccpatch --help` listing.
 
 export const HELP = Object.freeze({
+  ack:
+    'Usage: ccpatch ack <patch> [--all-caps] [--dry-run]\n' +
+    '\n' +
+    'Show the THREAT_MODEL.md row and declared capabilities for a patch, then\n' +
+    'write (or update) its `ack:` entry in ccpatch.yml. Acknowledging confirms\n' +
+    'you have read the threat model for the capabilities the patch claims.\n' +
+    '\n' +
+    'By default only the acknowledgement-required capabilities (network / exec /\n' +
+    'env) are written — these are the ones the default-strict build gate checks.\n' +
+    '\n' +
+    'Options:\n' +
+    '  --all-caps   Acknowledge every declared capability, not just network/exec/env\n' +
+    '  --dry-run    Print what would be written without modifying ccpatch.yml',
+
   build:
     'Usage: ccpatch <input.js> <output.js> [options]\n' +
     '\n' +
@@ -67,6 +81,18 @@ export const HELP = Object.freeze({
     '\n' +
     'Print a unified diff suitable for a patch module\'s fallbackDiff.patch field.',
 
+  heal:
+    'Usage: ccpatch heal [--write] [--drift <path>] [--anchors <path>]\n' +
+    '\n' +
+    'Read storage/outputs/anchor-drift.jsonl, group by patch, take the top-\n' +
+    'scoring candidate per drifted anchor, and propose a rewritten\n' +
+    'runner/anchors.mjs registry entry as a unified diff on stdout.\n' +
+    '\n' +
+    'Options:\n' +
+    '  --write           Apply the proposed registry edits in place\n' +
+    '  --drift <path>    Override the anchor-drift.jsonl source\n' +
+    '  --anchors <path>  Override the runner/anchors.mjs target',
+
   module:
     'Usage:\n' +
     '  ccpatch module install <path-or-url> [--strict] [--allow-capabilities <list>] [--force]\n' +
@@ -114,11 +140,13 @@ export const USAGE =
   '  node patch-cli.mjs <input.js> <output.js> [--patch <name>] [--profile <name>] [--preload <preload.mjs>] [--strict] [--dry-run] [--write-on-clean] [--allow-capabilities <list>] [--allow-unacked] [--dev]\n' +
   '  node patch-cli.mjs watch <input.js> <output.js> [--patch <name>] [--profile <name>] [--debounce <ms>]\n' +
   '  node patch-cli.mjs doctor <input.js> [--profile <name>] [--strict] [--suggest]\n' +
+  '  node patch-cli.mjs heal [--write] [--drift <path>] [--anchors <path>]\n' +
   '  node patch-cli.mjs revert <patched.js> [--output <restored.js>]\n' +
   '  node patch-cli.mjs diff <patched.js>\n' +
   '  node patch-cli.mjs repl <patched.js>\n' +
   '  node patch-cli.mjs versions [--target-version <x.y.z>]\n' +
   '  node patch-cli.mjs capabilities [--profile <name>] [--json]\n' +
+  '  node patch-cli.mjs ack <patch> [--all-caps] [--dry-run]\n' +
   '  node patch-cli.mjs refmap <bundle.js> [--out <path>] [--cc-version X.Y.Z] [--check]\n' +
   '  node patch-cli.mjs fallback-capture <patched.js> --against <unpatched.js> [--patch <name>]\n' +
   '  node patch-cli.mjs coverage <patched.js> [--smoke <cmd>] [--out <report.json>] [--cc-version X.Y.Z]\n' +
