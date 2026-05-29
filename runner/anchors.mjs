@@ -50,6 +50,7 @@
  */
 
 import { loadRefmap, resolveSymbol } from './refmap.mjs';
+import { checkVerifyCore } from './verify-core.mjs';
 
 export const anchors = {
   isDurableCronEnabled: {
@@ -201,29 +202,13 @@ export function probeAnchor(patch, code) {
   return { status: 'ok', weak: isWeakLocal(v) };
 }
 
+// Delegates to the shared verify primitive using the 'local' message style,
+// which preserves this site's distinct strings: 'verify.present missing: ',
+// 'verify.absent still present: ', and count messages WITHOUT the '(across
+// K string(s))' suffix. probeAnchor only consumes issues[0] (fed to
+// classifyDrift as `detail`), so the exact text is surfaced by `ccpatch doctor`.
 function checkVerifyLocal(verify, code) {
-  const issues = [];
-  const presents = toList(verify.present);
-  const absents  = toList(verify.absent);
-  for (const s of presents) if (!code.includes(s)) issues.push(`verify.present missing: ${s.slice(0, 60)}`);
-  for (const s of absents)  if (code.includes(s))  issues.push(`verify.absent still present: ${s.slice(0, 60)}`);
-  if (verify.count !== undefined && verify.count !== null) {
-    const c = typeof verify.count === 'number' ? { present: verify.count } : verify.count;
-    const count = (needle) => {
-      let n = 0, idx = 0;
-      while ((idx = code.indexOf(needle, idx)) !== -1) { n++; idx += needle.length; }
-      return n;
-    };
-    if (typeof c.present === 'number') {
-      const total = presents.reduce((n, s) => n + count(s), 0);
-      if (total !== c.present) issues.push(`expected count.present=${c.present}, actual=${total}`);
-    }
-    if (typeof c.absent === 'number') {
-      const total = absents.reduce((n, s) => n + count(s), 0);
-      if (total !== c.absent) issues.push(`expected count.absent=${c.absent}, actual=${total}`);
-    }
-  }
-  return issues;
+  return checkVerifyCore(verify, code, { style: 'local' });
 }
 
 function isWeakLocal(verify) {
