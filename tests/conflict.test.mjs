@@ -202,20 +202,58 @@ describe('applyNamedPatches — overlap detection', () => {
     );
   });
 
-  it('non-strict: an over-wide scatter envelope does not manufacture false overlaps', async () => {
-    const logger = mkLogger();
-    // ~400KB: patch a edits near both ends, so its cheapEditSpans envelope
-    // exceeds the 256KB imprecise threshold; patch b edits one spot inside it.
-    // Without the imprecise guard b would falsely "overlap" a's envelope.
-    const code = 'HEAD' + 'x'.repeat(199996) + 'MID' + 'y'.repeat(200000) + 'TAIL';
+  it('A2 strict: a multi-site scatter patch + a patch editing inside its envelope do not false-overlap', async () => {
+    // Patch a is a SCATTER edit: it touches two distant sites (HEAD and TAIL) on
+    // distinct lines, so structuredPatch yields two TIGHT per-hunk spans, not one
+    // envelope swallowing everything between them. Patch b edits MID, which sits
+    // strictly between a's two real edit sites. With byte-exact per-hunk spans
+    // (no over-wide envelope, no imprecise heuristic) b's span never intersects
+    // either of a's spans, so strict mode must NOT flag an overlap.
+    const code = [
+      'aHEADa',
+      'x'.repeat(2000),
+      'mMIDm',
+      'y'.repeat(2000),
+      'bTAILb',
+    ].join('\n');
     const patches = {
       a: mkPatch({ apply: (c) => c.replace('HEAD', 'HEADZ').replace('TAIL', 'TAILZ'), verify: { present: 'HEADZ', weak: true } }),
       b: mkPatch({ apply: (c) => c.replace('MID', 'MIDZ'), verify: { present: 'MIDZ', weak: true } }),
     };
-    await applyNamedPatches(code, patches, ['a', 'b'], logger); // non-strict
+    const logger = mkLogger();
+    const { code: out } = await applyNamedPatches(code, patches, ['a', 'b'], logger, { strict: true });
+    assert.ok(out.includes('HEADZ') && out.includes('MIDZ') && out.includes('TAILZ'));
     assert.ok(
       !logger.warnings.some(w => w.includes('[overlap]')),
-      `expected no false overlap from the wide envelope, got: ${JSON.stringify(logger.warnings)}`,
+      `expected no false overlap from scatter patch, got: ${JSON.stringify(logger.warnings)}`,
+    );
+  });
+
+  it('A2 strict: coordinate translation cancels an earlier insertion so a later same-region edit is judged in the original frame', async () => {
+    // Patch a INSERTS a large block on an early line, shifting every byte after
+    // it forward by ~len(block) in b's pre-apply frame. Patch b edits a DISTINCT
+    // later line. Pre-A2 the detector compared a's pre-frame span against b's
+    // post-A (shifted) span without correcting for a's net delta — incidental
+    // alignment of those mismatched offsets could manufacture a false overlap.
+    // After A2 both spans are translated into the shared original frame
+    // (b's span has a's insertion delta subtracted back out), so they're judged
+    // on the bytes they truly touched and stay disjoint → no overlap.
+    const block = 'Z'.repeat(4000);
+    const code = [
+      'top INSERT_HERE end',
+      'l1', 'l2', 'l3', 'l4', 'l5', 'l6',
+      'bottom EDIT_HERE end',
+    ].join('\n');
+    const patches = {
+      a: mkPatch({ apply: (c) => c.replace('INSERT_HERE', 'INSERT_HERE' + block), verify: { present: block, weak: true } }),
+      b: mkPatch({ apply: (c) => c.replace('EDIT_HERE', 'EDITED'), verify: { present: 'EDITED', weak: true } }),
+    };
+    const logger = mkLogger();
+    const { code: out } = await applyNamedPatches(code, patches, ['a', 'b'], logger, { strict: true });
+    assert.ok(out.includes(block) && out.includes('EDITED'));
+    assert.ok(
+      !logger.warnings.some(w => w.includes('[overlap]')),
+      `expected disjoint edits judged in original frame, got: ${JSON.stringify(logger.warnings)}`,
     );
   });
 

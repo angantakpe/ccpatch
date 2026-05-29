@@ -2,10 +2,10 @@ import { mkdirSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { structuredPatch, applyPatch } from 'diff';
 import { validateManifest } from './manifest.mjs';
-import { fuzzyMatch } from './anchors.mjs';
 import { resolveAt } from './at-selector.mjs';
 import { compileKind } from './patch-kinds.mjs';
 import { diffSpansFromPatch, detectOverlapsInPhase } from './conflict.mjs';
+import { buildDriftRecord } from './drift-record.mjs';
 import { fireHook } from './lifecycle.mjs';
 import { injectCoverageHit } from './coverage.mjs';
 import { captureReverseDiff } from './reverse-diff.mjs';
@@ -14,13 +14,6 @@ import { checkVerifyCore } from './verify-core.mjs';
 import { getResolvedVariant } from './loader.mjs';
 
 const PHASE_ORDER = { pre: 0, main: 1, post: 2 };
-
-// Non-strict overlap trace: a cheapEditSpans envelope wider than this is treated
-// as a scatter-patch footprint too coarse to compare for overlap (see the
-// non-strict trace branch below). 256 KB clears any single contiguous injection
-// (the largest patch hooks are tens of KB) while catching the multi-MB envelopes
-// that scatter patches produce.
-const IMPRECISE_SPAN_BYTES = 256 * 1024;
 
 function phaseOf(patch) {
   return patch?.phase ?? 'main';
@@ -181,83 +174,55 @@ export function applyFallbackDiff(preCode, normalized, name, patchOptions, logge
  * @returns {{candidates: Array, verifyFailed: string[], probesCount: number, alertLine: string}}
  */
 export function detectDrift(preCode, normalized, name, patchOptions) {
-  const declaredLiteral = normalized.anchor?.literal ?? null;
-  const presents = Array.isArray(normalized.verify?.present)
-    ? normalized.verify.present
-    : (normalized.verify?.present ? [normalized.verify.present] : []);
-  const absents = Array.isArray(normalized.verify?.absent)
-    ? normalized.verify.absent
-    : (normalized.verify?.absent ? [normalized.verify.absent] : []);
-
-  // Probes ordered by signal strength: declared literal > present > absent.
-  const probes = [];
-  if (declaredLiteral) probes.push({ source: 'anchor.literal', value: declaredLiteral });
-  for (const p of presents) probes.push({ source: 'verify.present', value: p });
-  for (const a of absents) probes.push({ source: 'verify.absent', value: a });
-
-  const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const seenOffsets = new Set();
-  const candidates = [];
-  for (const { source, value } of probes) {
-    if (typeof value !== 'string' || value.length < 4) continue;
-    const hits = fuzzyMatch(preCode, new RegExp(escapeRe(value)));
-    for (const h of hits) {
-      // Dedupe within 50 bytes across probes.
-      const bucket = Math.floor(h.offset / 50);
-      if (seenOffsets.has(bucket)) continue;
-      seenOffsets.add(bucket);
-      candidates.push({
-        source,
-        probe: value.slice(0, 80),
-        offset: h.offset,
-        score: h.score,
-        snippet: h.snippet.slice(0, 120),
-      });
-      if (candidates.length >= 3) break;
-    }
-    if (candidates.length >= 3) break;
-  }
-
-  // verify_failed: which checks would have failed on the unchanged code.
-  const verifyFailed = [];
-  for (const p of presents) {
-    if (!preCode.includes(p)) verifyFailed.push(`verify.present missing: ${p.slice(0, 80)}`);
-  }
-  for (const a of absents) {
-    if (preCode.includes(a)) verifyFailed.push(`verify.absent still present: ${a.slice(0, 80)}`);
-  }
-
-  const alertLine = JSON.stringify({
-    ts: new Date().toISOString(),
-    type: 'anchor-drift',
-    patch: name,
-    version: patchOptions.version ?? null,
-    anchor: {
-      id: name,
-      literal: declaredLiteral,
-      verify_present: presents.map(s => s.slice(0, 80)),
-      verify_absent: absents.map(s => s.slice(0, 80)),
+  // A5: forensics now live in the shared buildDriftRecord() helper. This wrapper
+  // keeps detectDrift's existing return shape (the caller reads candidates,
+  // probesCount, alertLine) and the legacy runner JSONL schema (no source/
+  // status/detail fields) by NOT passing those meta keys.
+  const { candidates, verifyFailed, probesCount, record } = buildDriftRecord(
+    preCode,
+    {
+      literal: normalized.anchor?.literal ?? null,
+      present: normalized.verify?.present,
+      absent: normalized.verify?.absent,
     },
-    candidates,
-    verify_failed: verifyFailed,
-  });
-
-  return { candidates, verifyFailed, probesCount: probes.length, alertLine };
+    { patchName: name, version: patchOptions.version ?? null },
+  );
+  return { candidates, verifyFailed, probesCount, alertLine: JSON.stringify(record) };
 }
 
 /**
- * Append the overlap-conflicts JSONL sidecar. Best-effort; failures swallowed.
+ * S5: build a run-scoped "warn once" reporter for storage-write failures. The
+ * FIRST failed artifact write in a run emits one logger.warn; subsequent ones
+ * stay quiet so a broken storage dir doesn't spam the log. State lives on the
+ * returned closure (run-scoped), NOT a module global — concurrent runs each get
+ * their own latch.
+ *
+ * @param {object} logger
+ * @returns {(label: string, err: Error) => void}
+ */
+export function makeStorageWarnOnce(logger) {
+  let warned = false;
+  return (label, err) => {
+    if (warned) return;
+    warned = true;
+    logger.warn?.(`  [!] Storage write failed (${label}): ${err.message}. Further storage-write failures this run will be silent.`);
+  };
+}
+
+/**
+ * Append the overlap-conflicts JSONL sidecar. Best-effort; the first failure of
+ * the run is surfaced via warnStorageOnce (S5), the rest stay quiet.
  * Kept separate from the coverage/results writes because it must run BEFORE the
  * strict-mode failure throw (the original code wrote conflicts pre-throw and
  * coverage/results post-throw).
  */
-export function writeConflictsArtifact(allConflicts) {
+export function writeConflictsArtifact(allConflicts, warnStorageOnce) {
   if (allConflicts.length === 0) return;
   try {
     mkdirSync('storage/outputs', { recursive: true });
     const out = allConflicts.map(c => JSON.stringify(c)).join('\n') + '\n';
     appendFileSync(join('storage/outputs', 'patch-conflicts.jsonl'), out, 'utf8');
-  } catch (_) { /* non-fatal */ }
+  } catch (err) { warnStorageOnce?.('patch-conflicts.jsonl', err); }
 }
 
 /**
@@ -276,7 +241,7 @@ export function writeConflictsArtifact(allConflicts) {
  * @param {(p:object)=>string} args.phaseOf  phase resolver
  * @param {object} args.logger
  */
-export function writeApplyArtifacts({ results, patches, phaseTraces, patchOptions, phaseOf, logger }) {
+export function writeApplyArtifacts({ results, patches, phaseTraces, patchOptions, phaseOf, logger, warnStorageOnce }) {
   // 1) Apply-time coverage manifest. Always emitted; versioned filename when
   // version is known so multiple builds don't clobber each other.
   // Cross-referenced by `ccpatch coverage` against runtime hits.
@@ -293,7 +258,13 @@ export function writeApplyArtifacts({ results, patches, phaseTraces, patchOption
       const phase = phaseOf(patch);
       const applied = status === 'applied' || status === 'applied-fallback' || status === 'no-change-ok';
       const phaseTrace = (phaseTraces[phase] || []).find(t => t.name === name);
-      const diffSpans = phaseTrace ? phaseTrace.diffSpans.length : 0;
+      // S4: prefer the cheap diffSpanCount (1/0, or exact strict count) — the
+      // full span array may never have been materialised in non-strict mode.
+      // Fall back to diffSpans.length for traces that carry only the array
+      // (e.g. hand-built traces in unit tests / external callers).
+      const diffSpans = phaseTrace
+        ? (phaseTrace.diffSpanCount ?? (Array.isArray(phaseTrace.diffSpans) ? phaseTrace.diffSpans.length : 0))
+        : 0;
       let reason = null;
       if (status === 'no-change') reason = 'no-change';
       else if (status === 'skipped') reason = 'skipped';
@@ -307,7 +278,8 @@ export function writeApplyArtifacts({ results, patches, phaseTraces, patchOption
     const covPath = join('storage/outputs', `coverage-apply-${tag}.json`);
     writeFileSync(covPath, JSON.stringify(coverageManifest, null, 2), 'utf8');
   } catch (err) {
-    logger.warn?.(`  [!] Could not write coverage-apply manifest: ${err.message}`);
+    // S5: route through the run-scoped warn-once latch.
+    warnStorageOnce?.('coverage-apply manifest', err);
   }
 
   // 2) Patch-results catalog (only when version is known). Decorated with the
@@ -329,7 +301,8 @@ export function writeApplyArtifacts({ results, patches, phaseTraces, patchOption
       }, null, 2), 'utf8');
       logger.log(`  [+] Patch results written to ${outPath}`);
     } catch (err) {
-      logger.warn(`  [!] Could not write patch results catalog: ${err.message}`);
+      // S5: route through the run-scoped warn-once latch.
+      warnStorageOnce?.('patch-results catalog', err);
     }
   }
 }
@@ -337,6 +310,8 @@ export function writeApplyArtifacts({ results, patches, phaseTraces, patchOption
 export async function applyNamedPatches(code, patches, patchNames, logger = console, patchOptions = {}) {
   let nextCode = code;
   const results = {};
+  // S5: run-scoped latch — first storage-write failure warns, rest stay quiet.
+  const warnStorageOnce = makeStorageWarnOnce(logger);
   const globalStrict = patchOptions.strict === true;
   const failures = [];
   // Per-phase trace for overlap detection.
@@ -607,8 +582,12 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
           // this block keeps the fs write + logging + report push.
           try {
             const { candidates, probesCount, alertLine } = detectDrift(preCode, normalized, name, patchOptions);
-            mkdirSync('storage/outputs', { recursive: true });
-            appendFileSync(join('storage/outputs', 'anchor-drift.jsonl'), alertLine + '\n', 'utf8');
+            // S5: surface only the FIRST storage failure of the run; the
+            // candidate logging below still runs regardless of the write.
+            try {
+              mkdirSync('storage/outputs', { recursive: true });
+              appendFileSync(join('storage/outputs', 'anchor-drift.jsonl'), alertLine + '\n', 'utf8');
+            } catch (err) { warnStorageOnce('anchor-drift.jsonl', err); }
 
             if (candidates.length > 0) {
               drifts.push({ name, candidates: candidates.slice() });
@@ -639,52 +618,56 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
             effectiveCode = instrumented;
           }
         }
-        // Record per-patch trace for overlap detection. Compute diff spans from
-        // a structuredPatch (pre → effective) so trace reflects what really
-        // landed — including a fallback-diff application when apply() no-op'd.
+        // Record per-patch trace for overlap detection.
         //
-        // PERF1: the full structuredPatch is a ~O(n) line-diff over the whole
-        // ~16MB bundle PER mutating patch, but its precise multi-hunk ranges are
-        // ONLY load-bearing in strict mode, where detectOverlapsInPhase() turns
-        // overlaps into FATAL errors. In non-strict mode overlaps are merely
-        // logged as warnings, so an exact hunk decomposition is overkill. We
-        // therefore gate the structuredPatch behind globalStrict and, when
-        // non-strict, record a single cheap edit-range computed by a two-ended
-        // O(n) divergence scan ([firstDiff, lastDiff)). This keeps non-strict
-        // overlap WARNINGS firing (coarser, but still detects touching regions)
-        // and keeps the coverage-apply manifest's diffSpans count meaningful
-        // (1 span when the patch changed code, 0 when it didn't). The strict
-        // path is byte-identical to before, so fatal overlap ranges are unchanged.
+        // A2: all recorded ranges are translated into ONE shared coordinate
+        // frame — original-bundle offsets — by subtracting `deltaBefore`, the
+        // net length change all prior patches introduced (preCode.length minus
+        // the original bundle length). preCode for this patch is exactly
+        // original+prior-deltas, so this collapses every patch's spans/at-sites
+        // into the same frame and detectOverlapsInPhase() can compare them
+        // like-for-like. (The old code compared A's preCode offsets to B's
+        // post-A offsets and "corrected" by skipping wide envelopes via an
+        // IMPRECISE_SPAN_BYTES heuristic; correct coordinates make that
+        // unnecessary, so both the heuristic and the `imprecise` flag are gone.)
+        //
+        // S4: in non-strict mode the actual diffSpans scan is DEFERRED. Overlap
+        // is impossible in a phase with <2 traced patches, so for those the scan
+        // never runs — the trace only needs a cheap changed/0-or-1 count for the
+        // coverage-apply manifest. We stash the raw inputs (preCode, effective
+        // code, frame offset) and resolve spans lazily at detection time, and
+        // only for phases that actually have ≥2 patches. Strict mode still
+        // computes exact per-hunk spans eagerly (they back FATAL overlaps).
         try {
           const phaseKey = phaseOf(patch);
-          let diffSpans = [];
-          let imprecise = false;
-          if (typeof effectiveCode === 'string' && effectiveCode !== preCode) {
-            if (globalStrict) {
-              const sp = structuredPatch(name, name, preCode, effectiveCode, 'pre', 'post', { context: 0 });
-              diffSpans = diffSpansFromPatch(preCode, sp);
-            } else {
-              diffSpans = cheapEditSpans(preCode, effectiveCode);
-              // cheapEditSpans collapses a scatter-edit patch to a single
-              // [first,last] envelope. For a patch that edits many distant sites
-              // (e.g. unhide_features touches ~14 flags across a multi-MB region)
-              // that envelope swallows any patch editing inside it and would
-              // manufacture false overlaps. Flag an implausibly wide envelope as
-              // imprecise so the overlap detector skips it in non-strict mode.
-              // Strict mode never hits this path — it uses exact per-hunk spans.
-              if (diffSpans.length === 1
-                  && diffSpans[0][1] - diffSpans[0][0] > IMPRECISE_SPAN_BYTES) {
-                imprecise = true;
-              }
-            }
+          const changed = typeof effectiveCode === 'string' && effectiveCode !== preCode;
+          // Net delta introduced before this patch ran (shared-frame shift).
+          const deltaBefore = preCode.length - code.length;
+          const shift = (spans) => spans.map(([s, e]) => [s - deltaBefore, e - deltaBefore]);
+          let diffSpans = null;        // null => not yet computed (non-strict, lazy)
+          let diffSpanCount = changed ? 1 : 0; // cheap count for the coverage manifest
+          if (changed && globalStrict) {
+            const sp = structuredPatch(name, name, preCode, effectiveCode, 'pre', 'post', { context: 0 });
+            diffSpans = shift(diffSpansFromPatch(preCode, sp));
+            diffSpanCount = diffSpans.length;
           }
+          // at-sites resolved on beforeCode (== preCode frame) → shift to original.
+          const atSitesShifted = atSites
+            ? atSites.map(s => ({ ...s, start: s.start - deltaBefore, end: (s.end ?? s.start) - deltaBefore }))
+            : null;
           phaseTraces[phaseKey] = phaseTraces[phaseKey] || [];
           phaseTraces[phaseKey].push({
             name,
             phase: phaseKey,
-            atSites: atSites ? atSites.slice() : null,
-            diffSpans,
-            imprecise,
+            atSites: atSitesShifted,
+            diffSpans,        // resolved now (strict) or lazily (non-strict, see below)
+            diffSpanCount,    // S4: cheap 1/0 count for coverage-apply manifest
+            changed,
+            // Lazy-span inputs (non-strict): kept so detectOverlaps can compute
+            // spans only when the phase has ≥2 patches.
+            _preCode: changed ? preCode : null,
+            _effectiveCode: changed ? effectiveCode : null,
+            _deltaBefore: deltaBefore,
             allowOverlapWith: Array.isArray(normalized.allowOverlapWith) ? normalized.allowOverlapWith : [],
           });
         } catch (_) { /* trace is best-effort */ }
@@ -742,6 +725,18 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
   for (const phaseKey of ['pre', 'main', 'post']) {
     const traces = phaseTraces[phaseKey] || [];
     if (traces.length < 2) continue;
+    // S4: only NOW — with ≥2 patches in this phase, so an overlap is actually
+    // possible — do we materialise the non-strict diffSpans that were deferred
+    // at apply time. cheapEditSpans is the ~16MB two-ended scan we were trying
+    // to avoid; running it lazily skips it entirely for single-patch phases.
+    // Spans are translated into the shared original-bundle frame via the stored
+    // _deltaBefore so detectOverlapsInPhase compares like-for-like (A2).
+    for (const t of traces) {
+      if (t.diffSpans !== null) continue; // strict already computed (and shifted)
+      if (!t.changed || t._preCode === null) { t.diffSpans = []; continue; }
+      const raw = cheapEditSpans(t._preCode, t._effectiveCode);
+      t.diffSpans = raw.map(([s, e]) => [s - t._deltaBefore, e - t._deltaBefore]);
+    }
     const conflicts = detectOverlapsInPhase(traces);
     for (const c of conflicts) {
       const aTrace = traces.find(t => t.name === c.a);
@@ -774,7 +769,7 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
   }
   // Conflicts JSONL is written BEFORE the strict-failure throw (so a strict
   // build that aborts still leaves the conflict forensics behind). ARCH1.
-  writeConflictsArtifact(allConflicts);
+  writeConflictsArtifact(allConflicts, warnStorageOnce);
 
   if (failures.length > 0) {
     const mode = globalStrict ? 'strict mode' : 'required patches';
@@ -784,7 +779,7 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
   }
 
   // ARCH1: coverage-apply manifest + patch-results catalog, consolidated.
-  writeApplyArtifacts({ results, patches, phaseTraces, patchOptions, phaseOf, logger });
+  writeApplyArtifacts({ results, patches, phaseTraces, patchOptions, phaseOf, logger, warnStorageOnce });
 
   // Return shape (LOCKED contract — see cli.mjs apply path which reads .code +
   // .report defensively): the patched bundle (`code`), the per-patch outcome

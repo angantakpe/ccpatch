@@ -82,19 +82,20 @@ export function rangesIntersect(a, b) {
 
 /**
  * Detect overlap conflicts among patches that ran in the same phase.
- *   trace: array of { name, phase, atSitesOriginal, diffSpansPre, preCodeLen, allowOverlapWith }
+ *   trace: array of { name, phase, atSites, diffSpans, allowOverlapWith }
  * Where:
- *   atSitesOriginal — atSites recorded in the code state immediately before
- *                     this patch applied (post-previous-patches code state).
- *   diffSpansPre    — byte ranges in the pre-apply code that the patch touched.
+ *   atSites   — resolved @At sites, TRANSLATED to original-bundle offsets.
+ *   diffSpans — byte ranges the patch touched, TRANSLATED to original-bundle
+ *               offsets.
  *
  * Returns array of conflicts: { phase, a, b, kind, rangeA, rangeB }.
  *
- * Note: because each patch sees a different code state, "comparing ranges
- * across patches" is approximate. We compare A's diff span (in A's preCode) to
- * B's at/diff span (in B's preCode = post-A code). Offsets shift by the net
- * delta A introduced; we don't correct for that. The check is a smell detector,
- * not a proof — false positives are possible when ranges incidentally align.
+ * A2: every range in every trace is expressed in a SINGLE shared coordinate
+ * frame (original-bundle offsets) — the caller (runner.applyNamedPatches)
+ * subtracts each patch's cumulative net-length delta before pushing here. So
+ * comparing A's spans to B's spans is now like-for-like, not approximate: a
+ * later patch editing inside an earlier patch's original envelope only
+ * intersects if it genuinely touches the same original bytes.
  */
 export function detectOverlapsInPhase(traces) {
   const conflicts = [];
@@ -102,7 +103,7 @@ export function detectOverlapsInPhase(traces) {
     for (let j = i + 1; j < traces.length; j++) {
       const A = traces[i];
       const B = traces[j];
-      // at-vs-at: compare resolved sites (in their respective code states).
+      // at-vs-at: compare resolved sites (in the shared original frame).
       if (A.atSites && B.atSites) {
         for (const sa of A.atSites) {
           for (const sb of B.atSites) {
@@ -116,12 +117,8 @@ export function detectOverlapsInPhase(traces) {
           }
         }
       }
-      // Skip patches whose span was flagged imprecise (a too-wide non-strict
-      // cheapEditSpans envelope). Comparing such a coarse footprint manufactures
-      // false overlaps; strict mode never sets this (it uses exact per-hunk spans).
-      const impreciseDiff = A.imprecise || B.imprecise;
       // at-vs-diff: B's resolved at-sites intersect A's diff span.
-      if (!impreciseDiff && B.atSites && A.diffSpans) {
+      if (B.atSites && A.diffSpans) {
         for (const sb of B.atSites) {
           for (const ra of A.diffSpans) {
             if (rangesIntersect(ra, [sb.start, sb.end || sb.start + 1])) {
@@ -134,8 +131,8 @@ export function detectOverlapsInPhase(traces) {
           }
         }
       }
-      // diff-vs-diff: both patches touched overlapping byte ranges (approx).
-      if (!impreciseDiff && A.diffSpans && B.diffSpans) {
+      // diff-vs-diff: both patches touched overlapping byte ranges.
+      if (A.diffSpans && B.diffSpans) {
         for (const ra of A.diffSpans) {
           for (const rb of B.diffSpans) {
             if (rangesIntersect(ra, rb)) {
