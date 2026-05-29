@@ -118,7 +118,42 @@ export default {
   description: 'Expose native AgentTool (vC7.call) via globalThis.__ccpAgentTool for background heartbeat dispatch.',
   capabilities: ["tools"],
   dependsOn: ['subagent_hooks_stub'],
-  verify: { present: '__ccpAgentTool', label: 'Expose AgentTool', weak: true },
+  // G1: this patch shares benign injection seams (shebang/module-top prepend +
+  // shared registry/loop sites) with several other extension patches. The diff
+  // ranges intersect but the edits don't clobber each other — acknowledge the
+  // overlap with every benign peer here on the owned side.
+  allowOverlapWith: [
+    'project_root',
+    'grep_shadow',
+    'large_content_guard',
+    'durable_cron',
+    'loop_dynamic',
+    'unhide_features',
+    'force_thinking',
+    'expose_api_client',
+    'block_tools',
+    'save_conversations',
+    'session_timer',
+    'webhook',
+    'cache_responses',
+    'input_bar_color',
+  ],
+  // G3: strengthened from present-only to a real count. Both present strings are
+  // asserted, and count.present pins the TOTAL occurrences across them.
+  //   - '_ccpBootErr_' = 3 (bootstrap IIFE catch + provide try/catch text):
+  //     validated stable at 3 after a correct apply (0 before).
+  //   - 'globalThis.__ccpAgentTool?._capture?.(' = 1 once the G2 early-prime
+  //     re-anchor lands — asserts the re-anchor succeeded (it is the ONLY
+  //     occurrence of this optional-chain capture call; the bootstrap uses
+  //     `this._capture(`/`._capture(` forms instead, which do not match).
+  // checkVerifyCore sums count.present across ALL present strings, so the pinned
+  // total is 3 + 1 = 4. Validated by applying apply() to the 2.1.156 bundle and
+  // counting (see /tmp/verify_g3.mjs): _ccpBootErr_=3, capture-call=1.
+  verify: {
+    present: ['_ccpBootErr_', 'globalThis.__ccpAgentTool?._capture?.('],
+    count: { present: 4 },
+    label: 'Expose AgentTool',
+  },
 
   apply: (code) => {
     // Idempotency guard: check for a string that only exists when this patch's bootstrap was applied.
@@ -439,17 +474,51 @@ try {
     //   v2.1.139: let m=Z();for(let F=0;F<R.length;F++){
     //   v2.1.140: let m=Z();for(let F=0;F<C.length;F++){
     //   v2.1.146: let x=G();for(let Q=0;Q<C.length;Q++){
-    // The local var, accessor fn, and loop index rotate; the input-batch
-    // array (`C`) and `.length` stay stable. Match the shape and reuse the
-    // captured names in the replacement.
-    const earlyRe = /let ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\);for\(let ([A-Za-z_$][\w$]*)=0;\3<C\.length;\3\+\+\)\{/;
-    const earlyMatch = code.match(earlyRe);
-    if (!earlyMatch) {
-      console.warn('  [!] expose_agent_tool: early prime anchor (bm4-style query loop) not found — falling back to AgentTool.call() only');
+    //   v2.1.156: let x=Z();for(let U=0;U<I.length;U++){   (loop-array renamed C→I)
+    // The local var, accessor fn, loop index AND the input-batch array name all
+    // rotate. On 2.1.156 the loop array is no longer literally `C` (it's `I`),
+    // so the old `C.length`-pinned regex misses and the patch falls back to
+    // AgentTool.call() only — defeating prime-on-boot.
+    //
+    // Tier 1 (primary): generalize the loop array to a captured group and match
+    // ALL such loops globally. The defining property of the early-prime loop is
+    // that the context var (`let CTX=FN()`) is DISTINCT from the array being
+    // iterated (`CTX !== ARR`) — the bm4 query loop snapshots a fresh ctx then
+    // iterates a separate input batch. The decoy loop (`let H=Bb$();...H.length`)
+    // iterates its own array, so CTX===ARR filters it out. Validated on 2.1.156:
+    // exactly ONE match satisfies CTX!==ARR — the `let x=Z();for(let U=0;U<I.length;U++){`
+    // loop. The replacement injects the capture using the CAPTURED array name
+    // (`${ARR}`), never a literal.
+    //
+    // Tier 2 (fallback): the historical `C.length`-literal form, retained for
+    // older bundles where the loop array is literally `C`.
+    const earlyGlobalRe = /let ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\);for\(let ([A-Za-z_$][\w$]*)=0;\3<([A-Za-z_$][\w$]*)\.length;\3\+\+\)\{/g;
+    const earlyCandidates = [];
+    let __em;
+    while ((__em = earlyGlobalRe.exec(code)) !== null) {
+      const [whole, CTXVAR, CTXFN, LOOPVAR, ARR] = __em;
+      if (CTXVAR !== ARR) earlyCandidates.push({ whole, CTXVAR, CTXFN, LOOPVAR, ARR });
+    }
+    if (earlyCandidates.length === 1) {
+      // Primary tier: unique CTX!==ARR loop. Use the captured array name.
+      const { whole, CTXVAR, CTXFN, LOOPVAR, ARR } = earlyCandidates[0];
+      const earlyReplacement = `let ${CTXVAR}=${CTXFN}();try{globalThis.__ccpAgentTool?._capture?.(${CTXVAR});}catch(_ccpEP_){}for(let ${LOOPVAR}=0;${LOOPVAR}<${ARR}.length;${LOOPVAR}++){`;
+      code = code.replace(whole, earlyReplacement);
     } else {
-      const [earlyWhole, CTXVAR, CTXFN, LOOPVAR] = earlyMatch;
-      const earlyReplacement = `let ${CTXVAR}=${CTXFN}();try{globalThis.__ccpAgentTool?._capture?.(${CTXVAR});}catch(_ccpEP_){}for(let ${LOOPVAR}=0;${LOOPVAR}<C.length;${LOOPVAR}++){`;
-      code = code.replace(earlyWhole, earlyReplacement);
+      // Fallback tier: historical `C.length`-literal form.
+      const earlyRe = /let ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\);for\(let ([A-Za-z_$][\w$]*)=0;\3<C\.length;\3\+\+\)\{/;
+      const earlyMatch = code.match(earlyRe);
+      if (!earlyMatch) {
+        if (earlyCandidates.length > 1) {
+          console.warn(`  [!] expose_agent_tool: early prime anchor ambiguous (${earlyCandidates.length} CTX!==ARR loops) and no C.length fallback — falling back to AgentTool.call() only`);
+        } else {
+          console.warn('  [!] expose_agent_tool: early prime anchor (bm4-style query loop) not found — falling back to AgentTool.call() only');
+        }
+      } else {
+        const [earlyWhole, CTXVAR, CTXFN, LOOPVAR] = earlyMatch;
+        const earlyReplacement = `let ${CTXVAR}=${CTXFN}();try{globalThis.__ccpAgentTool?._capture?.(${CTXVAR});}catch(_ccpEP_){}for(let ${LOOPVAR}=0;${LOOPVAR}<C.length;${LOOPVAR}++){`;
+        code = code.replace(earlyWhole, earlyReplacement);
+      }
     }
 
     // ── 3. FALLBACK PRIME — snapshot on first AgentTool.call() ───────────────
