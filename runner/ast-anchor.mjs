@@ -8,23 +8,59 @@ import { getAst } from './ast-cache.mjs';
  * findFunctionByLiteral() previously called code.indexOf(needle, 0) on every
  * invocation. For a 16 MB bundle and 30+ declarative patches each searching
  * for multiple literals, that's a lot of redundant scans. We lazily build a
- * literal→offsets[] index keyed by the bundle's string identity and reuse
- * it for the lifetime of that bundle. The index is intentionally scoped per
- * `code` value (WeakMap-style via identity check) — when the runner mutates
- * the bundle string a new instance is created and the index naturally
- * invalidates.
+ * literal→offsets[] index keyed by the bundle's `code` string and reuse it
+ * for the lifetime of that bundle.
+ *
+ * The original implementation kept a single (bundleIndexCode, bundleIndexMap)
+ * pair: a 1-entry process-global. When two bundles were processed in an
+ * interleaved fashion (e.g. concurrent applyNamedPatches calls, or a verify
+ * pass against pre/post snapshots), every cross-bundle call thrashed the
+ * single slot — discarding a freshly-built index and rebuilding from scratch.
+ *
+ * We now keep a real per-code cache. The spec calls for a
+ * `WeakMap<code, Map<literal, number[]>>`, but JS WeakMap keys MUST be objects
+ * (or symbols) — a raw string primitive is rejected. Since findFunctionByLiteral
+ * takes a raw string and its signature is locked, we use the practical
+ * equivalent: a plain `Map<code, Map<literal, number[]>>` bounded by a small
+ * LRU so distinct interleaved bundles coexist without evicting each other,
+ * while still letting old bundle strings be GC'd once they age out of the LRU.
+ * resetBundleIndex() clears the whole cache for test isolation.
  */
-let bundleIndexCode = null;
-let bundleIndexMap = null;   // Map<literal, number[]>
+const MAX_CACHED_BUNDLES = 8;
+const bundleIndexCache = new Map(); // Map<code, Map<literal, number[]>>, insertion-ordered LRU
 
 /**
- * Reset the cached per-bundle index. Called from the runner between bundles
- * to avoid pinning stale references; not required for correctness (identity
- * check below covers it) but useful for test isolation.
+ * Reset the cached per-bundle index. Useful for test isolation; clears every
+ * cached bundle. Note: there are currently no in-repo runner callers — the
+ * per-code keying above already prevents cross-bundle thrash without an
+ * explicit reset. Kept exported (signature locked) for tests and any future
+ * wiring.
  */
 export function resetBundleIndex() {
-  bundleIndexCode = null;
-  bundleIndexMap = null;
+  bundleIndexCache.clear();
+}
+
+/**
+ * Fetch (or lazily create) the literal→offsets map for a given `code` string,
+ * touching it as most-recently-used and evicting the oldest bundle when the
+ * cache exceeds MAX_CACHED_BUNDLES.
+ */
+function indexForCode(code) {
+  let litMap = bundleIndexCache.get(code);
+  if (litMap === undefined) {
+    litMap = new Map();
+    bundleIndexCache.set(code, litMap);
+    if (bundleIndexCache.size > MAX_CACHED_BUNDLES) {
+      // Evict the least-recently-used (oldest insertion) bundle.
+      const oldestKey = bundleIndexCache.keys().next().value;
+      bundleIndexCache.delete(oldestKey);
+    }
+  } else {
+    // Mark as most-recently-used: re-insert to move to the end of the order.
+    bundleIndexCache.delete(code);
+    bundleIndexCache.set(code, litMap);
+  }
+  return litMap;
 }
 
 function indexOfAll(code, needle, cap = 64) {
@@ -42,14 +78,11 @@ function indexOfAll(code, needle, cap = 64) {
 }
 
 function offsetsFor(code, needle) {
-  if (bundleIndexCode !== code) {
-    bundleIndexCode = code;
-    bundleIndexMap = new Map();
-  }
-  let hits = bundleIndexMap.get(needle);
+  const litMap = indexForCode(code);
+  let hits = litMap.get(needle);
   if (hits === undefined) {
     hits = indexOfAll(code, needle);
-    bundleIndexMap.set(needle, hits);
+    litMap.set(needle, hits);
   }
   return hits;
 }
