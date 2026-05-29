@@ -183,7 +183,7 @@ patch-claude-code: ## Apply the standard profile: make patch-claude-code [VERSIO
 	if [ ! -f "$$SRC" ]; then echo "ERROR: Could not obtain cli.js for v$(VERSION)."; exit 1; fi; \
 	echo "Using: $$SRC"; \
 	node tools/anchor-doctor.mjs "$$SRC" $(if $(PROFILE),--profile $(PROFILE),) || true; \
-	$(NODE) $(PATCH_TOOL) "$$SRC" $(OUTPUT) $(addprefix --patch ,$(subst $(comma), ,$(PATCH))) $(if $(PROFILE),--profile $(PROFILE),)
+	$(NODE) $(PATCH_TOOL) "$$SRC" $(OUTPUT) $(addprefix --patch ,$(subst $(comma), ,$(PATCH))) $(if $(PROFILE),--profile $(PROFILE),) $(if $(VERSION),--version $(VERSION),)
 	@SHA256=$$(sha256sum $(OUTPUT) | awk '{print $$1}'); \
 	echo "$$SHA256  cli.v$(VERSION).patched.mjs" > releases/$(VERSION)/cli.v$(VERSION).patched.mjs.sha256; \
 	SIZE=$$(wc -c < $(OUTPUT) | tr -d ' '); \

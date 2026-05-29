@@ -5,6 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { renderBanner } from './banner.mjs';
 import { buildJsonReport, renderTextSummary } from './build-report.mjs';
 import {
   parseAllowCapabilities,
@@ -42,8 +43,21 @@ export async function runBuild(ctx) {
     profile: options.profile,
     yamlPath,
   });
-  for (const line of resolution.notices) logger.log(line);
   let patchesToApply = resolution.selected;
+
+  // Build banner — heads the build output (mirrors the runtime boot banner).
+  if (patchesToApply.length > 0) {
+    const bannerVersion = options.patchOptions?.version || process.env.CCPATCH_CLI_VERSION || null;
+    const rows = [
+      ['profile', options.profile || 'default'],
+      ['patches', String(patchesToApply.length)],
+      ['output', path.basename(options.outputPath)],
+    ];
+    logger.log(renderBanner({ title: bannerVersion ? `ccpatch v${bannerVersion}` : 'ccpatch', rows }));
+    logger.log('');
+  }
+
+  for (const line of resolution.notices) logger.log(line);
 
   if (patchesToApply.length === 0) {
     logger.log(`No patches specified. Use --patch <name> or --patch all.`);

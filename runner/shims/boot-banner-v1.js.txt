@@ -1,0 +1,101 @@
+// ══════════════════════════════════════════════════════════════════════════
+// [PATCH] boot_banner — collect ccpatch's own boot-log lines and render them
+// inside a responsive rounded box, printed once just before Claude Code's
+// own banner. Other patches push lines via the order-independent contract:
+//
+//     (globalThis.__ccpBootBuf || (globalThis.__ccpBootBuf = [])).push([tag, msg]);
+//     if (globalThis.__ccpBootKick) globalThis.__ccpBootKick();
+//
+// The buffer is a plain array so callers never depend on this patch having run
+// first (boot injection order is non-deterministic). This installer owns the
+// debounced flush: it waits until the buffer stops growing for one tick, then
+// renders, so async boot lines (e.g. the fetch-before subscribe) are captured.
+// Width adapts to the terminal; long lines are clipped with an ellipsis.
+// ══════════════════════════════════════════════════════════════════════════
+(function __ccpBootBanner() {
+  if (globalThis.__ccpBootKick) return;
+  var TITLE = '__CCP_BOOT_TITLE__';
+  var buf = (globalThis.__ccpBootBuf || (globalThis.__ccpBootBuf = []));
+  var state = { timer: null, lastLen: -1, flushed: false, printed: 0 };
+
+  function cols() {
+    var c = (process.stderr && process.stderr.columns) ||
+            (process.stdout && process.stdout.columns) || 80;
+    return c > 0 ? c : 80;
+  }
+  function rep(ch, n) { return n > 0 ? new Array(n + 1).join(ch) : ''; }
+  function clip(s, n) {
+    s = String(s == null ? '' : s);
+    if (n <= 0) return '';
+    if (s.length <= n) return s;
+    if (n === 1) return '…';
+    return s.slice(0, n - 1) + '…';
+  }
+
+  function render(entries) {
+    var width = Math.min(cols(), 100);
+    if (width < 24) width = 24;
+    var inner = width - 2;                 // visible chars between the box bars
+
+    var tagW = 0;
+    for (var i = 0; i < entries.length; i++) {
+      var t = String(entries[i][0] == null ? '' : entries[i][0]);
+      if (t.length > tagW) tagW = t.length;
+    }
+    if (tagW > 16) tagW = 16;
+
+    var out = [];
+
+    // Top border with embedded title: ╭─ TITLE ───────╮
+    var titleSeg = ' ' + TITLE + ' ';
+    if (titleSeg.length > inner - 1) titleSeg = clip(titleSeg, inner - 1);
+    var fill = inner - 1 - titleSeg.length;
+    out.push('╭─' + titleSeg + rep('─', fill) + '╮');
+
+    // Body lines: │  tag   message            │
+    for (var j = 0; j < entries.length; j++) {
+      var tag = clip(entries[j][0], tagW);
+      var left = '  ' + tag + rep(' ', tagW - tag.length) + '  ';
+      var avail = inner - left.length;
+      var content = left + clip(entries[j][1], avail);
+      content += rep(' ', inner - content.length);
+      out.push('│' + content + '│');
+    }
+
+    // Bottom border: ╰───────────╯
+    out.push('╰' + rep('─', inner) + '╯');
+
+    return '\n' + out.join('\n') + '\n\n';
+  }
+
+  function flush() {
+    state.timer = null;
+    if (state.flushed) {
+      // Late arrivals (after the box was drawn) print as plain indented lines.
+      for (; state.printed < buf.length; state.printed++) {
+        var e = buf[state.printed];
+        try { process.stderr.write('  ' + String(e[0]) + '  ' + String(e[1]) + '\n'); } catch (_) {}
+      }
+      return;
+    }
+    // Debounce: if the buffer is still growing, wait one more tick so async
+    // boot lines land in the same box.
+    if (buf.length !== state.lastLen) {
+      state.lastLen = buf.length;
+      state.timer = setImmediate(flush);
+      return;
+    }
+    if (buf.length === 0) return;
+    state.flushed = true;
+    state.printed = buf.length;
+    try { process.stderr.write(render(buf)); } catch (_) {}
+  }
+
+  function kick() {
+    if (!state.timer) state.timer = setImmediate(flush);
+  }
+
+  globalThis.__ccpBootKick = kick;
+  // Drain anything buffered before this installer ran.
+  kick();
+})();
