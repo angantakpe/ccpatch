@@ -31,10 +31,25 @@ version: 1
 # Pass --allow-unacked on the CLI to bypass this check (legacy warn-only mode).
 # ──────────────────────────────────────────────────────────────────────────────
 ack:
+  # Core (always-on) capability patches.
   fetch_interceptor: [network]
   bun_shim: [env, network]
   project_root: [env]
   tool_result_error_content: [network]
+  # standard-profile capability patches — pre-acked so the shipped default of
+  # `make patch-claude-code` (PROFILE=standard) builds out of the box. Power-only
+  # patches (debug, webhook, save_conversations, …) remain unacked on purpose:
+  # opting into `power` is an explicit choice that should re-confirm the threat model.
+  model: [env, network]
+  context_budget_warn: [network]
+  extended_thinking: [network, env]
+  force_thinking: [env]
+  plan_mode_interview: [env]
+  tool_result_trim: [network]
+  hook_noise_mute: [exec]
+  mcp_lazy: [network]
+  dotenv_loader: [env]
+  block_tools: [env]
 
 patches:
 
