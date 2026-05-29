@@ -206,7 +206,6 @@ profiles:
     - unhide_features
     - extended_thinking
     - force_thinking
-    - plan_mode_interview
     - tool_result_trim
     - large_content_guard
     - hook_noise_mute
