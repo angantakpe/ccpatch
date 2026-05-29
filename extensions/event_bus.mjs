@@ -19,7 +19,9 @@ export default {
   category: 'infrastructure',
   description: 'Typed pub/sub event bus exposed as __ccpBus.',
   capabilities: ['telemetry'],
-  verify: { present: '__ccpBus_v1', count: { present: 1 } },
+  // Injected hook references the sentinel twice (idempotency guard + assignment),
+  // so a single clean apply yields exactly 2 occurrences. count>2 ⇒ double-applied.
+  verify: { present: '__ccpBus_v1', count: { present: 2 } },
   apply: (code) => {
     const hook = `
 // ══════════════════════════════════════════════════════════════════════════

@@ -14,7 +14,9 @@ export default {
   category: 'infrastructure',
   description: 'Shared-secret loader + constant-time compare exposed as __ccpAuth.',
   capabilities: ['env', 'fs'],
-  verify: { present: '__ccpAuth_v1', count: { present: 1 } },
+  // Injected hook references the sentinel twice (idempotency guard + assignment),
+  // so a single clean apply yields exactly 2 occurrences. count>2 ⇒ double-applied.
+  verify: { present: '__ccpAuth_v1', count: { present: 2 } },
   apply: (code) => {
     const hook = `
 // ══════════════════════════════════════════════════════════════════════════

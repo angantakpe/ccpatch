@@ -20,7 +20,9 @@ export default {
   description: 'Per-subagent cost + tool accounting tree exposed as __ccpAgentTree.',
   capabilities: ['telemetry'],
   dependsOn: ['event_bus'],
-  verify: { present: '__ccpAgentTree_v1', count: { present: 1 } },
+  // Injected hook references the sentinel twice (idempotency guard + assignment),
+  // so a single clean apply yields exactly 2 occurrences. count>2 ⇒ double-applied.
+  verify: { present: '__ccpAgentTree_v1', count: { present: 2 } },
   apply: (code) => {
     const hook = `
 // ══════════════════════════════════════════════════════════════════════════
