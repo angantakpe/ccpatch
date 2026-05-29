@@ -27,7 +27,7 @@
 
 import * as acorn from 'acorn';
 import * as walk from 'acorn-walk';
-import { findFunctionByLiteral } from './ast-anchor.mjs';
+import { findFunctionByLiteral, findEnclosingFunction } from './ast-anchor.mjs';
 import { findClosingBrace } from './brace-walker.mjs';
 import { getAst } from './ast-cache.mjs';
 
@@ -83,21 +83,17 @@ function findFunctionByBodySubstring(code, needle) {
     const hit = code.indexOf(needle, searchFrom);
     if (hit === -1) return null;
 
-    const windowStart = Math.max(0, hit - 400);
-    const back = code.slice(windowStart, hit);
-    const relFnKw = back.lastIndexOf('function ');
-    if (relFnKw === -1) { searchFrom = hit + 1; continue; }
-    const fnStart = windowStart + relFnKw;
+    // Use the shared adaptive enclosing-function resolver (ast-anchor.mjs)
+    // instead of a fixed 400-byte backward window. The old fixed window was a
+    // correctness ceiling: a substring genuinely inside a large minified
+    // function whose `function ` keyword sits >400 bytes back would fail to
+    // resolve → silent no-op → drift. The shared helper grows the window
+    // adaptively and verifies enclosure via the brace-walker.
+    const loc = findEnclosingFunction(code, hit);
+    if (loc) return loc;
 
-    const openBrace = code.indexOf('{', fnStart + 8);
-    if (openBrace === -1 || openBrace > hit) { searchFrom = hit + 1; continue; }
-    const closePos = findClosingBrace(code, openBrace);
-    if (closePos === -1 || hit > closePos) { searchFrom = hit + 1; continue; }
-
-    const fnText = code.slice(fnStart, closePos + 1);
-    const nm = fnText.match(/^function\s*([\w$]+)?\s*\(/);
-    const name = nm?.[1] ?? null;
-    return { name, start: fnStart, end: closePos + 1 };
+    // This occurrence is not inside any function; try the next occurrence.
+    searchFrom = hit + 1;
   }
   return null;
 }

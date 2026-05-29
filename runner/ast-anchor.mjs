@@ -88,6 +88,66 @@ function offsetsFor(code, needle) {
 }
 
 /**
+ * Find the `function ` keyword (start offset) of the INNERMOST function whose
+ * body encloses `litIdx`.
+ *
+ * Why this replaces the old fixed 400-byte backward window: the old code did
+ * `windowStart = litIdx - 400; back.lastIndexOf('function ')` and took the
+ * single nearest keyword. 400 bytes was chosen as a cheap cap to (a) avoid
+ * scanning the whole 16 MB bundle backward and (b) avoid false matches from
+ * far-away `function ` keywords. But it is a CORRECTNESS ceiling, not a perf
+ * knob: a literal genuinely inside a large (e.g. minified) function whose
+ * `function ` keyword sits >400 bytes earlier would silently fail to resolve →
+ * no-op → drift.
+ *
+ * Robust approach: enumerate candidate `function ` keyword starts BEFORE the
+ * literal (nearest first) and use the existing brace-walker to verify which one
+ * actually ENCLOSES the literal — i.e. litIdx lies between the body's opening
+ * brace and its matching close. The FIRST (nearest) such keyword is the
+ * innermost enclosing function. We grow the backward window adaptively (so we
+ * stay cheap for the common small-function case) and only keep expanding while
+ * we have not yet found an enclosing function, up to a sane cap. A literal that
+ * is not inside ANY function still resolves to null.
+ *
+ * @param {string} code    - Full bundle source
+ * @param {number} litIdx  - Offset of the anchor inside `code`
+ * @returns {{ fnStart: number, openBrace: number, closePos: number } | null}
+ */
+function enclosingFunctionStarts(code, litIdx) {
+  // Adaptive window: start small (covers the overwhelming common case cheaply),
+  // double on each miss, cap well above any realistic single minified function.
+  const INITIAL = 400;
+  const CAP = 1 << 20; // 1 MiB — generous ceiling for one enclosing function.
+  let window = INITIAL;
+
+  for (;;) {
+    const windowStart = Math.max(0, litIdx - window);
+    const back = code.slice(windowStart, litIdx);
+    // Collect every `function ` keyword offset in this slice, then test
+    // nearest-to-literal first so the INNERMOST enclosing function wins.
+    const candidates = [];
+    let rel = back.indexOf('function ');
+    while (rel !== -1) {
+      candidates.push(windowStart + rel);
+      rel = back.indexOf('function ', rel + 1);
+    }
+    for (let k = candidates.length - 1; k >= 0; k--) {
+      const fnStart = candidates[k];
+      const openBrace = code.indexOf('{', fnStart + 8);
+      if (openBrace === -1 || openBrace > litIdx) continue;
+      const closePos = findClosingBrace(code, openBrace);
+      if (closePos === -1 || litIdx > closePos) continue;
+      return { fnStart, openBrace, closePos };
+    }
+
+    // No enclosing function in this window. Stop once we've scanned back to the
+    // start of the file (whole prefix covered) or hit the cap; otherwise grow.
+    if (windowStart === 0 || window >= CAP) return null;
+    window *= 2;
+  }
+}
+
+/**
  * Find the innermost named function in `code` whose body contains `literal`
  * as a string argument.
  *
@@ -107,20 +167,9 @@ export function findFunctionByLiteral(code, literal) {
   const hits = offsetsFor(code, needle);
 
   for (const litIdx of hits) {
-    // Scan backward for nearest 'function' keyword before the literal.
-    const windowStart = Math.max(0, litIdx - 400);
-    const back = code.slice(windowStart, litIdx);
-    const relFnKw = back.lastIndexOf('function ');
-    if (relFnKw === -1) continue;
-    const fnStart = windowStart + relFnKw;
-
-    // Find the opening brace of the function body (skip name + params).
-    const openBrace = code.indexOf('{', fnStart + 8);
-    if (openBrace === -1 || openBrace > litIdx) continue;
-
-    // Find the matching closing brace.
-    const closePos = findClosingBrace(code, openBrace);
-    if (closePos === -1 || litIdx > closePos) continue;
+    const encl = enclosingFunctionStarts(code, litIdx);
+    if (!encl) continue;
+    const { fnStart, closePos } = encl;
 
     // Parse the extracted function text with Acorn to validate structure and get the name.
     const fnText = code.slice(fnStart, closePos + 1);
@@ -146,4 +195,23 @@ export function findFunctionByLiteral(code, literal) {
     return { name, start: fnStart, end: closePos + 1 };
   }
   return null;
+}
+
+/**
+ * Shared helper: locate the innermost function whose body encloses an anchor.
+ * Exported for sibling resolvers (patch-kinds.mjs findFunctionByBodySubstring)
+ * so the adaptive-window logic lives in exactly one place.
+ *
+ * @param {string} code   - Full bundle source
+ * @param {number} anchor - Offset of the anchor inside `code`
+ * @returns {{ name: string|null, start: number, end: number } | null}
+ */
+export function findEnclosingFunction(code, anchor) {
+  const encl = enclosingFunctionStarts(code, anchor);
+  if (!encl) return null;
+  const { fnStart, closePos } = encl;
+  const fnText = code.slice(fnStart, closePos + 1);
+  const nm = fnText.match(/^function\s*([\w$]+)?\s*\(/);
+  const name = nm?.[1] ?? null;
+  return { name, start: fnStart, end: closePos + 1 };
 }

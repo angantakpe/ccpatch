@@ -199,16 +199,6 @@ function resolveReturn(at, code) {
  */
 function resolveInvoke(at, code) {
   const call = at.target?.call;
-  let callName;
-  if (typeof call === 'string') {
-    callName = call;
-  } else if (call && typeof call === 'object' && typeof call.literal === 'string') {
-    // Resolve literal → enclosing function-call name. For now, treat the
-    // literal as the call name itself.
-    callName = call.literal;
-  } else {
-    return { ok: false, error: 'INVOKE: target.call must be a string or { literal }' };
-  }
 
   let scanStart = 0;
   let scanEnd = code.length;
@@ -219,6 +209,46 @@ function resolveInvoke(at, code) {
     scanEnd = fn.bodyEnd;
   }
 
+  let sites;
+  let describeTarget;
+  if (typeof call === 'string') {
+    sites = findCallsByName(code, call, scanStart, scanEnd);
+    describeTarget = `${call}()`;
+  } else if (call && typeof call === 'object' && typeof call.literal === 'string') {
+    // Literal-target INVOKE: resolve call sites whose ARGUMENT LIST contains the
+    // stable string literal (Chose option (a) over the old stub). The old code
+    // did `callName = call.literal` and searched for `STR(`, treating the literal
+    // as the callee name — semantically wrong: a literal is meant to pin a call
+    // by a stable string argument (minifiers rename identifiers but not string
+    // literals), exactly the contract findFunctionByLiteral already relies on.
+    // Resolving by argument is tractable from the existing bracket-walking
+    // machinery (findMatchingParen), so we implement it correctly here rather
+    // than silently resolving the wrong sites.
+    sites = findCallsByLiteralArg(code, call.literal, scanStart, scanEnd);
+    describeTarget = `call with literal ${JSON.stringify(call.literal.slice(0, 40))}`;
+  } else {
+    return { ok: false, error: 'INVOKE: target.call must be a string or { literal }' };
+  }
+
+  if (sites.length === 0) {
+    return { ok: false, error: `INVOKE: no calls (${describeTarget}) found` };
+  }
+
+  if (at.target.occurrence !== undefined) {
+    const n = at.target.occurrence;
+    if (!Number.isInteger(n) || n < 1 || n > sites.length) {
+      return { ok: false, error: `INVOKE: occurrence ${n} out of range (found ${sites.length} call(s))` };
+    }
+    return { ok: true, sites: [sites[n - 1]] };
+  }
+  return { ok: true, sites };
+}
+
+/**
+ * Find all `name(args)` call sites in code[scanStart, scanEnd) where the callee
+ * identifier is exactly `callName`. Returns INVOKE site objects.
+ */
+function findCallsByName(code, callName, scanStart, scanEnd) {
   const sites = [];
   const needle = callName + '(';
   let i = scanStart;
@@ -242,19 +272,111 @@ function resolveInvoke(at, code) {
     });
     i = parenClose + 1;
   }
+  return sites;
+}
 
-  if (sites.length === 0) {
-    return { ok: false, error: `INVOKE: no calls to ${callName}() found` };
-  }
-
-  if (at.target.occurrence !== undefined) {
-    const n = at.target.occurrence;
-    if (!Number.isInteger(n) || n < 1 || n > sites.length) {
-      return { ok: false, error: `INVOKE: occurrence ${n} out of range (found ${sites.length} call(s))` };
+/**
+ * Find all call sites in code[scanStart, scanEnd) whose argument list contains
+ * the stable string `literal` as a top-level argument. For each occurrence of
+ * the quoted literal we walk left to the opening `(` of the enclosing call,
+ * read back the callee identifier (or member expression tail), then walk the
+ * matching `)` forward and confirm the literal actually sits inside the
+ * argument range. This pins a call by its stable string argument rather than by
+ * the (minifier-renamed) callee name.
+ */
+function findCallsByLiteralArg(code, literal, scanStart, scanEnd) {
+  const quoted = JSON.stringify(literal); // double-quoted + escaped
+  const sites = [];
+  const seen = new Set(); // dedupe by call start offset
+  let from = scanStart;
+  while (from < scanEnd) {
+    let litIdx = code.indexOf(quoted, from);
+    // Also try single-quoted form, taking whichever occurs first.
+    const single = "'" + literal.replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'";
+    const singleIdx = code.indexOf(single, from);
+    if (singleIdx !== -1 && (litIdx === -1 || singleIdx < litIdx)) {
+      litIdx = singleIdx;
     }
-    return { ok: true, sites: [sites[n - 1]] };
+    if (litIdx === -1 || litIdx >= scanEnd) break;
+    from = litIdx + 1;
+
+    const call = enclosingCallAt(code, litIdx, scanStart, scanEnd);
+    if (!call) continue;
+    // Confirm the literal lies within the argument list of this call.
+    if (litIdx < call.argsStart || litIdx >= call.argsEnd) continue;
+    if (seen.has(call.start)) continue;
+    seen.add(call.start);
+    sites.push(call);
   }
-  return { ok: true, sites };
+  // Sites discovered in literal order; sort by position for stable occurrence
+  // numbering matching source order.
+  sites.sort((a, b) => a.start - b.start);
+  return sites;
+}
+
+/**
+ * Given an index `litIdx` known to fall inside a string literal, find the call
+ * expression `callee(args)` that immediately encloses it (the literal being a
+ * top-level argument). Returns an INVOKE site or null if no such call is found
+ * within [scanStart, scanEnd).
+ *
+ * Strategy: scan backward from litIdx tracking paren depth (skipping nested
+ * string literals) until we cross to depth -1 — that position is the opening
+ * `(` of the enclosing call. The callee identifier is whatever word/member
+ * tail precedes that `(`. We then forward-walk the matching `)` so the site
+ * spans the whole call expression.
+ */
+function enclosingCallAt(code, litIdx, scanStart, scanEnd) {
+  let depth = 0;
+  let i = litIdx - 1;
+  while (i >= scanStart) {
+    const c = code[i];
+    // Skip backward over a string literal if we land on its closing quote.
+    if (c === '"' || c === "'" || c === '`') {
+      const close = c;
+      i--;
+      while (i >= scanStart) {
+        if (code[i] === close && code[i - 1] !== '\\') { i--; break; }
+        i--;
+      }
+      continue;
+    }
+    if (c === ')') { depth++; i--; continue; }
+    if (c === '(') {
+      if (depth === 0) {
+        // Opening paren of the enclosing call.
+        const parenOpen = i;
+        // Read the callee identifier/member just before the paren.
+        let j = parenOpen - 1;
+        while (j >= scanStart && /\s/.test(code[j])) j--;
+        const calleeEnd = j + 1;
+        // Callee is an identifier or member chain (a.b.c). Computed access
+        // (obj[x]) and call-returning-call (f()()) are out of scope here.
+        while (j >= scanStart && /[A-Za-z0-9_$.]/.test(code[j])) j--;
+        const calleeStart = j + 1;
+        const callee = code.slice(calleeStart, calleeEnd);
+        // No callee, or a leading dot (member tail with no base) → this is a
+        // grouping paren `(...)`, not a call. Keep ascending to the next
+        // enclosing paren at the same depth.
+        if (!callee || callee.startsWith('.')) { i = parenOpen - 1; continue; }
+        const parenClose = findMatchingParen(code, parenOpen);
+        if (parenClose === -1 || parenClose > scanEnd) return null;
+        return {
+          start: calleeStart,
+          end: parenClose + 1,
+          kind: 'INVOKE',
+          label: `INVOKE ${callee}`,
+          argsStart: parenOpen + 1,
+          argsEnd: parenClose,
+        };
+      }
+      depth--;
+      i--;
+      continue;
+    }
+    i--;
+  }
+  return null;
 }
 
 function findMatchingParen(code, openPos) {
