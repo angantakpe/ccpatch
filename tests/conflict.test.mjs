@@ -1,6 +1,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { structuredPatch } from 'diff';
 import { applyNamedPatches } from '../runner/runner.mjs';
+import { diffSpansFromPatch } from '../runner/conflict.mjs';
 import { validateManifest } from '../runner/manifest.mjs';
 
 const silent = { log() {}, warn() {}, error() {} };
@@ -119,6 +121,43 @@ describe('applyNamedPatches — ordering', () => {
     // Note: input order ['b','a'] — dep edge still forces a before b.
     await applyNamedPatches('x', patches, ['b', 'a'], silent);
     assert.deepEqual(log, ['a', 'b']);
+  });
+});
+
+describe('diffSpansFromPatch — byte-exact spans', () => {
+  it('tightens to the changed bytes inside a very long (minified) line', () => {
+    // One newline-free line; the edit sits in the middle. A line-resolution
+    // span would report [0, len]; byte-exact must report just the changed run.
+    const pre = 'x'.repeat(500) + 'ALPHA' + 'y'.repeat(500);
+    const post = pre.replace('ALPHA', 'ZZZZZ');
+    const sp = structuredPatch('a', 'a', pre, post, '', '', { context: 0 });
+    const spans = diffSpansFromPatch(pre, sp);
+    assert.equal(spans.length, 1);
+    assert.deepEqual(spans[0], [500, 505]);
+  });
+
+  it('strips outer common bytes (two edits on one line collapse to one trimmed span)', () => {
+    // Both edits live on a single newline-free line, so `diff` emits ONE hunk;
+    // byte-exact trimming removes the shared 200-char prefix and suffix even
+    // though the gap between the two edits stays inside the span. The point is
+    // the span no longer covers the WHOLE line — that's what kills false overlaps.
+    const pre = 'a'.repeat(200) + 'ONE' + 'b'.repeat(2000) + 'TWO' + 'c'.repeat(200);
+    const post = pre.replace('ONE', 'XXX').replace('TWO', 'YYY');
+    const sp = structuredPatch('a', 'a', pre, post, '', '', { context: 0 });
+    const spans = diffSpansFromPatch(pre, sp);
+    assert.equal(spans.length, 1);
+    assert.deepEqual(spans[0], [200, pre.length - 200]); // outer 200a / 200c excluded
+  });
+
+  it('edits on distinct lines produce separate tight spans', () => {
+    const pre = ['x'.repeat(50) + 'ONE', 'mid'.repeat(100), 'y'.repeat(50) + 'TWO'].join('\n');
+    const post = pre.replace('ONE', 'XXX').replace('TWO', 'YYY');
+    const sp = structuredPatch('a', 'a', pre, post, '', '', { context: 0 });
+    const spans = diffSpansFromPatch(pre, sp);
+    // Two separate hunks → two small spans that don't touch.
+    assert.equal(spans.length, 2);
+    for (const [s, e] of spans) assert.ok(e - s <= 4, `span too wide: ${e - s}`);
+    assert.ok(spans[0][1] < spans[1][0], 'spans should be disjoint');
   });
 });
 
