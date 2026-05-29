@@ -28,6 +28,63 @@ Optional manifest fields you'll see in real patches: `category`, `phase` (`pre |
 
 ---
 
+## Anchoring
+
+An *anchor* is how a patch finds the place in the minified `cli.js` it needs to touch. The bundle is ~16 MB of minified code and every release rotates variable and function names — so the only durable thing to grab onto is the content the minifier *cannot* rewrite: string literals (feature-flag keys, error messages, env-var names). ccpatch supports three anchoring strategies, in descending order of preference.
+
+### 1. CANONICAL — `findFunctionByLiteral` + the `runner/anchors.mjs` registry
+
+This is the approach **new patches should use** for any function-level anchor.
+
+- **`findFunctionByLiteral(code, "stable_string")`** (`runner/ast-anchor.mjs`) scans for a stable string literal, walks backward to the enclosing `function` keyword, brace-matches the body, and validates the result with a windowed Acorn parse. It returns `{ name, start, end }` — the resolved (rotated) function name plus exact byte offsets. No regex over the whole bundle; minifier-proof because it pivots on the one token the minifier can't rename.
+- **`runner/anchors.mjs`** is the central registry that gives each anchor a stable *ID* and records its stable `literal` in one place. A version bump that drifts an anchor becomes a single-file edit instead of a hunt across 30+ patches. Read the adoption-policy comment at the top of that file (`runner/anchors.mjs:39-49`) before adding an entry.
+
+Register the literal once:
+
+```js
+// runner/anchors.mjs
+export const anchors = {
+  isLoopDynamicEnabled: {
+    literal: 'tengu_kairos_loop_dynamic',   // stable token findFunctionByLiteral() pivots on
+    default: /function ([A-Za-z_$][\w$]*)\(\)\{return [A-Za-z_$][\w$]*\("tengu_kairos_loop_dynamic",!1\)\}/,
+  },
+};
+```
+
+Then resolve it by ID from the patch — never re-typing the raw literal:
+
+```js
+// extensions/loop_dynamic.mjs
+import { findFunctionByLiteral } from '../runner/ast-anchor.mjs';
+import { resolveAnchorLiteral } from '../runner/anchors.mjs';
+
+apply: (code) => {
+  const fn = findFunctionByLiteral(code, resolveAnchorLiteral('isLoopDynamicEnabled'));
+  if (!fn) {
+    console.warn('  [!] loop_dynamic: anchor not matched — update runner/anchors.mjs for this version');
+    return code;
+  }
+  // fn.name is the rotated name; fn.start/fn.end are exact byte offsets.
+  return code.slice(0, fn.start) + 'function ' + fn.name + '(){return !0}' + code.slice(fn.end);
+},
+```
+
+Because the literal lives in the registry, the patch carries no version-specific knowledge and the only thing that ever needs editing on drift is `runner/anchors.mjs`. The same registry feeds the refmap generator (`tools/build-refmap.mjs`) and `resolveAnchor()`'s version/refmap/tier/default precedence chain — see the **Refmaps** section below.
+
+The `@At` declarative selectors (`{ function: { literal: 'STR' } }`, see the **@At selectors** section) are the manifest-level expression of this same strategy: the runner resolves them through `findFunctionByLiteral` for you before `apply()` runs.
+
+### 2. Acceptable — bare inline regex for stable, non-rotating tokens
+
+A plain `code.includes('...')` or a regex matched directly in `apply()` is fine when the anchor is a **stable string that is not expected to drift across versions** — flag keys like `"tengu_kairos_*"`, fixed module wrappers, distinct error messages. These do not need a registry entry (per the adoption policy). Keep the regex narrow and anchored on the literal, not on minified identifiers.
+
+### 3. LEGACY / grandfathered — inline function-locating regex
+
+Some older patches hand-roll a regex that matches a whole minified function shape (capturing the rotated name with `(\w+)` etc.) directly inside `apply()`. **This is legacy. Do not write new patches this way.** It duplicates per-version knowledge inside the patch, so when a release drifts the anchor you have to edit the patch itself rather than one registry line.
+
+Existing inline-regex patches are **grandfathered** — there is no campaign to rewrite them. Migrate opportunistically: when an anchor drifts and you're already editing the patch, move it to a `runner/anchors.mjs` entry and switch to `findFunctionByLiteral` / `resolveAnchorLiteral`.
+
+---
+
 ## Add a new patch
 
 ### 1. Find your anchor
@@ -46,7 +103,7 @@ This drops a beautified tree under `storage/outputs/reconstructed-v2.1.148/`. Id
 
 Avoid anchoring on minified identifiers — they rotate every release.
 
-If your anchor is version-sensitive, register it in `runner/anchors.mjs` so future drift only needs a one-file update.
+If your anchor is version-sensitive, register it in `runner/anchors.mjs` and resolve it with `findFunctionByLiteral` — this is the canonical approach; see the [Anchoring](#anchoring) section for the full rationale and example.
 
 ### 2. Decide: inline patch or shim-as-patch?
 
