@@ -17,14 +17,7 @@
 // (Aho-Corasick) would be faster on pathological inputs but materially harder
 // to read for a ~200x speedup that's already plenty.
 
-function countOccurrencesIn(positions) {
-  return positions ? positions.length : 0;
-}
-
-function toList(x) {
-  if (x === undefined || x === null) return [];
-  return Array.isArray(x) ? x : [x];
-}
+import { checkVerifyCore, toList } from './verify-core.mjs';
 
 /**
  * Build the union literal index used by both the scan and the per-patch
@@ -33,7 +26,7 @@ function toList(x) {
  * @param {Array<{patchName: string, present?: string[], absent?: string[], count?: any}>} items
  * @returns {{
  *   literals: string[],            // unique, length >= 1
- *   bucketsByPrefix: Map<string, string[]>,
+ *   bucketsByPrefix: Map<number, string[]>,
  *   prefixLen: number,
  * }}
  */
@@ -45,11 +38,14 @@ function buildLiteralIndex(items) {
   }
   const literals = [...uniq];
   // Shortest literal length caps prefix size; anything shorter than the prefix
-  // gets bucketed separately under its own length-key (handled in scan).
+  // is handled by a one-shot indexOf in scanCode (never bucketed here).
   const prefixLen = 2;
+  // Buckets are keyed by a numeric 2-char prefix (charCodeAt(0)*256+charCodeAt(1))
+  // to avoid allocating a 2-char substring per byte during the scan.
   const bucketsByPrefix = new Map();
   for (const lit of literals) {
-    const key = lit.length >= prefixLen ? lit.slice(0, prefixLen) : `__SHORT__${lit}`;
+    if (lit.length < prefixLen) continue; // short literals use indexOf in scanCode
+    const key = lit.charCodeAt(0) * 256 + lit.charCodeAt(1);
     let arr = bucketsByPrefix.get(key);
     if (!arr) { arr = []; bucketsByPrefix.set(key, arr); }
     arr.push(lit);
@@ -85,7 +81,8 @@ function scanCode(code, index) {
   const plen = index.prefixLen;
   const last = n - plen;
   for (let i = 0; i <= last; i++) {
-    const key = code.slice(i, i + plen);
+    // Numeric 2-char prefix key — same keying as buildLiteralIndex, no slice alloc.
+    const key = code.charCodeAt(i) * 256 + code.charCodeAt(i + 1);
     const bucket = index.bucketsByPrefix.get(key);
     if (!bucket) continue;
     for (const lit of bucket) {
@@ -93,8 +90,10 @@ function scanCode(code, index) {
       const L = lit.length;
       if (i + L > n) continue;
       let ok = true;
-      // Skip the prefix chars we already matched via the bucket key.
-      for (let j = plen; j < L; j++) {
+      // Full char compare from 0: the numeric prefix key can alias distinct
+      // 2-char prefixes (e.g. when a code unit exceeds 255), so we cannot trust
+      // the key alone — re-verify all chars to keep matches byte-identical.
+      for (let j = 0; j < L; j++) {
         if (code.charCodeAt(i + j) !== lit.charCodeAt(j)) { ok = false; break; }
       }
       if (ok) positions.get(lit).push(i);
@@ -125,34 +124,13 @@ export function verifyBatch(code, items) {
   const index = buildLiteralIndex(norm);
   const positions = index.literals.length > 0 ? scanCode(code, index) : new Map();
 
+  // Single-pass scan stays HERE (one walk over `code`); the per-item
+  // present/absent/count satisfaction is delegated to the shared primitive,
+  // fed the recorded `positions` Map so it reuses our offsets instead of
+  // re-scanning. 'default' style keeps the issue strings byte-identical.
   const out = [];
   for (const it of norm) {
-    const issues = [];
-    for (const s of it.present) {
-      if (countOccurrencesIn(positions.get(s)) === 0) {
-        issues.push(`expected present: ${s.slice(0, 60)}`);
-      }
-    }
-    for (const s of it.absent) {
-      if (countOccurrencesIn(positions.get(s)) > 0) {
-        issues.push(`expected absent: ${s.slice(0, 60)}`);
-      }
-    }
-    if (it.count !== undefined && it.count !== null) {
-      const c = typeof it.count === 'number' ? { present: it.count } : it.count;
-      if (typeof c.present === 'number') {
-        const total = it.present.reduce((n, s) => n + countOccurrencesIn(positions.get(s)), 0);
-        if (total !== c.present) {
-          issues.push(`expected count.present=${c.present}, actual=${total} (across ${it.present.length} string(s))`);
-        }
-      }
-      if (typeof c.absent === 'number') {
-        const total = it.absent.reduce((n, s) => n + countOccurrencesIn(positions.get(s)), 0);
-        if (total !== c.absent) {
-          issues.push(`expected count.absent=${c.absent}, actual=${total} (across ${it.absent.length} string(s))`);
-        }
-      }
-    }
+    const issues = checkVerifyCore(it, code, { positions, style: 'default' });
     out.push({ name: it.name, issues });
   }
   return out;
