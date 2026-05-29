@@ -11,11 +11,12 @@
  *   node bin/scaffold-patch.mjs my_fix --category=core --kind=free
  *   node bin/scaffold-patch.mjs entry_log --kind=prefix
  *
- * --kind options:
+ * --kind options (default: prefix — a declarative kind, since the docs recommend
+ * declarative over imperative for the common "one small thing to one function"):
  *   Declarative kinds (preferred — the runner synthesizes apply() from the
  *   target/code/transform fields; see runner/manifest-schema.mjs KIND_ENUM):
  *     free       — apply()-based escape hatch (the declarative default `kind`)
- *     prefix     — inject `code` right after the target function's opening brace
+ *     prefix     — inject `code` right after the target function's opening brace (DEFAULT)
  *     postfix    — wrap the target function's return value via `code`
  *     transpiler — rewrite the target function's whole body via `transform()`
  *   apply()-helper kinds (imperative; use the patch-helpers toolbox):
@@ -36,7 +37,7 @@ const REGISTRY_MARKER = '// ── scaffold-patch.mjs inserts new entries here �
 function parseArgs(argv) {
   const args = argv.slice(2);
   if (args.length === 0 || args[0] === '--help' || args[0] === '-h') return { help: true };
-  let name = null, category = 'extension', kind = 'splice', force = false;
+  let name = null, category = 'extension', kind = 'prefix', force = false;
   for (const a of args) {
     if (a.startsWith('--category=')) category = a.slice('--category='.length);
     else if (a.startsWith('--kind=')) kind = a.slice('--kind='.length);

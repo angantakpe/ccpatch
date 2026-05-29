@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync, appendFileSync } from 'node:fs';
+import { mkdirSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { structuredPatch, applyPatch } from 'diff';
 import { validateManifest } from './manifest.mjs';
@@ -12,12 +12,18 @@ import { captureReverseDiff } from './reverse-diff.mjs';
 import { verifyBatch } from './verify-batch.mjs';
 import { checkVerifyCore } from './verify-core.mjs';
 import { getResolvedVariant } from './loader.mjs';
+import { compareVersions } from './version-resolver.mjs';
+import { PHASE_ORDER, phaseOf, orderPatches } from './apply-order.mjs';
+import {
+  makeStorageWarnOnce,
+  writeConflictsArtifact,
+  writeApplyArtifacts,
+} from './apply-artifacts.mjs';
 
-const PHASE_ORDER = { pre: 0, main: 1, post: 2 };
-
-function phaseOf(patch) {
-  return patch?.phase ?? 'main';
-}
+// Re-export the apply-artifact sidecar writers (extracted to apply-artifacts.mjs
+// in the task-4 refactor) so the runner.mjs public surface — and the tests that
+// import them from here — stay unchanged.
+export { makeStorageWarnOnce, writeConflictsArtifact, writeApplyArtifacts };
 
 function toList(x) {
   if (x === undefined || x === null) return [];
@@ -38,23 +44,6 @@ function toList(x) {
  */
 export function checkVerify(verify, code) {
   return checkVerifyCore(verify, code, { style: 'default' });
-}
-
-// Tiny dotted-numeric comparator for CC versions like "2.1.148".
-// Returns -1 | 0 | 1, or null if either input doesn't parse.
-function compareVersions(a, b) {
-  if (typeof a !== 'string' || typeof b !== 'string') return null;
-  const pa = a.split('.').map(n => Number.parseInt(n, 10));
-  const pb = b.split('.').map(n => Number.parseInt(n, 10));
-  if (pa.some(Number.isNaN) || pb.some(Number.isNaN)) return null;
-  const len = Math.max(pa.length, pb.length);
-  for (let i = 0; i < len; i++) {
-    const x = pa[i] ?? 0;
-    const y = pb[i] ?? 0;
-    if (x < y) return -1;
-    if (x > y) return 1;
-  }
-  return 0;
 }
 
 export function resolvePatchNames(patches, requestedPatches) {
@@ -96,41 +85,6 @@ export function topoSort(names, patches) {
 // These are side-effect-light (or fs-isolated) functions lifted out of the main
 // loop so they can be unit-tested in isolation. Behavior is identical to the
 // inline code they replaced.
-
-/**
- * PERF1 cheap edit-range: an O(n) two-ended divergence scan that returns a
- * single span [firstDiff, lastDiffEndInPre) describing the region of `preCode`
- * that changed. Used in the non-strict overlap-trace path in place of the full
- * structuredPatch hunk decomposition. Returns [] when the strings are equal.
- *
- * The end offset is expressed in PRE-code coordinates (the trailing common
- * suffix length is subtracted from preCode.length), matching diffSpansFromPatch
- * which also yields preCode byte ranges.
- *
- * @returns {Array<[number, number]>} 0 or 1 span
- */
-export function cheapEditSpans(preCode, postCode) {
-  if (preCode === postCode) return [];
-  const aLen = preCode.length;
-  const bLen = postCode.length;
-  let start = 0;
-  const maxStart = Math.min(aLen, bLen);
-  while (start < maxStart && preCode.charCodeAt(start) === postCode.charCodeAt(start)) start++;
-  // Common suffix length, not overlapping the common prefix.
-  let suffix = 0;
-  const maxSuffix = Math.min(aLen, bLen) - start;
-  while (suffix < maxSuffix
-    && preCode.charCodeAt(aLen - 1 - suffix) === postCode.charCodeAt(bLen - 1 - suffix)) {
-    suffix++;
-  }
-  const end = aLen - suffix;
-  if (end <= start) {
-    // Pure insertion (nothing of preCode was removed): mark a zero-width-ish
-    // span at the insertion point so the change is still represented.
-    return [[start, Math.min(start + 1, aLen)]];
-  }
-  return [[start, end]];
-}
 
 /**
  * Attempt the stored unified-diff fallback when structured apply() no-op'd.
@@ -188,123 +142,6 @@ export function detectDrift(preCode, normalized, name, patchOptions) {
     { patchName: name, version: patchOptions.version ?? null },
   );
   return { candidates, verifyFailed, probesCount, alertLine: JSON.stringify(record) };
-}
-
-/**
- * S5: build a run-scoped "warn once" reporter for storage-write failures. The
- * FIRST failed artifact write in a run emits one logger.warn; subsequent ones
- * stay quiet so a broken storage dir doesn't spam the log. State lives on the
- * returned closure (run-scoped), NOT a module global — concurrent runs each get
- * their own latch.
- *
- * @param {object} logger
- * @returns {(label: string, err: Error) => void}
- */
-export function makeStorageWarnOnce(logger) {
-  let warned = false;
-  return (label, err) => {
-    if (warned) return;
-    warned = true;
-    logger.warn?.(`  [!] Storage write failed (${label}): ${err.message}. Further storage-write failures this run will be silent.`);
-  };
-}
-
-/**
- * Append the overlap-conflicts JSONL sidecar. Best-effort; the first failure of
- * the run is surfaced via warnStorageOnce (S5), the rest stay quiet.
- * Kept separate from the coverage/results writes because it must run BEFORE the
- * strict-mode failure throw (the original code wrote conflicts pre-throw and
- * coverage/results post-throw).
- */
-export function writeConflictsArtifact(allConflicts, warnStorageOnce) {
-  if (allConflicts.length === 0) return;
-  try {
-    mkdirSync('storage/outputs', { recursive: true });
-    const out = allConflicts.map(c => JSON.stringify(c)).join('\n') + '\n';
-    appendFileSync(join('storage/outputs', 'patch-conflicts.jsonl'), out, 'utf8');
-  } catch (err) { warnStorageOnce?.('patch-conflicts.jsonl', err); }
-}
-
-/**
- * Consolidate the two post-success apply-time sidecar writes (coverage manifest,
- * patch-results catalog) into one fs-isolated helper. Returns nothing; each
- * write is best-effort and failures are logged but non-fatal.
- *
- * ARCH5: reads the resolved variant via getResolvedVariant(patch) instead of
- * patch.__resolvedVariant.
- *
- * @param {object} args
- * @param {Record<string,string>} args.results  per-patch status map
- * @param {Record<string,object>} args.patches  loaded patch modules
- * @param {object} args.phaseTraces   per-phase trace arrays (for diffSpans count)
- * @param {object} args.patchOptions  carries .version
- * @param {(p:object)=>string} args.phaseOf  phase resolver
- * @param {object} args.logger
- */
-export function writeApplyArtifacts({ results, patches, phaseTraces, patchOptions, phaseOf, logger, warnStorageOnce }) {
-  // 1) Apply-time coverage manifest. Always emitted; versioned filename when
-  // version is known so multiple builds don't clobber each other.
-  // Cross-referenced by `ccpatch coverage` against runtime hits.
-  try {
-    mkdirSync('storage/outputs', { recursive: true });
-    const coverageManifest = {
-      ccVersion: patchOptions.version ?? null,
-      appliedAt: new Date().toISOString(),
-      patches: {},
-    };
-    for (const name of Object.keys(results)) {
-      const status = results[name];
-      const patch = patches[name];
-      const phase = phaseOf(patch);
-      const applied = status === 'applied' || status === 'applied-fallback' || status === 'no-change-ok';
-      const phaseTrace = (phaseTraces[phase] || []).find(t => t.name === name);
-      // S4: prefer the cheap diffSpanCount (1/0, or exact strict count) — the
-      // full span array may never have been materialised in non-strict mode.
-      // Fall back to diffSpans.length for traces that carry only the array
-      // (e.g. hand-built traces in unit tests / external callers).
-      const diffSpans = phaseTrace
-        ? (phaseTrace.diffSpanCount ?? (Array.isArray(phaseTrace.diffSpans) ? phaseTrace.diffSpans.length : 0))
-        : 0;
-      let reason = null;
-      if (status === 'no-change') reason = 'no-change';
-      else if (status === 'skipped') reason = 'skipped';
-      else if (status === 'error') reason = 'error';
-      const entry = { phase, applied, status, diffSpans };
-      if (reason) entry.reason = reason;
-      if (patch && patch.coverageMarker) entry.coverageMarker = patch.coverageMarker;
-      coverageManifest.patches[name] = entry;
-    }
-    const tag = patchOptions.version ? `v${patchOptions.version}` : 'unknown';
-    const covPath = join('storage/outputs', `coverage-apply-${tag}.json`);
-    writeFileSync(covPath, JSON.stringify(coverageManifest, null, 2), 'utf8');
-  } catch (err) {
-    // S5: route through the run-scoped warn-once latch.
-    warnStorageOnce?.('coverage-apply manifest', err);
-  }
-
-  // 2) Patch-results catalog (only when version is known). Decorated with the
-  // resolved variant per patch (ARCH5: via getResolvedVariant, not __resolvedVariant).
-  if (patchOptions.version) {
-    try {
-      mkdirSync('storage/outputs', { recursive: true });
-      const outPath = join('storage/outputs', `patch-results-v${patchOptions.version}.json`);
-      const decorated = {};
-      for (const name of Object.keys(results)) {
-        const status = results[name];
-        const variant = getResolvedVariant(patches[name]);
-        decorated[name] = { status, resolvedVariant: variant };
-      }
-      writeFileSync(outPath, JSON.stringify({
-        version: patchOptions.version,
-        timestamp: new Date().toISOString(),
-        patches: decorated,
-      }, null, 2), 'utf8');
-      logger.log(`  [+] Patch results written to ${outPath}`);
-    } catch (err) {
-      // S5: route through the run-scoped warn-once latch.
-      warnStorageOnce?.('patch-results catalog', err);
-    }
-  }
 }
 
 /**
@@ -610,16 +447,12 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
     }
   }
 
-  // Ordering: (phase asc, topo index asc). topoSort already produced a valid
-  // linear extension of the dependsOn graph, so within a phase we preserve its
-  // order verbatim — guaranteeing a dependent never precedes its dependency.
-  const topoIndex = new Map(topoOrdered.map((n, i) => [n, i]));
-  const ordered = topoOrdered.slice().sort((a, b) => {
-    const pa = PHASE_ORDER[phaseOf(patches[a])];
-    const pb = PHASE_ORDER[phaseOf(patches[b])];
-    if (pa !== pb) return pa - pb;
-    return topoIndex.get(a) - topoIndex.get(b);
-  });
+  // Ordering: phase (asc) dominates, then dependsOn (topological) — a dependent
+  // never precedes its dependency — then `priority` (lower first) breaks ties
+  // between otherwise-independent same-phase peers, then enable-list index for
+  // determinism. See runner/apply-order.mjs orderPatches() for the exact
+  // guarantee. `topoOrdered` (from topoSort) supplies the cycle-free node set.
+  const ordered = orderPatches(patchNames, patches, topoOrdered);
 
   for (const name of ordered) {
     const patch = patches[name];
@@ -796,11 +629,11 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
       if (t.diffSpans !== null) continue; // strict already computed (and shifted)
       if (!t.changed || t._preCode === null) { t.diffSpans = []; continue; }
       // Arch#1(b): decompose into per-hunk spans the SAME way strict mode does
-      // (structuredPatch context:0 → diffSpansFromPatch) instead of the single
-      // first-to-last-changed-byte envelope cheapEditSpans returns. A scatter
-      // patch (e.g. unhide_features) then yields many small REAL spans rather
-      // than one ~3.5MB envelope that intersects almost anything — so non-strict
-      // overlaps now match what strict mode would flag as FATAL.
+      // (structuredPatch context:0 → diffSpansFromPatch) instead of a single
+      // first-to-last-changed-byte envelope. A scatter patch (e.g.
+      // unhide_features) then yields many small REAL spans rather than one
+      // ~3.5MB envelope that intersects almost anything — so non-strict overlaps
+      // now match what strict mode would flag as FATAL.
       const sp = structuredPatch(t.name, t.name, t._preCode, t._effectiveCode, 'pre', 'post', { context: 0 });
       const raw = diffSpansFromPatch(t._preCode, sp);
       t.diffSpans = raw.map(([s, e]) => [s - t._deltaBefore, e - t._deltaBefore]);

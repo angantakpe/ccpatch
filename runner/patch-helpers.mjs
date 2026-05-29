@@ -56,7 +56,12 @@ export function spliceBoot(code, snippet) {
     return code.slice(0, at) + snippet + code.slice(at);
   }
   if (code.includes(CJS_IIFE)) {
-    return code.replace(CJS_IIFE, snippet + CJS_IIFE);
+    // Use the function form of replace() so `$&`, `$'`, `$\`` and `$n` sequences
+    // inside `snippet` are injected LITERALLY rather than expanded as String.replace
+    // special replacement patterns. The string form `snippet + CJS_IIFE` would
+    // mis-expand a snippet containing e.g. `$&` (→ the whole matched IIFE header),
+    // ballooning the output (observed 15.5MB→62MB for the event_bus hook).
+    return code.replace(CJS_IIFE, () => snippet + CJS_IIFE);
   }
   throw new Error('spliceBoot: bundle has neither shebang nor CJS-IIFE anchor — no safe boot site');
 }

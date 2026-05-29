@@ -24,6 +24,31 @@ describe('spliceBoot', () => {
   it('throws when no boot anchor is present', () => {
     assert.throws(() => spliceBoot('var x=1;', '/*BOOT*/'), /no safe boot site/);
   });
+
+  it('injects a snippet containing $& literally into the CJS-IIFE branch (no replace-pattern expansion)', () => {
+    // Regression: the CJS branch used the STRING form of String.replace, so a
+    // snippet containing `$&` would expand to the whole matched IIFE header,
+    // ballooning the bundle (observed 15.5MB→62MB for the event_bus hook).
+    const code = 'var x=1;(function(exports, require, module, __filename, __dirname){body();})()';
+    const snippet = '/*pre $& $\' $` $0 mid*/';
+    const out = spliceBoot(code, snippet);
+    // The literal snippet must appear verbatim — no `$&` expansion.
+    assert.ok(out.includes(snippet), 'snippet must be injected literally');
+    // And it must NOT have expanded `$&` into the matched IIFE header.
+    assert.ok(
+      !out.includes('/*pre (function(exports, require, module'),
+      'the $& sequence must not expand to the matched IIFE header',
+    );
+    // Size sanity: output is the original plus exactly the snippet length.
+    assert.equal(out.length, code.length + snippet.length);
+  });
+
+  it('injects a snippet containing $& literally into the shebang branch', () => {
+    const code = '#!/usr/bin/env node\nconsole.log(1);\n';
+    const snippet = '/* $& $1 keep */';
+    const out = spliceBoot(code, snippet);
+    assert.equal(out, '#!/usr/bin/env node\n' + snippet + 'console.log(1);\n');
+  });
 });
 
 describe('spliceAfter', () => {

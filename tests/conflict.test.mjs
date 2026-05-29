@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { structuredPatch } from 'diff';
 import { applyNamedPatches } from '../runner/runner.mjs';
-import { diffSpansFromPatch } from '../runner/conflict.mjs';
+import { diffSpansFromPatch, resetLineStartsCache } from '../runner/conflict.mjs';
 import { validateManifest } from '../runner/manifest.mjs';
 
 const silent = { log() {}, warn() {}, error() {} };
@@ -98,10 +98,11 @@ describe('manifest — allowOverlapWith', () => {
 });
 
 describe('applyNamedPatches — ordering', () => {
-  // Priority was removed in favor of pure (phase asc, topo index asc).
-  // The manifest still accepts `priority` for back-compat but the runner
-  // ignores it for ordering decisions.
-  it('preserves input/topo order for same-phase peers (priority is no-op)', async () => {
+  // Priority orders same-phase peers that have no dependency path between them:
+  // lower `priority` runs first (default 1000). Here a/b/c are independent
+  // same-phase peers with priority 200/100/50, so they apply lowest-first →
+  // c, b, a — independent of the enable-list order ['a','b','c'].
+  it('orders same-phase peers by priority (lowest first) regardless of input order', async () => {
     const log = [];
     const patches = {
       a: mkPatch({ apply: (c) => { log.push('a'); return c + 'A'; }, verify: { present: 'A', weak: true }, priority: 200 }),
@@ -109,7 +110,7 @@ describe('applyNamedPatches — ordering', () => {
       c: mkPatch({ apply: (c) => { log.push('c'); return c + 'C'; }, verify: { present: 'C', weak: true }, priority: 50 }),
     };
     await applyNamedPatches('x', patches, ['a', 'b', 'c'], silent);
-    assert.deepEqual(log, ['a', 'b', 'c']);
+    assert.deepEqual(log, ['c', 'b', 'a']);
   });
 
   it('dependsOn determines order regardless of input order', async () => {
@@ -121,6 +122,20 @@ describe('applyNamedPatches — ordering', () => {
     // Note: input order ['b','a'] — dep edge still forces a before b.
     await applyNamedPatches('x', patches, ['b', 'a'], silent);
     assert.deepEqual(log, ['a', 'b']);
+  });
+});
+
+describe('resetLineStartsCache', () => {
+  it('clears the lineStarts cache without affecting subsequent span correctness', () => {
+    // Warm the cache, reset it, then confirm spans are still computed correctly.
+    const pre = 'x'.repeat(100) + 'ALPHA' + 'y'.repeat(100);
+    const post = pre.replace('ALPHA', 'ZZZZZ');
+    const sp = structuredPatch('a', 'a', pre, post, '', '', { context: 0 });
+    const before = diffSpansFromPatch(pre, sp);
+    resetLineStartsCache();
+    const after = diffSpansFromPatch(pre, sp);
+    assert.deepEqual(after, before);
+    assert.doesNotThrow(() => resetLineStartsCache());
   });
 });
 

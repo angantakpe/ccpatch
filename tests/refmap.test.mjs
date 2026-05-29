@@ -6,7 +6,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 
 import { buildRefmap, defaultRefmapPath, refmapsEqual } from '../tools/build-refmap.mjs';
-import { loadRefmap, resolveSymbol } from '../runner/refmap.mjs';
+import { loadRefmap, resolveSymbol, resetRefmapCache } from '../runner/refmap.mjs';
 import { resolveAnchor, anchors } from '../runner/anchors.mjs';
 import { runPatchCli } from '../runner/cli.mjs';
 
@@ -90,6 +90,20 @@ describe('loadRefmap', () => {
     );
     assert.equal(resolveSymbol(loaded, 'unknownAnchor'), null);
     assert.equal(resolveSymbol(null, 'isDurableCronEnabled'), null);
+  });
+
+  it('resetRefmapCache lets a freshly-written refmap be seen after a prior miss', () => {
+    const root = mkTmpRoot();
+    // First load misses and memoises the null for this path.
+    assert.equal(loadRefmap('7.7.7', root), null);
+    // Write the refmap to the same path, then clear the cache so the stale
+    // null does not shadow it.
+    const refmap = buildRefmap(FIXTURE, { ccVersion: '7.7.7' });
+    fs.writeFileSync(path.join(root, 'refmaps', '7.7.7.json'), JSON.stringify(refmap));
+    resetRefmapCache();
+    const loaded = loadRefmap('7.7.7', root);
+    assert.ok(loaded, 'expected the refmap to load after resetRefmapCache');
+    assert.equal(loaded.bundleSha256, FIXTURE_SHA);
   });
 });
 

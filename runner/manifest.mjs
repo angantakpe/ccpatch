@@ -97,16 +97,16 @@ import {
   CATEGORIES_LIST,
   PHASES_LIST,
   KINDS_LIST,
-  AT_KINDS_LIST,
-  FIELD_HINTS,
   fieldHint,
   missingField,
 } from './manifest-schema.mjs';
+// Cohesive field-validators extracted from validateManifest (task 4 refactor).
+// AT_KINDS_LIST / FIELD_HINTS moved with them (the only remaining consumers).
+import { validateVerify, validateAt } from './manifest-validators.mjs';
 
 // Enum sets are derived from the ONE declarative schema in manifest-schema.mjs,
 // which also drives the generated types/patch.d.ts (see scripts/gen-types.mjs).
 const APPLY_MODES = new Set(APPLY_MODES_LIST);
-const AT_KIND_SET = new Set(AT_KINDS_LIST);
 const CATEGORIES  = new Set(CATEGORIES_LIST);
 const PHASES      = new Set(PHASES_LIST);
 const KIND_SET    = new Set(KINDS_LIST);
@@ -191,42 +191,9 @@ export function validateManifest(mod, filename, ctx = {}) {
   }
 
   // verify is required. At least one of present/absent/count must be specified.
-  if (!mod.verify || typeof mod.verify !== 'object') {
-    errors.push(`patch ${stem}: ${missingField('verify')} — see CONTRIBUTING.md`);
-  } else {
-    const v = mod.verify;
-    const hasPresent = v.present !== undefined && v.present !== null
-      && (Array.isArray(v.present) ? v.present.length > 0 : true);
-    const hasAbsent = v.absent !== undefined && v.absent !== null
-      && (Array.isArray(v.absent) ? v.absent.length > 0 : true);
-    const hasCount = v.count !== undefined && v.count !== null;
-    if (!hasPresent && !hasAbsent && !hasCount) {
-      errors.push(`patch ${stem}: ${fieldHint('verify', 'must specify at least one of present/absent/count')} — see CONTRIBUTING.md`);
-    }
-    // Weak-verify guard: present-only verify cannot detect wrong-location apply
-    // or double-apply. Require opt-in via verify.weak:true.
-    if (hasPresent && !hasAbsent && !hasCount && v.weak !== true) {
-      errors.push(`weak verify: declare verify.absent or verify.count, or opt in with verify.weak: true — e.g. ${FIELD_HINTS['verify.weak'].example}`);
-    }
-    if (v.weak !== undefined && typeof v.weak !== 'boolean') {
-      errors.push(fieldHint('verify.weak'));
-    }
-    if (hasCount) {
-      const c = v.count;
-      if (typeof c === 'number') {
-        if (!Number.isFinite(c) || c < 0) errors.push(fieldHint('verify.count', '(number) must be a non-negative integer'));
-      } else if (typeof c === 'object') {
-        if (c.present !== undefined && (!Number.isFinite(c.present) || c.present < 0)) {
-          errors.push(fieldHint('verify.count', '.present must be a non-negative integer'));
-        }
-        if (c.absent !== undefined && (!Number.isFinite(c.absent) || c.absent < 0)) {
-          errors.push(fieldHint('verify.count', '.absent must be a non-negative integer'));
-        }
-      } else {
-        errors.push(fieldHint('verify.count', 'must be a number or { present?, absent? }'));
-      }
-    }
-  }
+  // Extracted to manifest-validators.validateVerify() (task 4) — same checks,
+  // same error strings, same order.
+  errors.push(...validateVerify(mod, stem));
   if (mod.verifyExempt !== undefined) {
     errors.push(`patch ${stem}: 'verifyExempt' is no longer supported — provide a real verify block (see CONTRIBUTING.md)`);
   }
@@ -326,48 +293,11 @@ export function validateManifest(mod, filename, ctx = {}) {
   }
 
   // @At selector — declarative anchor. See runner/at-selector.mjs.
-  let at = null;
-  if (mod.at !== undefined) {
-    if (!mod.at || typeof mod.at !== 'object' || Array.isArray(mod.at)) {
-      errors.push(fieldHint('at', 'must be an object: { kind, target }'));
-    } else if (!AT_KIND_SET.has(mod.at.kind)) {
-      errors.push(fieldHint('at.kind', `must be one of: ${[...AT_KIND_SET].join(', ')} (got "${mod.at.kind}")`));
-    } else if (!mod.at.target || typeof mod.at.target !== 'object') {
-      errors.push('at.target is required and must be an object — e.g. target: { function: \'foo\' }');
-    } else {
-      const k = mod.at.kind;
-      const t = mod.at.target;
-      const isFnSpec = (v) => typeof v === 'string'
-        || (v && typeof v === 'object' && typeof v.literal === 'string');
-      if (k === 'HEAD' || k === 'RETURN') {
-        if (!isFnSpec(t.function)) {
-          errors.push(`at.target.function is required for ${k}: 'NAME' or { literal: 'STR' }`);
-        }
-      } else if (k === 'INVOKE') {
-        if (!isFnSpec(t.call)) {
-          errors.push(`at.target.call is required for INVOKE: 'NAME' or { literal: 'STR' }`);
-        }
-        if (t.occurrence !== undefined && (!Number.isInteger(t.occurrence) || t.occurrence < 1)) {
-          errors.push(`at.target.occurrence must be a positive integer`);
-        }
-        if (t.in !== undefined && !isFnSpec(t.in)) {
-          errors.push(`at.target.in (when set) must be 'NAME' or { literal: 'STR' }`);
-        }
-      } else if (k === 'BEFORE' || k === 'AFTER') {
-        if (typeof t.literal !== 'string' || t.literal.length === 0) {
-          errors.push(`at.target.literal is required for ${k} and must be a non-empty string`);
-        }
-        if (t.occurrence !== undefined && (!Number.isInteger(t.occurrence) || t.occurrence < 1)) {
-          errors.push(`at.target.occurrence must be a positive integer`);
-        }
-      }
-      at = mod.at;
-    }
-    // Contract: an `at` selector requires apply() to consume the sites.
-    if (at && typeof mod.apply !== 'function') {
-      errors.push('at: selector is set but apply() is missing — apply must consume atSites');
-    }
-  }
+  // Extracted to manifest-validators.validateAt() (task 4) — same checks,
+  // same error strings, same order; returns the accepted selector (or null).
+  const atResult = validateAt(mod);
+  errors.push(...atResult.errors);
+  const at = atResult.at;
 
   // dependsOn — default []
   const dependsOn = mod.dependsOn ?? [];

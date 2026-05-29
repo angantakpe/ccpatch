@@ -1,3 +1,10 @@
+import { spliceAfter } from '../runner/patch-helpers.mjs';
+
+// The CJS-IIFE wrapper header. The hook is spliced *inside* the wrapper (after
+// the opening brace) so its lexical declarations share the wrapper scope —
+// preserving the original injection site exactly.
+const CJS_IIFE_HEAD = '(function(exports, require, module, __filename, __dirname) {';
+
 // Module-level so `preloadCode` can expose it without duplication.
 const hook = `
 // ══════════════════════════════════════════════════════════════════════════
@@ -117,7 +124,8 @@ export default {
   dependsOn: ['fetch_interceptor'],
   preload: true,
   preloadCode: hook,
-  apply: (code) => {
-    return code.replace('(function(exports, require, module, __filename, __dirname) {', '(function(exports, require, module, __filename, __dirname) {' + hook);
-  },
+  // spliceAfter inserts the hook immediately after the CJS-IIFE header via a
+  // slice (no String.replace `$&` hazard) and throws on a missing anchor so the
+  // strict-mode runner catches drift instead of silently no-oping.
+  apply: (code) => spliceAfter(code, CJS_IIFE_HEAD, hook),
 };

@@ -4,7 +4,7 @@ import { applyNamedPatches, topoSort } from '../runner/runner.mjs';
 
 const silent = { log() {}, warn() {}, error() {} };
 
-function mkPatch({ description = 'test', apply, verify, required, dependsOn } = {}) {
+function mkPatch({ description = 'test', apply, verify, required, dependsOn, priority, phase } = {}) {
   const p = {
     description,
     apply: apply ?? ((c) => c + ' '),
@@ -12,6 +12,8 @@ function mkPatch({ description = 'test', apply, verify, required, dependsOn } = 
   };
   if (required) p.required = required;
   if (dependsOn) p.dependsOn = dependsOn;
+  if (priority !== undefined) p.priority = priority;
+  if (phase) p.phase = phase;
   return p;
 }
 
@@ -53,6 +55,34 @@ describe('topoSort', () => {
       () => topoSort(['a', 'b'], patches),
       /Circular patch dependency/,
     );
+  });
+});
+
+describe('applyNamedPatches — priority ordering', () => {
+  it('orders same-phase no-dep peers by priority (lowest first)', async () => {
+    // Enabled as ['a','b','c'] but priorities 30/10/20 — with no deps and the
+    // same (default) phase, lower priority runs first → b (10), c (20), a (30).
+    const log = [];
+    const patches = {
+      a: mkPatch({ apply: (c) => { log.push('a'); return c + 'A'; }, verify: { present: 'A', weak: true }, priority: 30 }),
+      b: mkPatch({ apply: (c) => { log.push('b'); return c + 'B'; }, verify: { present: 'B', weak: true }, priority: 10 }),
+      c: mkPatch({ apply: (c) => { log.push('c'); return c + 'C'; }, verify: { present: 'C', weak: true }, priority: 20 }),
+    };
+    await applyNamedPatches('x', patches, ['a', 'b', 'c'], silent);
+    assert.deepEqual(log, ['b', 'c', 'a']);
+  });
+
+  it('priority cannot override a dependency edge', async () => {
+    // B dependsOn A. A "wants" to go last (priority 5000), B "wants" to go first
+    // (priority 1), but the dependsOn edge dominates priority → A still applies
+    // before B.
+    const log = [];
+    const patches = {
+      a: mkPatch({ apply: (c) => { log.push('a'); return c + 'A'; }, verify: { present: 'A', weak: true }, priority: 5000 }),
+      b: mkPatch({ apply: (c) => { log.push('b'); return c + 'B'; }, verify: { present: 'B', weak: true }, priority: 1, dependsOn: ['a'] }),
+    };
+    await applyNamedPatches('x', patches, ['a', 'b'], silent);
+    assert.deepEqual(log, ['a', 'b']);
   });
 });
 

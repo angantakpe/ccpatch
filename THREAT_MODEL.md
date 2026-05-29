@@ -33,7 +33,7 @@ Columns:
 
 | Patch | Touches | Reads | Writes / Sends | Default |
 | --- | --- | --- | --- | --- |
-| `dotenv_loader` | early boot | local `.env` files | sets `process.env`; no network | off |
+| `dotenv_loader` | early boot | local `.env` files | sets `process.env` (security-critical keys denylisted — see below); no network | off |
 | `hook_noise_mute` | hook stderr writer | hook stderr | swallows known-noisy lines | off |
 | `cache_ttl` | prompt-cache TTL selector | n/a | None | off |
 | `grep_shadow` | grep/find shadow injector | n/a | None | off |
@@ -95,7 +95,7 @@ These don't change CLI behavior; they expose `__ccp*` globals so other tools can
 | `block_tools` | tool registry | `CC_BLOCKED_TOOLS` env | filters tools from the registry; no I/O | off |
 | `save_conversations` | conversation lifecycle | full conversation transcripts | **writes JSON files to local disk** when `CC_SAVE_CONVERSATIONS` is set | off |
 | `webhook` | event hooks | event payloads | **POSTs to `CC_WEBHOOK_URL`** when set; opt-in via env var | off |
-| `cache_responses` | API response path | full API responses | **writes response bodies to a local cache directory**; dev/testing only | off |
+| `cache_responses` | API response path | full API responses + auth header (hashed into key) | **writes response bodies to a local cache directory**; dev/testing only — cache dir is trusted (poisoning surface), see below | off |
 
 The bolded rows are the ones to read carefully before enabling. None of them act unless their env var is set.
 
@@ -171,6 +171,19 @@ radius:
 - `expose_agent_tool` + bridge → a remote caller can spawn sub-agents, which in
   turn have the full tool surface above — recursively.
 
+**Permission gate disabled for invoked subagents.** Subagents dispatched via
+`__ccpAgentTool.invoke()` run with the `canUseTool` permission callback hard-set
+to `() => true` (see `expose_agent_tool.mjs`, the `_callSelf` dispatch). This is
+deliberate: the background dispatch path is headless — it has no TUI surface to
+render an allow/deny prompt to, so the real interactive callback would block
+forever. The consequence is a **privilege escalation beyond the interactive
+CLI**: every tool an invoked subagent runs (Bash, Write, Edit, MCP, …) executes
+with **no allow/deny prompt at all**. There is no per-tool gate on this path.
+This is a primary reason `expose_agent_tool` is **off by default**, and — when
+combined with `headless_bridge` — why the bridge token is treated as
+root-equivalent: holding it lets a remote caller spawn ungated, fully-privileged
+subagents on the host.
+
 In other words: with this combination, **anyone who obtains the bridge token
 gets the same power over the host as the local user**. Treat the bridge token
 as a root-equivalent credential. Only enable this combination on a host you
@@ -195,15 +208,45 @@ a newly-introduced high-risk patch fails closed instead of being silently
 waved through. Reserve `all` for interactive, one-off local use where a human
 has just read the capability table.
 
-### Webhook egress (`CLAUDE_WEBHOOK_URL`)
+### Webhook egress (`CC_WEBHOOK_URL`)
 
-The `webhook` patch, when enabled and `CLAUDE_WEBHOOK_URL` is set, sends
+The `webhook` patch, when enabled and `CC_WEBHOOK_URL` is set, sends
 **unredacted conversation/event data outbound** to that URL — CLI args, working
 directory, process id, and per-event payloads, with no redaction layer. The
 patch restricts the destination scheme to `https:` (or `http://localhost` for
 dev) and refuses anything else, but it does **not** filter what is sent. Point
 it only at an endpoint you control and trust, and assume that endpoint sees the
 full content of your session.
+
+### Project-local `.env` injection (`dotenv_loader`)
+
+The `dotenv_loader` patch loads `.env` from `CC_PROJECT_ROOT || process.cwd()`
+into `process.env` before any other patch runs. Because a `.env` ships inside
+whatever repo you clone or open, it is **attacker-controllable input**. Left
+unrestricted, a hostile repo could silently stand up the bridge
+(`CC_BRIDGE_TOKEN` / `CC_BRIDGE_ADDR`) or repoint all API traffic through an
+MITM (`ANTHROPIC_BASE_URL`). To prevent this, the loader enforces a denylist:
+it **refuses to set** `CC_BRIDGE_TOKEN`, `CC_BRIDGE_ADDR`, `ANTHROPIC_BASE_URL`,
+`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and any key matching `CC_*_TOKEN`
+from `.env`, emitting a warning when it skips one. These keys can still be set
+in the shell — shell-set values always take precedence over `.env` regardless.
+Note the denylist does not cover every conceivable sensitive var; review a
+repo's `.env` before opening it in a patched CLI.
+
+### Cache poisoning / cross-account replay (`cache_responses`)
+
+The `cache_responses` patch (dev/testing only) writes full API response bodies
+to `~/.cc-cache` keyed by a hash of the request. Treat that directory as
+**trusted**: a writable cache dir is a response-injection (poisoning) surface,
+since a cached entry is replayed verbatim in place of a real API call. The patch
+applies several hardening measures: keys are **sha256** (not md5, which is
+collision-trivial and enables predictable-path poisoning); an **auth/identity
+dimension** (sha256 of the `Authorization` / `x-api-key` header) is mixed into
+the key so a response cached under one account can never be replayed to a
+different credential — the raw secret is hashed and never lands in any on-disk
+path; and entries are written `0600` (owner-only). This remains a dev/testing
+feature — do not enable it in any setting where the cache directory is shared or
+writable by another principal.
 
 ## How to disable a patch
 

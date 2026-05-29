@@ -107,6 +107,46 @@ describe('resolveAt — INVOKE', () => {
     assert.equal(r.ok, false);
     assert.match(r.error, /out of range/);
   });
+
+  it('resolves a { literal } target by call ARGUMENT, not by callee name (Lane B)', () => {
+    // The literal "tengu_kairos_cron_durable" appears as an argument to two
+    // different callees: featGate(...) inside isDurableCron and other(...) inside
+    // host. A { literal } target must pin the call whose ARGUMENT LIST contains
+    // that string — NOT treat the literal as the callee name (the old stub bug,
+    // which searched for `tengu_kairos_cron_durable(` and found nothing).
+    const r = resolveAt(
+      { kind: 'INVOKE', target: { call: { literal: 'tengu_kairos_cron_durable' } } },
+      MINI_BUNDLE
+    );
+    assert.equal(r.ok, true);
+    // Two call sites carry the literal as an argument: featGate(...) and other(...).
+    assert.equal(r.sites.length, 2);
+    for (const s of r.sites) {
+      const txt = MINI_BUNDLE.slice(s.start, s.end);
+      assert.ok(
+        txt.includes('"tengu_kairos_cron_durable"'),
+        `resolved call should contain the literal as an argument, got: ${txt}`,
+      );
+    }
+    // The callees are featGate and other — never a function literally named
+    // "tengu_kairos_cron_durable" (which does not exist).
+    const callees = r.sites.map((s) => MINI_BUNDLE.slice(s.start, MINI_BUNDLE.indexOf('(', s.start)));
+    assert.ok(callees.includes('featGate'));
+    assert.ok(callees.includes('other'));
+  });
+
+  it('scopes a { literal } INVOKE to target.in', () => {
+    // Same literal, but restricted to `host` — only the other(...) call qualifies.
+    const r = resolveAt(
+      { kind: 'INVOKE', target: { call: { literal: 'tengu_kairos_cron_durable' }, in: 'host' } },
+      MINI_BUNDLE
+    );
+    assert.equal(r.ok, true);
+    assert.equal(r.sites.length, 1);
+    const txt = MINI_BUNDLE.slice(r.sites[0].start, r.sites[0].end);
+    assert.ok(txt.startsWith('other('), `expected other(...) call, got: ${txt}`);
+    assert.ok(txt.includes('"tengu_kairos_cron_durable"'));
+  });
 });
 
 describe('resolveAt — BEFORE / AFTER', () => {

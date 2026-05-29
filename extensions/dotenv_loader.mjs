@@ -2,6 +2,15 @@ export default {
   category: 'infrastructure',
 
   description: 'Load project .env into process.env before any other patch runs (variables already set in shell take precedence)',
+  // SECURITY: a project-local .env is attacker-controllable input (it ships in
+  // any repo you clone/open). To stop a repo from silently standing up the
+  // bridge or repointing API traffic, the loader REFUSES to set the following
+  // security-critical keys from .env (shell-set values are unaffected):
+  //   - CC_BRIDGE_TOKEN, CC_BRIDGE_ADDR   (would stand up / configure the bridge)
+  //   - ANTHROPIC_BASE_URL                (would repoint API traffic to an MITM)
+  //   - ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN (credential override)
+  //   - any CC_*_TOKEN                    (bridge / integration tokens)
+  // A blocked key found in .env is skipped and a warning is emitted.
   capabilities: ["env","fs"],
   // No dependsOn — runs LAST in patch order (moved to end of PATCH list in vars.mk)
   // so it is applied after all other patches. Its hook injects BEFORE the first
@@ -31,6 +40,15 @@ if (!globalThis.__ccpDotenvLoaded) {
       if (!__fs.existsSync(__envPath)) return;
       var __raw = __fs.readFileSync(__envPath, 'utf8');
       var __lines = __raw.split('\\n');
+      // SECURITY: security-critical keys must never be settable from a
+      // repo-local .env (see file header). Exact-match denylist + a pattern
+      // for any CC_*_TOKEN. Shell-set values are unaffected (handled below).
+      var __envDeny = { 'CC_BRIDGE_TOKEN': 1, 'CC_BRIDGE_ADDR': 1, 'ANTHROPIC_BASE_URL': 1, 'ANTHROPIC_API_KEY': 1, 'ANTHROPIC_AUTH_TOKEN': 1 };
+      var __isBlocked = function(k) {
+        if (__envDeny[k]) return true;
+        if (/^CC_.*_TOKEN$/.test(k)) return true;
+        return false;
+      };
       for (var __i = 0; __i < __lines.length; __i++) {
         var __line = __lines[__i].trim();
         if (!__line || __line.charAt(0) === '#') continue;
@@ -45,6 +63,11 @@ if (!globalThis.__ccpDotenvLoaded) {
           if ((__first === '"' && __last === '"') || (__first === "'" && __last === "'")) {
             __val = __val.slice(1, -1);
           }
+        }
+        // SECURITY: refuse to set security-critical keys from .env.
+        if (__isBlocked(__key)) {
+          process.stderr.write('[dotenv_loader] refusing to set security-critical key from .env: ' + __key + ' (set it in the shell if you really mean it)\\n');
+          continue;
         }
         // Don't override values already set in the shell
         if (process.env[__key] === undefined || process.env[__key] === '') {

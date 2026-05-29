@@ -4,10 +4,10 @@ export default {
     enabled: false,
 
     // SECURITY: this patch egresses UNREDACTED conversation/event data
-    // (args, cwd, pid, event payloads) to CLAUDE_WEBHOOK_URL. Outbound is
+    // (args, cwd, pid, event payloads) to CC_WEBHOOK_URL. Outbound is
     // restricted to https: (or http://localhost for dev) — see scheme check
     // in the injected hook below.
-    description: 'Send webhook notifications on key events. WARNING: egresses unredacted conversation/event data to CLAUDE_WEBHOOK_URL.',
+    description: 'Send webhook notifications on key events. WARNING: egresses unredacted conversation/event data to CC_WEBHOOK_URL.',
     capabilities: ["network","env","telemetry"],
     // The injected hook embeds the marker string '__ccpWebhook_v1' exactly once
     // and never references __sendWebhook__ before defining it, so present+count
@@ -19,10 +19,10 @@ export default {
 // [PATCH] Webhook Notifications  (marker: __ccpWebhook_v1)
 // ══════════════════════════════════════════════════════════════════════════
 // WARNING: this sends UNREDACTED conversation/event data (CLI args, cwd, pid,
-// event payloads) outbound to CLAUDE_WEBHOOK_URL. Treat that endpoint as a
+// event payloads) outbound to CC_WEBHOOK_URL. Treat that endpoint as a
 // data sink with full visibility into your session.
 
-const WEBHOOK_URL = process.env.CLAUDE_WEBHOOK_URL;
+const WEBHOOK_URL = process.env.CC_WEBHOOK_URL;
 
 // Scheme allowlist: only https:, or http://localhost (+127.0.0.1/[::1]) for
 // local dev. Anything else (plain http:, file:, etc.) is rejected so secrets

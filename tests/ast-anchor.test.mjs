@@ -2,6 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { findFunctionByLiteral, resetBundleIndex } from '../runner/ast-anchor.mjs';
+import { resetAstCache } from '../runner/ast-cache.mjs';
 
 describe('findFunctionByLiteral', () => {
   it('finds the named function wrapping a literal', () => {
@@ -16,6 +17,36 @@ describe('findFunctionByLiteral', () => {
   it('returns null when no function wraps the literal', () => {
     const code = 'var pre=0;function Qx7(){return helper("tengu_test_flag",!1)};';
     assert.equal(findFunctionByLiteral(code, 'no_such_literal'), null);
+  });
+
+  it('resolves a literal whose enclosing `function` keyword sits >400 bytes earlier (Lane B)', () => {
+    // The old fixed 400-byte backward window was a CORRECTNESS ceiling: a literal
+    // genuinely inside a large (minified) function whose `function ` keyword lives
+    // farther back than 400 bytes would silently fail to resolve. The adaptive
+    // window must now grow and still find it.
+    const filler = 'var x=0;'.repeat(120); // ~960 bytes between `function` and the literal
+    const code = `function Big(){${filler}return helper("deep_literal",1)}`;
+    assert.ok(code.indexOf('"deep_literal"') - code.indexOf('function Big') > 400,
+      'fixture must place the literal >400 bytes after the function keyword');
+    const res = findFunctionByLiteral(code, 'deep_literal');
+    assert.ok(res, 'literal in a large function should still resolve');
+    assert.equal(res.name, 'Big');
+    assert.ok(code.slice(res.start, res.end).startsWith('function Big'));
+  });
+
+  it('picks the INNERMOST enclosing function when functions nest', () => {
+    // outer() contains inner(); the literal lives inside inner(). The brace-walker
+    // verification must select inner (the nearest truly-enclosing function), not
+    // outer.
+    const code =
+      'function outer(){var a=1;function inner(){return helper("nested_literal",2)}return inner()}';
+    const res = findFunctionByLiteral(code, 'nested_literal');
+    assert.ok(res);
+    assert.equal(res.name, 'inner');
+    const text = code.slice(res.start, res.end);
+    assert.ok(text.startsWith('function inner'));
+    // The resolved span must NOT swallow the outer function.
+    assert.ok(!text.includes('function outer'));
   });
 });
 
@@ -78,5 +109,22 @@ describe('resetBundleIndex', () => {
   it('can be called with no cached bundles', () => {
     resetBundleIndex();
     assert.doesNotThrow(() => resetBundleIndex());
+  });
+});
+
+describe('resetAstCache', () => {
+  it('clears the AST cache and keeps findFunctionByLiteral correct afterward', () => {
+    // findFunctionByLiteral parses via getAst (which is backed by the AST cache).
+    const code = 'function AstReset1(){return q("ast_reset_lit")};';
+    const before = findFunctionByLiteral(code, 'ast_reset_lit');
+    assert.equal(before.name, 'AstReset1');
+    resetAstCache();
+    const after = findFunctionByLiteral(code, 'ast_reset_lit');
+    assert.deepEqual(after, before);
+  });
+
+  it('is safe to call with an empty cache', () => {
+    resetAstCache();
+    assert.doesNotThrow(() => resetAstCache());
   });
 });
