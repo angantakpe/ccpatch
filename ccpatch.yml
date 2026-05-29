@@ -37,19 +37,23 @@ ack:
   project_root: [env]
   tool_result_error_content: [network]
   # standard-profile capability patches — pre-acked so the shipped default of
-  # `make patch-claude-code` (PROFILE=standard) builds out of the box. Power-only
-  # patches (debug, webhook, save_conversations, …) remain unacked on purpose:
-  # opting into `power` is an explicit choice that should re-confirm the threat model.
+  # `make patch-claude-code` (PROFILE=standard) builds cleanly with no capability
+  # warnings. Each entry lists the patch's FULL high-risk capability set (not just
+  # the ack-required network/exec/env subset) so the broader capabilities gate is
+  # also satisfied. Power-only patches (debug, webhook, save_conversations, …)
+  # remain unacked on purpose: opting into `power` is an explicit choice that
+  # should re-confirm the threat model.
   model: [env, network]
-  context_budget_warn: [network]
-  extended_thinking: [network, env]
+  custom_commands: [prompt, tools]
+  context_budget_warn: [network, prompt]
+  extended_thinking: [network, prompt, env]
   force_thinking: [env]
   plan_mode_interview: [env]
-  tool_result_trim: [network]
+  tool_result_trim: [network, tools]
   hook_noise_mute: [exec]
-  mcp_lazy: [network]
+  mcp_lazy: [network, tools]
   dotenv_loader: [env]
-  block_tools: [env]
+  block_tools: [env, tools]
 
 patches:
 

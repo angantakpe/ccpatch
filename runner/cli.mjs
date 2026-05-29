@@ -75,7 +75,8 @@ export function parseAllowCapabilities(value) {
  * { name, capabilities, risk, missing } describing high-risk patches whose
  * capabilities are NOT all permitted by the allow list.
  */
-export function findGateViolations(patches, names, allow) {
+export function findGateViolations(patches, names, allow, acks) {
+  const ackMap = acks || {};
   const violations = [];
   for (const name of names) {
     const p = patches[name];
@@ -85,7 +86,15 @@ export function findGateViolations(patches, names, allow) {
     if (risk !== 'high') continue;
     if (allow && allow.all) continue;
     const allowSet = allow ? allow.set : new Set();
-    const missing = caps.filter(c => !allowSet.has(c));
+    // A cap is acknowledged if the `ack:` block lists it (or `*`) for this
+    // patch, OR --allow-capabilities covers it. Without this, a patch acked in
+    // ccpatch.yml (e.g. fetch_interceptor: [network]) would still be reported
+    // here as "[missing: network]" because this gate used to read only `allow`.
+    const ackedRaw = ackMap[name];
+    const ackedAll = Array.isArray(ackedRaw) && ackedRaw.includes('*');
+    if (ackedAll) continue;
+    const ackedSet = new Set(Array.isArray(ackedRaw) ? ackedRaw : []);
+    const missing = caps.filter(c => !allowSet.has(c) && !ackedSet.has(c));
     if (missing.length > 0) {
       violations.push({ name, capabilities: caps, risk, missing });
     }
@@ -481,7 +490,7 @@ async function runBuild(ctx) {
     }
 
     // Legacy strict-mode-only gate for the broader high-risk set.
-    const violations = findGateViolations(patches, patchesToApply, allow);
+    const violations = findGateViolations(patches, patchesToApply, allow, acks);
     if (violations.length > 0) {
       const summary = violations
         .map(v => `  ${v.name.padEnd(28)} ${v.capabilities.join(', ')}  [missing: ${v.missing.join(', ')}]`)
