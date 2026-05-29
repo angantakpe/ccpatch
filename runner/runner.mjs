@@ -15,6 +15,13 @@ import { getResolvedVariant } from './loader.mjs';
 
 const PHASE_ORDER = { pre: 0, main: 1, post: 2 };
 
+// Non-strict overlap trace: a cheapEditSpans envelope wider than this is treated
+// as a scatter-patch footprint too coarse to compare for overlap (see the
+// non-strict trace branch below). 256 KB clears any single contiguous injection
+// (the largest patch hooks are tens of KB) while catching the multi-MB envelopes
+// that scatter patches produce.
+const IMPRECISE_SPAN_BYTES = 256 * 1024;
+
 function phaseOf(patch) {
   return patch?.phase ?? 'main';
 }
@@ -651,12 +658,24 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
         try {
           const phaseKey = phaseOf(patch);
           let diffSpans = [];
+          let imprecise = false;
           if (typeof effectiveCode === 'string' && effectiveCode !== preCode) {
             if (globalStrict) {
               const sp = structuredPatch(name, name, preCode, effectiveCode, 'pre', 'post', { context: 0 });
               diffSpans = diffSpansFromPatch(preCode, sp);
             } else {
               diffSpans = cheapEditSpans(preCode, effectiveCode);
+              // cheapEditSpans collapses a scatter-edit patch to a single
+              // [first,last] envelope. For a patch that edits many distant sites
+              // (e.g. unhide_features touches ~14 flags across a multi-MB region)
+              // that envelope swallows any patch editing inside it and would
+              // manufacture false overlaps. Flag an implausibly wide envelope as
+              // imprecise so the overlap detector skips it in non-strict mode.
+              // Strict mode never hits this path — it uses exact per-hunk spans.
+              if (diffSpans.length === 1
+                  && diffSpans[0][1] - diffSpans[0][0] > IMPRECISE_SPAN_BYTES) {
+                imprecise = true;
+              }
             }
           }
           phaseTraces[phaseKey] = phaseTraces[phaseKey] || [];
@@ -665,6 +684,7 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
             phase: phaseKey,
             atSites: atSites ? atSites.slice() : null,
             diffSpans,
+            imprecise,
             allowOverlapWith: Array.isArray(normalized.allowOverlapWith) ? normalized.allowOverlapWith : [],
           });
         } catch (_) { /* trace is best-effort */ }

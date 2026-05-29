@@ -116,8 +116,12 @@ export function detectOverlapsInPhase(traces) {
           }
         }
       }
+      // Skip patches whose span was flagged imprecise (a too-wide non-strict
+      // cheapEditSpans envelope). Comparing such a coarse footprint manufactures
+      // false overlaps; strict mode never sets this (it uses exact per-hunk spans).
+      const impreciseDiff = A.imprecise || B.imprecise;
       // at-vs-diff: B's resolved at-sites intersect A's diff span.
-      if (B.atSites && A.diffSpans) {
+      if (!impreciseDiff && B.atSites && A.diffSpans) {
         for (const sb of B.atSites) {
           for (const ra of A.diffSpans) {
             if (rangesIntersect(ra, [sb.start, sb.end || sb.start + 1])) {
@@ -131,7 +135,7 @@ export function detectOverlapsInPhase(traces) {
         }
       }
       // diff-vs-diff: both patches touched overlapping byte ranges (approx).
-      if (A.diffSpans && B.diffSpans) {
+      if (!impreciseDiff && A.diffSpans && B.diffSpans) {
         for (const ra of A.diffSpans) {
           for (const rb of B.diffSpans) {
             if (rangesIntersect(ra, rb)) {

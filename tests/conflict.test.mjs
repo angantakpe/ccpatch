@@ -202,6 +202,23 @@ describe('applyNamedPatches — overlap detection', () => {
     );
   });
 
+  it('non-strict: an over-wide scatter envelope does not manufacture false overlaps', async () => {
+    const logger = mkLogger();
+    // ~400KB: patch a edits near both ends, so its cheapEditSpans envelope
+    // exceeds the 256KB imprecise threshold; patch b edits one spot inside it.
+    // Without the imprecise guard b would falsely "overlap" a's envelope.
+    const code = 'HEAD' + 'x'.repeat(199996) + 'MID' + 'y'.repeat(200000) + 'TAIL';
+    const patches = {
+      a: mkPatch({ apply: (c) => c.replace('HEAD', 'HEADZ').replace('TAIL', 'TAILZ'), verify: { present: 'HEADZ', weak: true } }),
+      b: mkPatch({ apply: (c) => c.replace('MID', 'MIDZ'), verify: { present: 'MIDZ', weak: true } }),
+    };
+    await applyNamedPatches(code, patches, ['a', 'b'], logger); // non-strict
+    assert.ok(
+      !logger.warnings.some(w => w.includes('[overlap]')),
+      `expected no false overlap from the wide envelope, got: ${JSON.stringify(logger.warnings)}`,
+    );
+  });
+
   it('non-overlapping patches in strict mode pass cleanly', async () => {
     // Spread changes across distinct lines so the line-resolution diff span
     // approximation correctly classifies them as disjoint.
