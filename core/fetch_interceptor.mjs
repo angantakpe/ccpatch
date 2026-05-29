@@ -32,6 +32,16 @@ globalThis.__ccpOnFetchStream = (name, handler) => {
   }
 };
 
+// A4: route swallowed subscriber errors to a debug sink instead of /dev/null.
+// Stays silent unless CLAUDE_DEBUG=1 (the convention the 'debug' patch uses),
+// preserving the current quiet behaviour while making buggy subscribers visible.
+globalThis.__ccpBusWarn = globalThis.__ccpBusWarn || function __ccpBusWarn(name, phase, err) {
+  if (process.env.CLAUDE_DEBUG !== '1' && !globalThis.__ccpDebug) return;
+  try {
+    console.error('[ccp:bus] subscriber ' + name + ' threw in ' + phase + ': ' + ((err && err.message) || err));
+  } catch (_) {}
+};
+
 function _ccpIsApiCall(urlStr, options) {
   if ((options?.method || 'GET') !== 'POST') return false;
   const _gwBase = process.env.ANTHROPIC_BASE_URL || '';
@@ -50,7 +60,7 @@ function _ccpFanOut(resp, urlStr, options, isApi) {
   if (!isApi || !resp.ok || !resp.body) {
     if (hasAfter) {
       for (const sub of subscribers) {
-        try { sub.handler({ url: urlStr, options, response: resp, isApi, events: null }); } catch(e) {}
+        try { sub.handler({ url: urlStr, options, response: resp, isApi, events: null }); } catch(e) { globalThis.__ccpBusWarn(sub.name, 'after', e); }
       }
     }
     return resp;
@@ -77,7 +87,7 @@ function _ccpFanOut(resp, urlStr, options, isApi) {
             events.push(ev);
             if (hasStream) {
               for (const sub of streamSubscribers) {
-                try { sub.handler(ev, () => streamAbort.abort()); } catch(e) {}
+                try { sub.handler(ev, () => streamAbort.abort()); } catch(e) { globalThis.__ccpBusWarn(sub.name, 'stream', e); }
               }
             }
           } catch(e) {}
@@ -89,7 +99,7 @@ function _ccpFanOut(resp, urlStr, options, isApi) {
           events.push(ev);
           if (hasStream) {
             for (const sub of streamSubscribers) {
-              try { sub.handler(ev, () => streamAbort.abort()); } catch(e) {}
+              try { sub.handler(ev, () => streamAbort.abort()); } catch(e) { globalThis.__ccpBusWarn(sub.name, 'stream', e); }
             }
           }
         } catch(e) {}
@@ -97,7 +107,7 @@ function _ccpFanOut(resp, urlStr, options, isApi) {
     } catch(e) {}
     if (hasAfter) {
       for (const sub of subscribers) {
-        try { sub.handler({ url: urlStr, options, response: resp, isApi, events }); } catch(e) {}
+        try { sub.handler({ url: urlStr, options, response: resp, isApi, events }); } catch(e) { globalThis.__ccpBusWarn(sub.name, 'after', e); }
       }
     }
   })();

@@ -24,6 +24,20 @@
  *   __ccpInspectContracts()
  *     Debug helper. Returns [{ name, version, producer, shape }] without values.
  *
+ * ── Related surface: the fetch bus error sink (advisory) ─────────────────────
+ * fetch_interceptor installs the sibling __ccp* fan-out bus. A4 added a shared
+ * error-reporting hook on that surface, documented here so the __ccp* contract
+ * stays complete:
+ *
+ *   __ccpBusWarn(name, phase, err)
+ *     Called by the interceptor when a fetch subscriber throws. `phase` is one
+ *     of 'before' | 'stream' | 'after'. Silent unless CLAUDE_DEBUG=1 (the
+ *     convention the 'debug' patch uses) or globalThis.__ccpDebug is truthy, in
+ *     which case it writes one console.error line. This is advisory only — it
+ *     replaces silent `catch(e){}` swallowing so buggy subscribers no longer
+ *     no-op INVISIBLY; it does not alter tee/fan-out semantics or the
+ *     __ccpOnFetch / __ccpOnFetchBefore / __ccpOnFetchStream registration API.
+ *
  * ── Scope ────────────────────────────────────────────────────────────────────
  * Lightweight on purpose: dotted-path probes, integer versions, no schema DSL.
  * Producers MAY skip __ccpProvide and consumers MAY skip __ccpRequire — this
