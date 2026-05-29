@@ -86,9 +86,36 @@ Run the patch verification test suite:
 make test-patches
 ```
 
-### Profiles _(coming)_
+### Profiles
 
-A `--profile minimal | standard | power` selector is planned to bundle curated patch sets. For now, edit `ccpatch.yml` or pass `PATCH=` explicitly.
+`--profile <name>` (or `-p`) bundles a curated patch set defined under `profiles:` in `ccpatch.yml`. When set, only the patches listed in that profile are applied — the per-patch `enabled:` flags in `ccpatch.yml` are ignored for that run. When omitted, behaviour falls back to the `ccpatch.yml` enabled flags.
+
+`make patch-claude-code` defaults to the **standard** profile. Override with `PROFILE=` (or disable with `PROFILE=`, empty):
+
+```
+make patch-claude-code                  # standard profile (default)
+make patch-claude-code PROFILE=minimal  # bug fixes + minimum infra
+make patch-claude-code PROFILE=power    # every patch listed in ccpatch.yml
+make patch-claude-code PROFILE=         # no profile — use ccpatch.yml enabled flags
+```
+
+Directly via the CLI:
+
+```
+node bin/patch-cli.mjs <input.js> <output.js> --profile standard
+```
+
+The three curated profiles:
+
+| Profile | Intent | Contents |
+| --- | --- | --- |
+| **minimal** | Bug fixes plus the minimum infrastructure those fixes need to run. | `react_singleton`, `esm_compat`, `contracts`, `overlay_loader`, `fetch_interceptor`, `bun_shim`, `stdin_da1_leak`, `message_normalizer`, `project_root`, `tool_result_error_content`, `subagent_hooks_stub` |
+| **standard** _(default)_ | `minimal` plus quality-of-life features (model/command system, thinking unlocks, context guards, MCP lazy-load). | everything in `minimal`, plus `input_bar_color`, `model`, `custom_commands`, `slash_dispatch`, `context_budget_warn`, `recap_strip_hint`, `unhide_features`, `extended_thinking`, `force_thinking`, `plan_mode_interview`, `tool_result_trim`, `large_content_guard`, `hook_noise_mute`, `mcp_lazy`, `dotenv_loader`, `block_tools` |
+| **power** | Every patch listed under `patches:` in `ccpatch.yml` — all features, observability, exposed internals, and optional integrations. | the full patch set (infrastructure, bug fixes, QoL, feature unlocks, command system, observability, exposed internals, and integrations such as `cost_tracker`, `webhook`, `save_conversations`, `cache_responses`) |
+
+Two additional vertical profiles ship for automation use cases: **daemon** (drive the running CLI headlessly via the event bus) and **orchestrator**. Profile membership is the source of truth in `ccpatch.yml`; an unknown patch name in a profile is skipped with a warning.
+
+`doctor` and `capabilities` accept the same `--profile` flag (`make doctor PROFILE=standard`). An explicit `PATCH=name1,name2` list bypasses the profile entirely.
 
 ### Drift check
 

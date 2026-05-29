@@ -169,7 +169,7 @@ patch: ## Apply patches to CLI: make patch [VERSION=x.y.z] [PATCH=startup,debug]
 	@test -f $(INPUT) || (echo "Error: $(INPUT) not found" && exit 1)
 	$(NODE) $(PATCH_TOOL) $(INPUT) $(OUTPUT) $(addprefix --patch ,$(subst $(comma), ,$(PATCH)))
 
-patch-claude-code: ## Apply all patches: make patch-claude-code [VERSION=x.y.z] [INPUT=cli.js] [OUTPUT=out.js]
+patch-claude-code: ## Apply the standard profile: make patch-claude-code [VERSION=x.y.z] [PROFILE=minimal|standard|power] [INPUT=cli.js] [OUTPUT=out.js]
 	@mkdir -p releases/$(VERSION)
 	@if [ ! -f $(INPUT) ] && [ -f $(CJS_EXTRACTED) ]; then \
 		echo "Using extracted: $(CJS_EXTRACTED)"; \
@@ -183,7 +183,7 @@ patch-claude-code: ## Apply all patches: make patch-claude-code [VERSION=x.y.z] 
 	if [ ! -f "$$SRC" ]; then echo "ERROR: Could not obtain cli.js for v$(VERSION)."; exit 1; fi; \
 	echo "Using: $$SRC"; \
 	node tools/anchor-doctor.mjs "$$SRC" || true; \
-	$(NODE) $(PATCH_TOOL) "$$SRC" $(OUTPUT) $(addprefix --patch ,$(subst $(comma), ,$(PATCH)))
+	$(NODE) $(PATCH_TOOL) "$$SRC" $(OUTPUT) $(addprefix --patch ,$(subst $(comma), ,$(PATCH))) $(if $(PROFILE),--profile $(PROFILE),)
 	@SHA256=$$(sha256sum $(OUTPUT) | awk '{print $$1}'); \
 	echo "$$SHA256  cli.v$(VERSION).patched.mjs" > releases/$(VERSION)/cli.v$(VERSION).patched.mjs.sha256; \
 	SIZE=$$(wc -c < $(OUTPUT) | tr -d ' '); \

@@ -43,6 +43,20 @@ BUILD_DIST      := $(OUTPUT_DIR)/dist/cli.js
 # NOTE: Do not export PATCH from your shell — pass it as a make argument.
 PATCH ?= all
 
+# ── PROFILE — curated patch set selector ─────────────────────────────────────
+# `make patch-claude-code` defaults to the `standard` profile (bug fixes +
+# quality-of-life features). Profiles are defined in ccpatch.yml under
+# `profiles:` and resolved by runner/manifest.mjs resolveProfile().
+#
+#   make patch-claude-code                    # standard profile (default)
+#   make patch-claude-code PROFILE=minimal    # bug fixes + minimum infra
+#   make patch-claude-code PROFILE=power       # every patch listed in ccpatch.yml
+#   make patch-claude-code PROFILE=            # no profile — falls back to ccpatch.yml enabled flags
+#
+# PROFILE applies only in YAML mode (PATCH unset or PATCH=all). An explicit
+# PATCH=name1,name2 list bypasses both the profile and the YAML.
+PROFILE ?= standard
+
 INPUT           ?= storage/archives/claude-code-v$(VERSION)/cli.js
 OUTPUT          ?= releases/$(VERSION)/cli.v$(VERSION).patched.mjs
 CJS_EXTRACTED   ?= storage/archives/claude-code-v$(VERSION)/cli.v$(VERSION).cjs
