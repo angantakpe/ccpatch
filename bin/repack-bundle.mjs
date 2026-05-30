@@ -27,6 +27,7 @@ import { resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { parseModules } from '../tools/bun-decompiler/decompile.mjs';
+import { growBunSeaBinary } from './bun-sea-graph.mjs';
 
 const log  = (msg) => console.log(`[repack] ${msg}`);
 const warn = (msg) => console.warn(`[repack:warn] ${msg}`);
@@ -356,66 +357,80 @@ function repack(originalBinaryPath, patchedJsPath, outputBinaryPath) {
   let patchedBuf = Buffer.from(patchedText, 'utf8');
   log(`Normalised patched JS: ${patchedBuf.length.toLocaleString()} bytes`);
 
-  // Pad patched JS to match the original region size exactly.
+  // Reconcile the patched size with the original region.
   //
-  // Empirically (Bun 1.3.x), shifting the trailer that follows the JS region causes the
-  // SEA dispatch to fail — the binary launches as bare `bun` instead of running the
-  // embedded entrypoint. The Bun trailer contains absolute file offsets that are not
-  // updated by this script. Keeping the JS region the same size leaves every post-region
-  // byte at its original file offset, so all stored offsets remain valid.
+  //   patched < original → pad with inert trailing whitespace, length-preserving splice.
+  //   patched = original → splice as-is.
+  //   patched > original → GROW path: rewrite the Bun module-graph + ELF offsets so the
+  //                        larger region still dispatches the embedded entrypoint.
+  //                        Implemented for ELF (the Bun linux-x64 target) only.
   //
-  // Padding is injected as plain ASCII spaces immediately AFTER the validated CJS wrapper
-  // close `})`, between the close and the trailing NUL (the NUL lives in `after`, not here).
-  // Trailing whitespace at file scope is unambiguously inert: it is outside the wrapper body
-  // and therefore cannot land inside any string/template/regex literal. We deliberately do
-  // NOT use lastIndexOf('})') — minified Bun output contains `})` inside literals, and the
-  // textually-last `})` is not guaranteed to be the wrapper close, so spaces inserted there
-  // could silently corrupt a literal (and the length-equal guard would not catch it).
-  // locateWrapperCloseEnd reuses the same trimEnd().endsWith('})') logic normalisePatchedJs
-  // validates against, so the close we pad after is the same one that was validated.
-  // The original region size is the JS bytes only (excluding the NUL terminator that `after`
-  // begins with), so we pad to that exact byte count.
-  if (patchedBuf.length < originalRegionSize) {
-    const padBytes = originalRegionSize - patchedBuf.length;
-    let closeEnd;
-    try {
-      closeEnd = locateWrapperCloseEnd(patchedText);
-    } catch (e) {
-      die(`Cannot pad patched JS: ${e.message}`);
+  // Why padding (smaller case) and grow-rewriting (larger case) are BOTH needed: the Bun
+  // SEA payload stores blob-relative offsets (module-record StringPointers, the modules-array
+  // pointer, byte_count, and the 8-byte payload_len header). A length-preserving splice keeps
+  // every offset valid for free. When the region GROWS, those offsets must be bumped by the
+  // delta or the binary launches as bare `bun`; growBunSeaBinary (bin/bun-sea-graph.mjs) does
+  // exactly that, decoding Bun's verified schema rather than guessing.
+  //
+  // Padding (smaller case) is injected as plain ASCII spaces immediately AFTER the validated
+  // CJS wrapper close `})`. Trailing whitespace at file scope is unambiguously inert — outside
+  // the wrapper body, so it cannot land inside any string/template/regex literal. We do NOT use
+  // lastIndexOf('})') (minified output contains `})` inside literals); locateWrapperCloseEnd
+  // reuses the same trimEnd().endsWith('})') logic normalisePatchedJs validated against.
+  let output;
+  let isGrow = false;
+  if (patchedBuf.length <= originalRegionSize) {
+    if (patchedBuf.length < originalRegionSize) {
+      const padBytes = originalRegionSize - patchedBuf.length;
+      let closeEnd;
+      try {
+        closeEnd = locateWrapperCloseEnd(patchedText);
+      } catch (e) {
+        die(`Cannot pad patched JS: ${e.message}`);
+      }
+      patchedText = patchedText.slice(0, closeEnd) + ' '.repeat(padBytes) + patchedText.slice(closeEnd);
+      patchedBuf = Buffer.from(patchedText, 'utf8');
+      log(`Padded patched JS with ${padBytes.toLocaleString()} trailing space(s) after the wrapper close to match original region size.`);
     }
-    patchedText = patchedText.slice(0, closeEnd) + ' '.repeat(padBytes) + patchedText.slice(closeEnd);
-    patchedBuf = Buffer.from(patchedText, 'utf8');
-    log(`Padded patched JS with ${padBytes.toLocaleString()} trailing space(s) after the wrapper close to match original region size.`);
-  } else if (patchedBuf.length > originalRegionSize) {
-    die(
-      `Patched JS (${patchedBuf.length.toLocaleString()} bytes) exceeds original JS region ` +
-      `(${originalRegionSize.toLocaleString()} bytes). Growth is not supported by this repacker ` +
-      `because the Bun trailer contains absolute file offsets that would need to be rewritten. ` +
-      `Reduce the patched content or implement trailer-offset patching.`
-    );
-  }
-
-  // Build output buffer. With padding above, total length matches the original exactly,
-  // so the Bun trailer (in `after`, starting at the NUL byte) keeps its original file offsets.
-  // Layout: [bytes before JS region] [patched JS (padded to original size)] [NUL + Bun trailer]
-  const before = binary.subarray(0, region.start);
-  const after  = binary.subarray(region.end);   // starts at the NUL byte
-  const output = Buffer.concat([before, patchedBuf, after]);
-
-  // Invariant: the output must be the exact same length as the original binary.
-  // The oversize check above already rejects patched JS larger than the region, and
-  // padding handles the smaller case, so equality should always hold here. This guard
-  // is defence-in-depth: if any future change (or a mis-located region) ever shifts the
-  // length, the Bun trailer's absolute file offsets would be invalidated and the binary
-  // would launch as bare `bun` instead of the embedded entrypoint. Fail loudly before
-  // writing rather than emit a silently-broken binary.
-  if (output.length !== binary.length) {
-    die(
-      `Internal error: repacked binary length (${output.length.toLocaleString()} bytes) ` +
-      `does not match original (${binary.length.toLocaleString()} bytes). ` +
-      `Refusing to write — the Bun trailer offsets would be invalidated and the binary ` +
-      `would not run the embedded entrypoint. This is a bug in the repacker.`
-    );
+    // Layout: [bytes before JS region] [patched JS (== original size)] [NUL + Bun trailer]
+    output = Buffer.concat([binary.subarray(0, region.start), patchedBuf, binary.subarray(region.end)]);
+    // Invariant: length-preserving splice must keep total length identical, or the Bun
+    // trailer's blob-relative offsets would be invalidated. Fail loudly before writing.
+    if (output.length !== binary.length) {
+      die(
+        `Internal error: repacked binary length (${output.length.toLocaleString()} bytes) ` +
+        `does not match original (${binary.length.toLocaleString()} bytes). Refusing to write — ` +
+        `the Bun trailer offsets would be invalidated. This is a bug in the repacker.`
+      );
+    }
+  } else {
+    // Grow path — patched JS is larger than the original region.
+    const delta = patchedBuf.length - originalRegionSize;
+    if (!isElf) {
+      die(
+        `Patched JS (${patchedBuf.length.toLocaleString()} bytes) exceeds the original JS region ` +
+        `(${originalRegionSize.toLocaleString()} bytes) by ${delta.toLocaleString()} bytes, and ` +
+        `grow-repack is currently implemented for ELF (linux-x64) binaries only. For this target, ` +
+        `reduce the patched content or build from the plain-JS path.`
+      );
+    }
+    log(`Patched JS exceeds the original region by ${delta.toLocaleString()} bytes — using Bun module-graph grow-repack.`);
+    try {
+      output = growBunSeaBinary(binary, region, patchedBuf, { log, warn });
+    } catch (e) {
+      die(
+        `Grow-repack failed: ${e.message}\n` +
+        `Refusing to emit a possibly-corrupt binary. Build this version from the plain-JS path ` +
+        `or with a reduced patch set.`
+      );
+    }
+    if (output.length !== binary.length + delta) {
+      die(
+        `Internal error: grown binary length (${output.length.toLocaleString()} bytes) does not ` +
+        `match expected (${(binary.length + delta).toLocaleString()} bytes). This is a bug in the grow-repacker.`
+      );
+    }
+    isGrow = true;
   }
 
   // Write atomically: write to a sibling .tmp, set execute bits on it, then rename into
@@ -445,7 +460,9 @@ function repack(originalBinaryPath, patchedJsPath, outputBinaryPath) {
   //     foreign binary, and we must not fail the build solely because the smoke run can't execute.
   // Only a binary that runs AND prints the bare Bun runtime banner is treated as a real failure.
   if (process.env.CCPATCH_REPACK_SMOKE !== '0') {
-    runSmokeCheck(outputBinaryPath);
+    // Grow-repack rewrote load-bearing offsets, so when the binary can actually run we hold it
+    // to the STRONGER bar: it must print the embedded Claude version, not merely avoid bare-bun.
+    runSmokeCheck(outputBinaryPath, { requireClaude: isGrow });
   } else {
     log('Post-repack smoke check skipped (CCPATCH_REPACK_SMOKE=0).');
   }
@@ -464,7 +481,7 @@ function repack(originalBinaryPath, patchedJsPath, outputBinaryPath) {
  * Deliberately does not assert a specific Claude version string — the embedded entrypoint may
  * print its own version which we don't know here. The goal is to catch the bare-`bun` fallback.
  */
-function runSmokeCheck(binaryPath) {
+function runSmokeCheck(binaryPath, { requireClaude = false } = {}) {
   let res;
   try {
     res = spawnSync(binaryPath, ['--version'], {
@@ -491,7 +508,18 @@ function runSmokeCheck(binaryPath) {
       `the Bun trailer offsets are likely invalid. Do not ship this binary.`
     );
   }
-  log(`Post-repack smoke check passed (binary ran, no bare-bun fallback detected).`);
+  // Grow-repack rewrote load-bearing offsets. A binary that ran but does NOT print the
+  // embedded Claude Code version line means dispatch landed somewhere wrong — gate on the
+  // oracle (the only reliable proof the grown module graph still resolves). A spawn that was
+  // SKIPPED above (foreign arch / no-exec sandbox) cannot be gated and is left as a warning.
+  if (requireClaude && !/\d+\.\d+\.\d+ \(Claude Code\)/.test(out)) {
+    die(
+      `Post-repack smoke check FAILED (grow path): \`${binaryPath} --version\` did not print the ` +
+      `embedded Claude Code version line:\n${out.trim().slice(0, 200)}\n` +
+      `A grow-repack must boot to the embedded entrypoint. Do not ship this binary.`
+    );
+  }
+  log(`Post-repack smoke check passed (binary ran${requireClaude ? ', printed Claude version' : ', no bare-bun fallback'}).`);
 }
 
 // ---------------------------------------------------------------------------

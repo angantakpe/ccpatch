@@ -112,18 +112,64 @@ replacement:
 
 ---
 
-## Trailer-offset rewriting investigation (size-increasing repack) — BLOCKED, do NOT guess
+## Trailer-offset rewriting (size-increasing repack) — RESOLVED (ELF), implemented in `bin/bun-sea-graph.mjs`
 
-This section records a focused attempt to implement the size-increasing repack path
-(item 6: "rewrite stored absolute offsets by `newLen - oldLen` so a larger patched JS
-region can be repacked"). The attempt was **driven empirically against a real linux-x64
-fixture used as an executable oracle** (`storage/archives/claude-code-v2.1.158/bin/claude.exe`,
-which boots and prints `2.1.158 (Claude Code)`), not by guessing. The conclusion is that
-the trailer format is **not** the "simple set of absolute file offsets" the existing
-code comments assumed, and a safe rewrite cannot be shipped without a verified decoder
-for Bun's internal serialized module-graph schema. **The fail-loud oversize guard is kept
-intact.** What follows is the verified ground truth and a precise plan for whoever picks
-this up — so the next attempt starts from facts, not from re-discovering them.
+Size-increasing native repack now works for ELF (linux-x64) Bun binaries:
+`growBunSeaBinary()` decodes Bun's verified `StandaloneModuleGraph` serialization and
+rewrites every load-bearing offset by the growth delta. Verified against the real
+oracle: a `+6 KB` splice of `cli.js` repacks and boots as `2.1.158 (Claude Code)`
+(`tests/repack.test.mjs › repack grow path`). `bin/repack-bundle.mjs` now takes the
+grow path instead of `die()` when `patched > original` on ELF, and gates the result on
+a STRICT smoke check (must print the embedded Claude version, not merely avoid bare-bun).
+Mach-O / PE growth remains unimplemented and still fails loud.
+
+### Why the earlier attempt failed (root cause)
+
+The first investigation (recorded below, kept for its still-valid empirical method)
+**mis-parsed the trailer**: it modelled `Offsets` as a **20-byte** struct
+`{byte_count:u64, modules_ptr:{u32,u32}, entry_point_id:u32}` and never accounted for the
+**8-byte `payload_len` header** that prefixes the `.bun` section data. The real schema —
+read from `src/standalone_graph/StandaloneModuleGraph.zig` at tag `bun-v1.3.14` — is:
+
+```
+.bun section = [ payload_len: u64 ][ payload (payload_len bytes) ]
+payload      = [ blob (byte_count bytes) ][ Offsets (32 bytes) ][ trailer (16 bytes) ]
+
+Offsets (extern struct, 32 bytes, LE):
+  byte_count            : u64              @0    (whole blob length)
+  modules_ptr           : {off:u32,len:u32} @8
+  entry_point_id        : u32              @16
+  compile_exec_argv_ptr : {off:u32,len:u32} @20
+  flags                 : u32              @28
+```
+
+`ELF.getData()` returns `section[8 .. 8+payload_len]`, and `fromBytes` indexes every
+StringPointer from **blob offset 0** with the working buffer bounded to
+`raw_bytes[0..byte_count]`. Because the earlier attempt read `byte_count` from the wrong
+struct offset (it landed on the value `260`) and never grew the `payload_len` header, the
+grown blob was truncated and the module-record pointer resolved into garbage — so Bun fell
+back to the bare runtime. That is the `1.3.14` banner the experiment table below recorded.
+
+### The fix (what `growBunSeaBinary` rewrites, all by `+delta`)
+
+`payload_len` header · `Offsets.byte_count` · `modules_ptr.off` (and `argv.off` when used)
+· every module-record StringPointer `.off ≥ splice` · the grown module's `contents.len`
+· ELF `.bun` `sh_size`, the `sh_offset` of sections after the splice, `e_shoff`, and the
+containing `PT_LOAD`'s `p_filesz`/`p_memsz`. The grown module is matched by content-block
+**end** (`region.end`), so the stripped `// @bun\n` content prefix is preserved untouched.
+Any unexpected topology (no matching record, no containing `PT_LOAD`, schema mismatch)
+**throws** rather than emitting a maybe-corrupt binary.
+
+---
+
+### Original investigation log (BLOCKED) — kept for method; conclusions superseded above
+
+This section recorded the focused first attempt. It was **driven empirically against a real
+linux-x64 fixture used as an executable oracle** (`storage/archives/claude-code-v2.1.158/bin/claude.exe`).
+Its empirical method was sound and is preserved; its conclusion ("cannot be shipped without
+a verified decoder") was correct — the decoder now exists. NOTE: fact #3 below
+under-counts the `Offsets` struct (it is 32 bytes, not 20) and fact #5's "cannot decode"
+is superseded by the verified schema above.
 
 ### Verified facts about the v2.1.158 fixture (Bun 1.3.14, ELF x86-64)
 

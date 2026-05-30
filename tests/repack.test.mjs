@@ -10,6 +10,8 @@ import {
   assertRegionEndIsNul,
   detectBunVersion,
 } from '../bin/repack-bundle.mjs';
+import { parseElfBunGraph, growBunSeaBinary } from '../bin/bun-sea-graph.mjs';
+import { readFileSync } from 'node:fs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
@@ -179,10 +181,66 @@ test('repack supported path: round-trip extract→repack boots as Claude Code', 
   }
 });
 
-// Oversize patch must fail loudly (process.exit(1)) and write NO output binary — the
-// safety guarantee the grow path relies on until trailer-offset rewriting lands. Driven
-// against the real fixture via the CLI subprocess so die()'s process.exit is observed.
-test('repack fail-loud: oversize patched JS is rejected and writes no binary', async (t) => {
+// ---------------------------------------------------------------------------
+// Bun SEA module-graph decoder — bin/bun-sea-graph.mjs.
+//
+// parseElfBunGraph decodes the verified Bun StandaloneModuleGraph schema (Offsets
+// is 32 bytes; the .bun section is [u64 payload_len][blob][Offsets][trailer]; every
+// StringPointer is blob-relative). These tests pin the schema invariants and the
+// fail-loud behaviour (refuse to guess) the grow path relies on. The parse runs on
+// any platform (it just reads bytes); only the spawn-based grow test needs linux-x64.
+describe('Bun SEA module-graph decoder — parseElfBunGraph', () => {
+  it('throws on a non-ELF buffer (no guessing)', () => {
+    assert.throws(() => parseElfBunGraph(Buffer.from('not an elf at all, padding padding')), /not an ELF/);
+  });
+
+  it('decodes the real fixture: 32-byte Offsets, consistent byte_count, entry = cli.js', (t) => {
+    if (!existsSync(FIXTURE)) {
+      t.skip(`fixture not available: ${FIXTURE} (needs the storage/archives symlink)`);
+      return;
+    }
+    const g = parseElfBunGraph(readFileSync(FIXTURE));
+    // payload_len header and Offsets.byte_count must agree with the +48 (Offsets+trailer) framing.
+    assert.equal(g.offsets.byteCount + 32 + 16, g.payloadLen, 'byte_count + Offsets(32) + trailer(16) == payload_len');
+    assert.equal(8 + g.payloadLen, g.bun.size, '.bun section = [u64 header] + payload');
+    assert.equal(g.offsets.modulesLen % 52, 0, 'module-record array is a whole number of 52-byte records');
+    assert.ok(g.records.length >= 1, 'at least one module record');
+    const entry = g.records[g.offsets.entryPointId];
+    assert.ok(entry && /\/cli\.js$/.test(entry.name), `entry module should be cli.js (got ${entry?.name})`);
+  });
+
+  it('growBunSeaBinary refuses to guess when the region matches no module record', (t) => {
+    if (!existsSync(FIXTURE)) {
+      t.skip(`fixture not available: ${FIXTURE}`);
+      return;
+    }
+    const binary = readFileSync(FIXTURE);
+    // A region whose end matches no module content block must throw, not silently corrupt.
+    assert.throws(
+      () => growBunSeaBinary(binary, { start: 10, end: 12345 }, Buffer.alloc(99999)),
+      /Could not match the JS region/,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Size-increasing (grow-path) repack — IMPLEMENTED.
+//
+// Item 6: trailer-offset rewriting so a patched JS region LARGER than the original
+// can be repacked. growBunSeaBinary (bin/bun-sea-graph.mjs) decodes Bun's verified
+// StandaloneModuleGraph schema and rewrites every load-bearing offset by the growth
+// delta — the 8-byte payload_len header, Offsets.byte_count, modules_ptr, the grown
+// module's contents.len, every module-record StringPointer ≥ the splice point, and the
+// ELF section/program-header offsets. The earlier blocker (see git history of
+// docs/native-repack-notes.md) was a mis-parsed Offsets struct (read as 20 bytes; it is
+// 32) and a missed payload_len header, so byte_count never grew → bare-bun fallback.
+//
+// This drives the real CLI: extract → inject a KNOWN-size sentinel after the wrapper
+// open so the patched region strictly exceeds the original → repack (which runs its own
+// STRICT grow smoke check) → spawn the output and assert it boots as Claude Code, and
+// that the output binary actually grew by the delta. Skips cleanly off linux-x64 or
+// when the fixture is unavailable, like tests/boot-smoke.test.mjs.
+test('repack grow path: size-increasing splice boots as Claude, not bare bun', async (t) => {
   if (!isLinuxX64) {
     t.skip(`fixtures are linux-x64; this host is ${process.platform}-${process.arch}`);
     return;
@@ -192,7 +250,7 @@ test('repack fail-loud: oversize patched JS is rejected and writes no binary', a
     return;
   }
 
-  const work = mkdtempSync(join(tmpdir(), 'ccpatch-oversize-'));
+  const work = mkdtempSync(join(tmpdir(), 'ccpatch-grow-'));
   try {
     const extracted = join(work, 'cli.js');
     const grown = join(work, 'cli.grown.js');
@@ -204,64 +262,46 @@ test('repack fail-loud: oversize patched JS is rejected and writes no binary', a
     });
     assert.equal(ex.status, 0, `extract failed\n${ex.stderr || ''}`);
 
-    // Grow the extracted JS past the original region: inject a large comment block right
-    // after the CJS wrapper open so the file still normalises but exceeds the region.
-    const { readFileSync, writeFileSync } = await import('node:fs');
+    // Grow the extracted JS past the original region: inject a large inert comment block
+    // right after the CJS wrapper open so the file still normalises but exceeds the region.
+    const { writeFileSync } = await import('node:fs');
     const text = readFileSync(extracted, 'utf8');
     const openRe = /^\(function\s*\(\s*exports\s*,\s*require\s*,\s*module\s*,\s*__filename\s*,\s*__dirname\s*\)\s*\{/;
     const m = openRe.exec(text);
     assert.ok(m, 'extracted file is missing the CJS wrapper open');
-    const sentinel = `/* CCPATCH_OVERSIZE_SENTINEL ${'x'.repeat(8192)} */`;
+    const SENTINEL_BYTES = 8192;
+    const sentinel = `/* CCPATCH_GROW_SENTINEL ${'x'.repeat(SENTINEL_BYTES)} */`;
     writeFileSync(grown, text.slice(0, m[0].length) + sentinel + text.slice(m[0].length));
+
+    const fixtureSize = readFileSync(FIXTURE).length;
 
     const rp = spawnSync(process.execPath, [REPACK_CLI, FIXTURE, grown, output], {
       encoding: 'utf8',
       timeout: 120_000,
     });
-    assert.notEqual(rp.status, 0, 'oversize repack should fail loudly (non-zero exit)');
-    assert.match(`${rp.stderr || ''}${rp.stdout || ''}`, /exceeds original JS region|Growth is not supported/,
-      'oversize failure should explain the region-size limit');
-    assert.ok(!existsSync(output), 'oversize repack must not write an output binary');
+    // repack() runs its own strict grow smoke check internally; a non-zero exit is a real
+    // failure (bare-bun, parse mismatch, or write error).
+    assert.equal(rp.status, 0, `grow repack failed (status ${rp.status})\n${rp.stderr || ''}${rp.stdout || ''}`);
+    assert.match(`${rp.stdout || ''}`, /Bun module-graph grow-repack/, 'should have taken the grow path');
+    assert.ok(existsSync(output), 'grow repack did not produce an output binary');
+
+    // The output must be LARGER than the fixture by exactly the injected growth.
+    const outSize = readFileSync(output).length;
+    assert.ok(outSize > fixtureSize, `grown binary (${outSize}) should exceed the fixture (${fixtureSize})`);
+
+    // Spawn the grown binary and assert it boots as Claude Code, not bare Bun.
+    const run = spawnSync(output, ['--version'], { encoding: 'utf8', timeout: 30_000 });
+    if (run.error) {
+      t.skip(`cannot exec repacked binary here: ${run.error.code || run.error.message}`);
+      return;
+    }
+    const out = `${run.stdout || ''}${run.stderr || ''}`;
+    assert.equal(run.status, 0, `grown binary exited ${run.status}\n${out.slice(0, 500)}`);
+    assert.match(out, /\d+\.\d+\.\d+ \(Claude Code\)/,
+      `grown --version did not look like Claude Code (bare bun?)\n${out.slice(0, 500)}`);
+    assert.ok(out.includes(FIXTURE_BUN_VERSION),
+      `expected the embedded version ${FIXTURE_BUN_VERSION}\n${out.slice(0, 500)}`);
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
-});
-
-// ---------------------------------------------------------------------------
-// Size-increasing (grow-path) repack — BLOCKED.
-//
-// Item 6 asked for trailer-offset rewriting so a patched JS region LARGER than the
-// original could be repacked. The investigation in docs/native-repack-notes.md
-// (section "Trailer-offset rewriting investigation") proved, against the real
-// linux-x64 fixture used as an executable oracle, that the Bun standalone trailer is
-// NOT a simple set of absolute file offsets we can enumerate and bump: it is an
-// undocumented, packed serialized module-graph schema, and EVERY size-increasing
-// rewrite strategy tried fell back to bare Bun (`--version` printed the Bun runtime
-// version, e.g. `1.3.14`, instead of `X.Y.Z (Claude Code)`). Per the task's safety
-// rule we did NOT ship a guess; the repacker keeps its fail-loud oversize guard.
-//
-// This test is .skip'd on purpose and documents the EXACT end-to-end assertion the
-// unblocking work (a verified Bun schema decoder — see the docs plan) must make pass:
-// take the real .exe, splice a JS region LARGER than the original, repack, spawn the
-// result with --version, and assert exit 0 with Claude-Code-branded output (NOT a bare
-// Bun banner). It skips cleanly off linux-x64 or when the fixture is unavailable, the
-// same way tests/boot-smoke.test.mjs guards its spawn.
-test('repack grow path (BLOCKED): size-increasing splice boots as Claude, not bare bun', { skip: 'trailer-offset rewriting is unimplemented — see docs/native-repack-notes.md' }, async (t) => {
-  if (!isLinuxX64) {
-    t.skip(`fixtures are linux-x64; this host is ${process.platform}-${process.arch}`);
-    return;
-  }
-  if (!existsSync(FIXTURE)) {
-    t.skip(`fixture not available: ${FIXTURE} (needs the storage/archives symlink)`);
-    return;
-  }
-  // When implemented, the body must:
-  //   1. read FIXTURE, locate the cli.js region, splice in a sentinel comment block of
-  //      KNOWN size so the patched region is strictly LARGER than the original,
-  //   2. repack via repack() (with CCPATCH_REPACK_SMOKE left on),
-  //   3. spawn the output with --version and assert:
-  //        assert.equal(code, 0);
-  //        assert.match(stdout, /\d+\.\d+\.\d+ \(Claude Code\)/);   // NOT a bare `Bun X.Y.Z` banner
-  //   The expected brand version for this fixture is `${FIXTURE_BUN_VERSION} (Claude Code)`.
-  assert.fail('unreachable: this test is skipped until trailer-offset rewriting lands');
 });
