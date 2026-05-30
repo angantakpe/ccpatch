@@ -57,6 +57,21 @@ try {
     return true;
   }
 
+  // ── Keep context_management consistent with thinking ─────────────────────
+  // CC pairs body.thinking with a context_management edit
+  // {type:"clear_thinking_20251015"}. That strategy is only valid while
+  // thinking is enabled/adaptive, so once we remove body.thinking we MUST drop
+  // the orphaned edit too — otherwise the API 400s:
+  //   "clear_thinking_20251015 strategy requires thinking to be enabled or adaptive".
+  function __ccpStripClearThinking(body) {
+    var cm = body && body.context_management;
+    if (!cm || !Array.isArray(cm.edits)) return;
+    cm.edits = cm.edits.filter(function(e) {
+      return !(e && typeof e.type === 'string' && e.type.indexOf('clear_thinking') === 0);
+    });
+    if (cm.edits.length === 0) delete body.context_management;
+  }
+
   if (typeof globalThis.__ccpOnFetchBefore === 'function') {
     globalThis.__ccpOnFetchBefore('extended_thinking', async function(ctx) {
       if (!ctx.isApi || !ctx.options || !ctx.options.body) return;
@@ -74,6 +89,7 @@ try {
           if (body.thinking) {
             if (!__ccpIsComplexPrompt(body.messages)) {
               delete body.thinking;
+              __ccpStripClearThinking(body);
             }
           }
         } else if (thinking === 'enabled') {
@@ -81,6 +97,7 @@ try {
           body.thinking = { type: 'enabled', budget_tokens: budgetTokens };
         } else if (thinking === 'disabled') {
           delete body.thinking;
+          __ccpStripClearThinking(body);
         }
 
         if (effort) {
