@@ -20,6 +20,7 @@
     "tests/smoke_bridge.mjs",
     "tests/bridge_host.mjs",
     "tests/smoke_integration.mjs",
+    "tests/integration_roundtrip.mjs",
     "core/**/*.mjs",
     "extensions/**/*.mjs"
   ],

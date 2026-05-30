@@ -5,6 +5,7 @@ include scripts/mk/vars.mk
 include scripts/mk/cli.mk
 
 .PHONY: help refmap refmap-check smoke-bridge smoke-integration \
+        smoke-integration-roundtrip \
         bridge-host bridge-host-stop bridge-tail bridge-submit \
         verticals-check lint lint-dead lint-unused
 
@@ -51,6 +52,9 @@ patch-daemon: ## Tier 3 prep — patch cli with the daemon profile (event_bus + 
 
 smoke-integration: ## Tier 3 — drive a real patched CLI over the bridge (uses CCPATCH_INTEGRATION_CLI if set, else latest releases/)
 	@node tests/smoke_integration.mjs
+
+smoke-integration-roundtrip: ## Tier 3 — boot a daemon bundle, drive a full agent-loop + tool-dispatch round-trip with a stubbed API (skips cleanly if no daemon bundle)
+	@node tests/integration_roundtrip.mjs
 
 verticals-check: lint smoke-bridge ## Tier 1 — full vertical CI gate (lint + protocol smoke)
 	@echo "[verticals-check] OK"

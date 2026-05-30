@@ -152,3 +152,25 @@ jobs:
       - name: Boot smoke test (JS bundle)
         if: steps.probe.outputs.available == 'true'
         run: npm run test:boot
+
+      # Deepen the smoke beyond `--version`: build a daemon-profile bundle (the
+      # full headless stack — event_bus + bridge + expose_tool_dispatch +
+      # expose_submit_input) and drive a real agent-loop + tool-dispatch
+      # round-trip against a STUBBED Anthropic API (no network, no credentials).
+      # `--version` exits before the agent loop / tool dispatch / API client
+      # ever run; this proves the patched CLI actually executes a query and
+      # dispatches a tool. `make patch-daemon` passes --allow-unacked because the
+      # daemon profile is intentionally capability-gated (see ccpatch.yml).
+      - name: Build daemon-profile bundle (headless stack)
+        if: steps.probe.outputs.available == 'true'
+        run: make patch-daemon VERSION=${{ steps.ver.outputs.version }}
+
+      # integration_roundtrip.mjs auto-discovers the daemon bundle under
+      # releases/ and exits 2 (clean skip) if none is present. The build step
+      # above guarantees one exists, so on this gated path a skip would itself
+      # be a regression — `make patch-daemon` either produced a bridge bundle or
+      # failed loudly. A 90s default budget covers the ~40s boot + 2-turn loop.
+      - name: Integration round-trip (agent loop + tool dispatch, stubbed API)
+        if: steps.probe.outputs.available == 'true'
+        timeout-minutes: 4
+        run: npm run test:integration
