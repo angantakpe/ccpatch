@@ -8,7 +8,7 @@
         start \
         patch-claude-code-native \
         clean clean-patched clean-identifiers clean-all \
-        test-patches patch-coverage
+        test-patches patch-coverage new-patch
 
 install: ## Install tool dependencies (prettier + lebab required by reconstructor)
 	bun install
@@ -210,6 +210,21 @@ patch-claude-code: ## Apply the standard profile: make patch-claude-code [VERSIO
 
 patch-list: ## List available patches
 	@$(NODE) $(PATCH_TOOL) --list
+
+# `NAME` is a common environment variable (set by some shells/distros). Ignore
+# an environment-origin value so `make new-patch` with no NAME shows usage rather
+# than scaffolding a patch named after a stray env var. A command-line or
+# Makefile/.env assignment (origin "command line"/"file") is respected.
+ifeq ($(origin NAME),environment)
+override NAME :=
+endif
+
+new-patch: ## Scaffold a new patch file: make new-patch NAME=my_feature [CATEGORY=extension|core] [KIND=prefix|free|postfix|transpiler|splice|flag]
+	@test -n "$(NAME)" || (echo "usage: make new-patch NAME=my_feature [CATEGORY=extension|core] [KIND=prefix|free|postfix|transpiler|splice|flag] [FORCE=1]" && exit 2)
+	@node bin/scaffold-patch.mjs "$(NAME)" \
+		$(if $(CATEGORY),--category=$(CATEGORY),) \
+		$(if $(KIND),--kind=$(KIND),) \
+		$(if $(FORCE),--force,)
 
 doctor: ## Check anchor health against installed cli.js (read-only): make doctor [VERSION=x.y.z] [PROFILE=name] [INPUT=cli.js]
 	@SRC=$(INPUT); [ ! -f "$$SRC" ] && SRC=$(CJS_EXTRACTED); \

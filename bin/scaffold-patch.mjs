@@ -236,7 +236,12 @@ function main(argv = process.argv) {
     return 1;
   }
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(filePath, TEMPLATES[opts.kind](opts.name), 'utf8');
+  // Prepend `// @ts-check` so the @type JSDoc on each template is actually
+  // enforced by the editor and by `make lint-dead` (tsc --checkJs), turning a
+  // mistyped manifest field into an author-time error instead of a build-time one.
+  const body = TEMPLATES[opts.kind](opts.name);
+  const content = body.startsWith('// @ts-check') ? body : `// @ts-check\n${body}`;
+  fs.writeFileSync(filePath, content, 'utf8');
   console.log(`Wrote ${filePath}`);
 
   const registryWrote = appendFixtureStub(opts.name);
