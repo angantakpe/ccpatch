@@ -1,5 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { createPatch } from 'diff';
 import { applyNamedPatches, topoSort } from '../runner/runner.mjs';
 
 const silent = { log() {}, warn() {}, error() {} };
@@ -107,6 +108,112 @@ describe('applyNamedPatches — non-strict (default)', () => {
       p: { description: 't', apply: (c) => c + '!', verify: { present: 'NOT-THERE', weak: true } },
     };
     await assert.doesNotReject(() => applyNamedPatches('x', patches, ['p'], silent));
+  });
+});
+
+describe('applyNamedPatches — Finding #1: no-op with verify.present is fatal by default', () => {
+  function mkLogger() {
+    const warnings = [];
+    return { warnings, log() {}, warn(m) { warnings.push(String(m)); }, error() {} };
+  }
+
+  it('throws by DEFAULT when a verify.present patch produces no change', async () => {
+    const patches = {
+      drifted: { description: 't', apply: (c) => c, verify: { present: 'WANTED', weak: true } },
+    };
+    await assert.rejects(
+      () => applyNamedPatches('x', patches, ['drifted'], silent),
+      /default mode|no-change/,
+    );
+  });
+
+  it('--best-effort downgrades the verify.present no-op back to a warn (no throw)', async () => {
+    const patches = {
+      drifted: { description: 't', apply: (c) => c, verify: { present: 'WANTED', weak: true } },
+    };
+    const logger = mkLogger();
+    const { code, results } = await applyNamedPatches('x', patches, ['drifted'], logger, { bestEffort: true });
+    assert.equal(code, 'x');
+    assert.equal(results.drifted, 'no-change');
+    assert.ok(logger.warnings.some(w => w.includes('produced no changes')));
+  });
+
+  it('a no-op patch with ONLY verify.absent stays a non-fatal no-change by default', async () => {
+    const patches = {
+      clean: { description: 't', apply: (c) => c, verify: { absent: 'BAD' } },
+    };
+    const { code, results } = await applyNamedPatches('x', patches, ['clean'], silent);
+    assert.equal(code, 'x');
+    assert.equal(results.clean, 'no-change-ok');
+  });
+
+  it('an EMPTY verify.present ("") is not a real present assertion — no-op stays non-fatal', async () => {
+    const patches = {
+      noop: { description: 't', apply: (c) => c, verify: { present: '', weak: true } },
+    };
+    const { code, results } = await applyNamedPatches('hello', patches, ['noop'], silent);
+    assert.equal(code, 'hello');
+    assert.equal(results.noop, 'no-change');
+  });
+
+  it('report.noChange counts no-op patches (best-effort)', async () => {
+    const patches = {
+      a: { description: 't', apply: (c) => c, verify: { present: 'WANTED', weak: true } }, // no-change
+      b: { description: 't', apply: (c) => c + 'B', verify: { present: 'B', weak: true } }, // applied
+    };
+    const { report } = await applyNamedPatches('x', patches, ['a', 'b'], silent, { bestEffort: true });
+    assert.equal(report.noChange, 1);
+  });
+});
+
+describe('applyNamedPatches — Finding #2: applied-fallback is loud and counted', () => {
+  function mkLogger() {
+    const warnings = [];
+    return { warnings, log() {}, warn(m) { warnings.push(String(m)); }, error() {} };
+  }
+
+  // Build a unified diff that transforms `before` -> `after`.
+  function fallbackFor(before, after) {
+    return createPatch('fixture.js', before, after, 'before', 'after');
+  }
+
+  it('default mode: stale fallback applies, warns loudly, and is counted', async () => {
+    const before = 'line1\nline2\nline3\n';
+    const after  = 'line1\nline2-CHANGED\nline3\n';
+    const patches = {
+      drifted: {
+        description: 't',
+        apply: (c) => c, // anchor missed
+        verify: { present: 'line2-CHANGED', weak: true },
+        fallbackDiff: { patch: fallbackFor(before, after), capturedAgainst: '2.1.148' },
+      },
+    };
+    const logger = mkLogger();
+    const { code, results, report } = await applyNamedPatches(before, patches, ['drifted'], logger);
+    assert.equal(code, after);
+    assert.equal(results.drifted, 'applied-fallback');
+    assert.equal(report.appliedFallback, 1);
+    assert.ok(
+      logger.warnings.some(w => w.includes('STALE FALLBACK DIFF')),
+      `expected loud stale-fallback warning, got: ${JSON.stringify(logger.warnings)}`,
+    );
+  });
+
+  it('strict mode: a stale-fallback apply is FATAL', async () => {
+    const before = 'line1\nline2\nline3\n';
+    const after  = 'line1\nline2-CHANGED\nline3\n';
+    const patches = {
+      drifted: {
+        description: 't',
+        apply: (c) => c,
+        verify: { present: 'line2-CHANGED', weak: true },
+        fallbackDiff: { patch: fallbackFor(before, after), capturedAgainst: '2.1.148' },
+      },
+    };
+    await assert.rejects(
+      () => applyNamedPatches(before, patches, ['drifted'], silent, { strict: true, version: '2.1.148' }),
+      /stale fallback diff/,
+    );
   });
 });
 

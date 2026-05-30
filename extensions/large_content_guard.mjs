@@ -18,17 +18,23 @@ export default {
     const MAX = 50_000;
     let result = code;
 
-    // First anchor: guard the general content rendering path (lZ7 line ~5514).
-    // The component name has rotated across versions (ah_ → ox_ → A45) but the
-    // props destructure shape `{content:Y,addMargin:K,dot:f,color:O,dimColor:M}`
-    // is stable. Match the call-site by capturing the component identifier.
-    const callRe = /([A-Za-z_$][\w$]*),\{content:Y,addMargin:K,dot:f,color:O,dimColor:M\}/;
+    // First anchor: guard the general content rendering path (the gN_/lZ7
+    // renderer call-site, ~line 5514). The component name has rotated across
+    // versions (ah_ → ox_ → A45 → gN_) and the *property keys*
+    // {content,addMargin,dot,color,dimColor} are stable — but the minified
+    // *local variable* names bound to them rotate every release, and even
+    // reorder (dot/color swapped f↔O between 2.1.156 → 2.1.158). Capture the
+    // component identifier and all five binding names so the patch survives
+    // rotation instead of pinning literals that drift out from under it.
+    // The leading `COMP,` requirement excludes the component *definition* site
+    // (`...c(17),{content:...}`), whose preceding `)` is not an identifier char.
+    const callRe = /([A-Za-z_$][\w$]*),\{content:([A-Za-z_$][\w$]*),addMargin:([A-Za-z_$][\w$]*),dot:([A-Za-z_$][\w$]*),color:([A-Za-z_$][\w$]*),dimColor:([A-Za-z_$][\w$]*)\}/;
     const callMatch = result.match(callRe);
     let result2 = result;
     if (callMatch) {
-      const COMP = callMatch[1];
-      const anchor2 = `${COMP},{content:Y,addMargin:K,dot:f,color:O,dimColor:M}`;
-      const patched2 = `${COMP},{content:(typeof Y==="string"&&Y.length>${MAX}?Y.slice(0,${MAX})+"\\u2026[truncated "+(Y.length-${MAX})+" chars]":Y),addMargin:K,dot:f,color:O,dimColor:M}`;
+      const [anchor2, COMP, C, AM, DOT, COL, DC] = callMatch;
+      const guarded = `(typeof ${C}==="string"&&${C}.length>${MAX}?${C}.slice(0,${MAX})+"\\u2026[truncated "+(${C}.length-${MAX})+" chars]":${C})`;
+      const patched2 = `${COMP},{content:${guarded},addMargin:${AM},dot:${DOT},color:${COL},dimColor:${DC}}`;
       result2 = result.split(anchor2).join(patched2);
       console.log(`  [large-content-guard] ${COMP} general content path protected (max ${MAX} chars)`);
     } else {

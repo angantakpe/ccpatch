@@ -270,9 +270,20 @@ function repack(originalBinaryPath, patchedJsPath, outputBinaryPath) {
   const after  = binary.subarray(region.end);   // starts at the NUL byte
   const output = Buffer.concat([before, patchedBuf, after]);
 
-  const delta = output.length - binary.length;
-  if (delta !== 0) {
-    log(`Binary size: ${delta > 0 ? '+' : ''}${delta.toLocaleString()} bytes → ${(output.length / 1024 / 1024).toFixed(2)} MB`);
+  // Invariant: the output must be the exact same length as the original binary.
+  // The oversize check above already rejects patched JS larger than the region, and
+  // padding handles the smaller case, so equality should always hold here. This guard
+  // is defence-in-depth: if any future change (or a mis-located region) ever shifts the
+  // length, the Bun trailer's absolute file offsets would be invalidated and the binary
+  // would launch as bare `bun` instead of the embedded entrypoint. Fail loudly before
+  // writing rather than emit a silently-broken binary.
+  if (output.length !== binary.length) {
+    die(
+      `Internal error: repacked binary length (${output.length.toLocaleString()} bytes) ` +
+      `does not match original (${binary.length.toLocaleString()} bytes). ` +
+      `Refusing to write — the Bun trailer offsets would be invalidated and the binary ` +
+      `would not run the embedded entrypoint. This is a bug in the repacker.`
+    );
   }
 
   // Write output binary with execute permissions.

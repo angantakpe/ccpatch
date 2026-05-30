@@ -59,7 +59,10 @@ describe('fallbackDiff — runtime fallback', () => {
       },
     };
     const logger = mkLogger();
-    const { code: out } = await applyNamedPatches(original, patches, ['drifted'], logger);
+    // bestEffort: a no-op patch declaring verify.present is fatal by default
+    // now (finding #1); this test asserts the lenient-mode drift WARNING still
+    // fires and the code is returned unchanged.
+    const { code: out } = await applyNamedPatches(original, patches, ['drifted'], logger, { bestEffort: true });
     assert.equal(out, original);
     assert.ok(
       logger.entries.warn.some(w => w.includes('produced no changes')),
@@ -111,8 +114,10 @@ describe('fallbackDiff — runtime fallback', () => {
       },
     };
     const logger = mkLogger();
+    // bestEffort: keep lenient semantics so this test can assert the no-op
+    // drift warning fires (finding #1 makes verify.present no-ops fatal by default).
     const { code: out } = await applyNamedPatches(
-      original, patches, ['drifted'], logger, { disableFallback: true },
+      original, patches, ['drifted'], logger, { disableFallback: true, bestEffort: true },
     );
     assert.equal(out, original);
     assert.ok(

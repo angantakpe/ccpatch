@@ -29,6 +29,15 @@ Columns:
 | `project_root` | projectRoot resolver | cwd / env | None | on |
 | `tool_result_error_content` | tool_result block builder | tool error blocks | None | on |
 
+`fetch_interceptor` isolates each registered subscriber: a throw in a
+network/fetch subscriber is **caught and swallowed by default** so one buggy
+handler cannot disrupt the CLI's network path. Swallowed errors are routed to a
+debug sink (`__ccpBusWarn`) that stays silent unless `CLAUDE_DEBUG=1` (or
+`globalThis.__ccpDebug`) is set. This contains the blast radius of a faulty
+subscriber, but it also means a misbehaving one fails invisibly — see
+[CONTRIBUTING.md](./CONTRIBUTING.md#debugging-a-networkfetch-subscriber) for how
+to surface those errors when authoring or auditing a subscriber patch.
+
 ### Extensions — fixes & QoL
 
 | Patch | Touches | Reads | Writes / Sends | Default |

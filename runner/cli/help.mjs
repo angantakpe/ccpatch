@@ -35,6 +35,7 @@ export const HELP = Object.freeze({
     '  --dry-run                Print the unified diff + shadow report, don\'t write\n' +
     '  --write-on-clean         With --dry-run: write only if shadow report is clean\n' +
     '  --no-fallback            Skip fallback diff application on anchor miss\n' +
+    '  --best-effort            Downgrade verify.present no-ops from fatal to warn (env: CCPATCH_BEST_EFFORT=1)\n' +
     '  --dev                    Emit hot-reload shim layout under ccpatch-overlay-shims/\n' +
     '  --version <x.y.z>        Pin to a specific Claude Code release\n' +
     '  --model <id>             Override default model for patches that consult it\n' +

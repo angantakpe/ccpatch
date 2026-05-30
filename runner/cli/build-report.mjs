@@ -51,12 +51,16 @@ export function buildJsonReport({ ok, durationMs, report, patchNames }) {
     patches.push(entry);
   }
 
+  // Finding #1/#2: surface the loud no-op and stale-fallback tallies the runner
+  // reported (default 0 when the runner predates these fields).
+  const noChange = Number.isFinite(Number(r.noChange)) ? Number(r.noChange) : 0;
+  const appliedFallback = Number.isFinite(Number(r.appliedFallback)) ? Number(r.appliedFallback) : 0;
   const out = {
     ok: !!ok,
     durationMs,
     patches,
     drifts,
-    summary: { applied, skipped, failed },
+    summary: { applied, skipped, failed, noChange, appliedFallback },
   };
   // Coarse wall-clock phase timers (ms), when the caller supplied them. These
   // attribute total wall time across phases the per-patch transform sums can't
@@ -135,6 +139,18 @@ export function renderTextSummary({ ok, durationMs, report, outputPath, drySugge
     lines.push(`Drift: ${drifts.length} patch(es) — run \`ccpatch doctor <input.js> --suggest\` for fuzzy candidates.`);
   } else if (timings.length > 0) {
     lines.push('Drift: none.');
+  }
+
+  // Finding #1/#2: prominently surface no-op and stale-fallback tallies. A
+  // no-change patch injected nothing (anchor likely drifted); an applied-fallback
+  // patch only applied by replaying a diff captured against an older bundle.
+  const noChange = Number.isFinite(Number(r.noChange)) ? Number(r.noChange) : 0;
+  const appliedFallback = Number.isFinite(Number(r.appliedFallback)) ? Number(r.appliedFallback) : 0;
+  if (appliedFallback > 0) {
+    lines.push(`Stale fallback: ${appliedFallback} patch(es) applied via stale fallback diff — anchors have drifted, fix anchors.`);
+  }
+  if (noChange > 0) {
+    lines.push(`No-op: ${noChange} patch(es) produced no changes (anchors likely drifted).`);
   }
 
   if (!ok) {
