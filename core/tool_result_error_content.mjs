@@ -82,7 +82,8 @@ export default {
     if (typeof globalThis.__ccpOnFetchBefore !== 'function') return false;
     try {
       globalThis.__ccpOnFetchBefore('tool_result_error_content', hook, 30);
-      process.stderr.write('[tool_result_error_content] subscribed to fetch-before\\n');
+      (globalThis.__ccpBootBuf || (globalThis.__ccpBootBuf = [])).push(['trec', 'subscribed to fetch-before']);
+      if (globalThis.__ccpBootKick) globalThis.__ccpBootKick();
     } catch (_e) {
       try { process.stderr.write('[tool_result_error_content] subscribe error: ' + (_e && _e.message || _e) + '\\n'); } catch (_) {}
     }

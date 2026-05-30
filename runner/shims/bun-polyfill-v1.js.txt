@@ -375,7 +375,8 @@ if (typeof globalThis.Bun === 'undefined') {
         plugin:               function() {},
       };
 
-      console.log('  [bun_shim] globalThis.Bun polyfill installed (Node.js runtime)');
+      (globalThis.__ccpBootBuf || (globalThis.__ccpBootBuf = [])).push(['bun_shim', 'Bun polyfill installed (Node.js runtime)']);
+      if (globalThis.__ccpBootKick) globalThis.__ccpBootKick();
     })();
   } catch (__ccpBunShimErr) {
     // Non-fatal: if the shim itself fails, warn and continue. The bundle may

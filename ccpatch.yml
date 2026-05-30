@@ -75,6 +75,7 @@ patches:
   message_normalizer: true    # guard display-item type crashes
   project_root: true          # projectRoot fallback so .cc/commands/ loads
   tool_result_error_content: true # Anthropic API requires non-empty content on is_error blocks
+  boot_banner: true           # required — render ccpatch boot-log lines in a responsive box before the CC banner
 
   # ════════════════════════════════════════════════════════════════════════════
   # EXTENSIONS  (extensions/)
@@ -180,6 +181,7 @@ profiles:
     - message_normalizer
     - project_root
     - tool_result_error_content
+    - boot_banner
     - subagent_hooks_stub
 
   standard:
@@ -194,6 +196,7 @@ profiles:
     - message_normalizer
     - project_root
     - tool_result_error_content
+    - boot_banner
     - subagent_hooks_stub
     - input_bar_color
     - model
@@ -223,6 +226,7 @@ profiles:
     - message_normalizer
     - project_root
     - tool_result_error_content
+    - boot_banner
     - dotenv_loader
     - hook_noise_mute
     - cache_ttl
@@ -271,6 +275,7 @@ profiles:
     - message_normalizer
     - project_root
     - tool_result_error_content
+    - boot_banner
     - subagent_hooks_stub
     - event_bus
     - auth_token
@@ -299,6 +304,7 @@ profiles:
     - message_normalizer
     - project_root
     - tool_result_error_content
+    - boot_banner
     - subagent_hooks_stub
     - event_bus
     - auth_token
@@ -321,6 +327,7 @@ profiles:
     - message_normalizer
     - project_root
     - tool_result_error_content
+    - boot_banner
     - subagent_hooks_stub
     - event_bus
     - expose_agent_tool
