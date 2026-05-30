@@ -272,6 +272,40 @@ describe('applyNamedPatches — overlap detection', () => {
     );
   });
 
+  it('Finding #5: throws a clear diagnostic when an onBeforeApply hook breaks the additive frame', async () => {
+    // Patch a adds 4 bytes (additive: delta +4). Patch b's onBeforeApply then
+    // REPLACES ctx.code with an unrelated, differently-sized string — so b's
+    // preCode is no longer (original + 4). The shared-frame overlap math would
+    // silently mis-translate every span; the runtime invariant must throw instead.
+    const patches = {
+      a: mkPatch({ apply: (c) => c + 'AAAA', verify: { present: 'AAAA', weak: true } }),
+      b: {
+        ...mkPatch({ apply: (c) => c + 'B', verify: { present: 'B', weak: true } }),
+        // Same phase as `a` so b actually runs after a in the additive frame.
+        onBeforeApply(ctx) { ctx.code = 'totally-unrelated-and-different-length'; },
+      },
+    };
+    await assert.rejects(
+      () => applyNamedPatches('seedseed', patches, ['a', 'b'], silent),
+      /Overlap-frame invariant violated.*additive frame/s,
+    );
+  });
+
+  it('Finding #5: a same-length onBeforeApply rewrite preserves the additive frame (no throw)', async () => {
+    // Replacing ctx.code with a SAME-LENGTH string keeps preCode === original +
+    // prior-deltas in length terms, so the additive invariant still holds.
+    const patches = {
+      a: mkPatch({ apply: (c) => c + 'AAAA', verify: { present: 'AAAA', weak: true } }),
+      b: {
+        ...mkPatch({ apply: (c) => c + 'B', verify: { present: 'B', weak: true } }),
+        onBeforeApply(ctx) { ctx.code = ctx.code.replace('seed', 'SEED'); }, // same length
+      },
+    };
+    await assert.doesNotReject(
+      () => applyNamedPatches('seedseed', patches, ['a', 'b'], silent),
+    );
+  });
+
   it('non-overlapping patches in strict mode pass cleanly', async () => {
     // Spread changes across distinct lines so the line-resolution diff span
     // approximation correctly classifies them as disjoint.

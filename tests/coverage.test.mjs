@@ -98,7 +98,10 @@ describe('apply-time coverage manifest', () => {
         verify: { present: 'wont-appear', weak: true },
       },
     };
-    await applyNamedPatches('seed', patches, ['good', 'noop', 'drifted'], silent, { version: '9.9.9' });
+    // bestEffort: 'drifted' declares verify.present and no-ops, which finding #1
+    // makes fatal by default; this test asserts the manifest still records it as
+    // applied:false (no-change) under lenient mode rather than aborting the run.
+    await applyNamedPatches('seed', patches, ['good', 'noop', 'drifted'], silent, { version: '9.9.9', bestEffort: true });
     const file = path.join(tmp, 'storage/outputs/coverage-apply-v9.9.9.json');
     assert.ok(fs.existsSync(file), `expected manifest at ${file}`);
     const manifest = JSON.parse(fs.readFileSync(file, 'utf8'));

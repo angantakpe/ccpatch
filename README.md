@@ -20,7 +20,7 @@ ccpatch is not a fork. It ships **no Anthropic code**. It transforms a copy of t
 - **Anchor → transform → verify.** Each patch declares a stable string anchor (or AST anchor via windowed Acorn parse), a transform function over the bundle text, and a `verify.present` / `verify.absent` assertion that runs immediately after apply. Anchor misses are logged with fuzzy candidates so drift is diagnosable, not silent.
 - **Shims-as-patches.** Substantial logic lives in real `.mjs` files under `core/` and `extensions/`. Patches inject a small wrapper at the anchor that calls into the shim, so contributors edit normal JavaScript instead of escaped patch strings.
 - **Phase-based runner.** Patches declare `phase: pre | main | post` and optional `dependsOn`. The runner topo-sorts within each phase and enforces that dependencies live in the same or an earlier phase.
-- **Native binary repack.** For versions shipped as a Bun-compiled binary, ccpatch extracts the embedded JS, patches it, and repacks via `node-lief`. The patched JS is padded to the original region size so the binary stays byte-for-byte the same length — no offset fixups needed.
+- **Native binary repack.** For versions shipped as a Bun-compiled binary, ccpatch extracts the embedded JS, patches it, and splices the patched JS back into the binary at the original byte offset (direct buffer rewrite — no `node-lief`, no offset fixups). The embedded JS region must stay the **same byte length** as the original, because Bun's trailer stores absolute file offsets this repacker does not rewrite. When the patched JS is *smaller*, it is padded with insignificant whitespace to the exact original size. When it is *larger* — which can happen because patches add code — repack **fails loudly** rather than corrupt the binary; that version then has to be built from the plain-JS path (or with a reduced patch set) until trailer-offset rewriting is implemented.
 
 ---
 
@@ -34,7 +34,7 @@ cd ccpatch
 bun install        # or: npm install
 ```
 
-> **Bun users:** `node-lief` (required for native binary repack) uses a postinstall build script that Bun blocks by default. Run `bun pm trust node-lief` after install if you plan to use `patch-claude-code-native`. The `npm install` path runs postinstall automatically.
+> **Native repack** (`patch-claude-code-native`) runs entirely on Node's built-in `fs`/`Buffer` plus the in-repo `tools/bun-decompiler` — there are no native build dependencies to trust, so a plain `bun install` / `npm install` is sufficient.
 
 The Makefile auto-detects the locally installed `claude` binary's version. Override with `VERSION=x.y.z` on any target.
 
@@ -140,6 +140,18 @@ node bin/patch-cli.mjs doctor <bundle> --version <x.y.z>
 ```
 
 Reports patches whose anchors have drifted in a new Claude Code release. Fuzzy candidates are logged to `storage/outputs/anchor-drift.jsonl` with scores and offsets so re-anchoring is a targeted lookup, not a hunt.
+
+### Build failure modes
+
+A patch that declares a real `verify.present` (it has a positive thing to inject) but produces **no change** has silently failed — its anchor almost certainly drifted. By default this is now a **build failure**: the build prints the no-op, exits non-zero, and the end-of-run summary reports a `No-op:` count. Patches that declare only `verify.absent` (a desired end-state, not a transform) keep the lenient "no-change is fine" semantics.
+
+Pass `--best-effort` (or set `CCPATCH_BEST_EFFORT=1`) to restore the older lenient behaviour — a `verify.present` no-op is downgraded to a warning and the build continues:
+
+```
+node bin/patch-cli.mjs <input.js> <output.js> --best-effort
+```
+
+When `apply()` no-ops but a stored unified diff (`fallbackDiff`) still applies, the patch is recorded as **applied via stale fallback diff** — a loud, separately-counted outcome (the summary shows a `Stale fallback:` count). The anchors have drifted even though the textual diff still landed, so fix the anchors. Under `--strict` a stale-fallback apply is **fatal**; in the default mode it applies but warns prominently.
 
 ---
 

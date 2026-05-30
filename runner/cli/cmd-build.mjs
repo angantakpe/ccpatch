@@ -71,6 +71,14 @@ export async function runBuild(ctx) {
   if (!patchOptions.version && process.env.CCPATCH_CLI_VERSION) {
     patchOptions.version = process.env.CCPATCH_CLI_VERSION;
   }
+  // Finding #1: --best-effort (parsed in cli.mjs parseBuildArgs) downgrades a
+  // verify.present no-op — and a stale-fallback apply outside strict — from a
+  // build FAILURE back to a warn-only no-op. Honour the CCPATCH_BEST_EFFORT=1
+  // env here too, mirroring how --strict reads CCPATCH_STRICT, so the env opt-out
+  // works even when the flag is set via the environment rather than the CLI.
+  if (!patchOptions.bestEffort && process.env.CCPATCH_BEST_EFFORT === '1') {
+    patchOptions.bestEffort = true;
+  }
 
   // Strict mode requires --version (or CCPATCH_CLI_VERSION) so version-pinned
   // anchors in runner/anchors.mjs can resolve to a specific entry instead of

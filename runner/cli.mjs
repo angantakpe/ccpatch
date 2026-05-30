@@ -100,6 +100,9 @@ export function parseBuildArgs(args) {
     if (args[i] === '--no-fallback') {
       patchOptions.disableFallback = true;
     }
+    if (args[i] === '--best-effort') {
+      patchOptions.bestEffort = true;
+    }
     if (args[i] === '--dev') {
       patchOptions.dev = true;
     }
@@ -117,6 +120,9 @@ export function parseBuildArgs(args) {
   }
   if (!patchOptions.dev && process.env.CCPATCH_DEV === '1') {
     patchOptions.dev = true;
+  }
+  if (!patchOptions.bestEffort && process.env.CCPATCH_BEST_EFFORT === '1') {
+    patchOptions.bestEffort = true;
   }
 
   return { inputPath, outputPath, requestedPatches, patchOptions, preloadPath, profile };

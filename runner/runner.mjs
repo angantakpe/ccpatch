@@ -31,6 +31,18 @@ function toList(x) {
 }
 
 /**
+ * True when a normalized verify block declares at least one NON-EMPTY present
+ * literal — i.e. the patch had "a positive thing to inject". An empty-string
+ * present (e.g. the `{ present: '', weak: true }` placeholder used by patches
+ * that only want a manifest-valid verify) is NOT a real present assertion and
+ * is treated as absent for the no-change-is-fatal decision in Finding #1.
+ */
+function declaresPresent(verify) {
+  if (!verify) return false;
+  return toList(verify.present).some((s) => typeof s === 'string' && s.length > 0);
+}
+
+/**
  * Run a verify block against post-apply code. Returns an array of failure
  * descriptions (empty when all assertions pass). Supports:
  *   verify.present  string|string[]   — substrings that MUST exist.
@@ -159,15 +171,18 @@ export function detectDrift(preCode, normalized, name, patchOptions) {
  * which must stay in the loop (they need `await` and loop control).
  *
  * Returns an ApplyResult:
- *   { name, status, effectiveCode, timingMs, failReason, trace, driftEntry }
+ *   { name, status, effectiveCode, timingMs, failReason, forceFail, trace, driftEntry }
  * where `status` is the results[name] value, `failReason` (or null) is passed
- * to the caller's fail(), `trace` (or null) is pushed into the phase's trace
- * array, and `driftEntry` (or null) is pushed into `drifts`.
+ * to the caller's fail(), `forceFail` (Finding #1/#2) requests the caller push
+ * `failReason` into failures REGARDLESS of per-patch strictness (so the build
+ * exits non-zero in default mode too), `trace` (or null) is pushed into the
+ * phase's trace array, and `driftEntry` (or null) is pushed into `drifts`.
  */
 function applySinglePatch({
   name, patch, normalized, preCode, beforeOpts, atSites,
   origLength, globalStrict, patchOptions, logger, warnStorageOnce,
 }) {
+  const bestEffort = patchOptions.bestEffort === true;
   const _patchStart = Date.now();
   // For declarative kinds (prefix/postfix/transpiler), synthesize apply()
   // from the manifest. Free-kind patches use their own apply unchanged.
@@ -187,7 +202,7 @@ function applySinglePatch({
     return {
       name, status: 'error', effectiveCode: null, timingMs,
       failReason: `apply() returned non-string (${typeof appliedCode})`,
-      trace: null, driftEntry: null,
+      forceFail: false, trace: null, driftEntry: null,
     };
   }
 
@@ -223,13 +238,31 @@ function applySinglePatch({
 
   let status;
   let failReason = null;
+  let forceFail = false;
   let driftEntry = null;
   if (usedFallback) {
+    // Finding #2: a stale stored unified diff masked anchor drift. The structured
+    // apply() no-op'd and we only kept going by replaying a diff captured against
+    // an older bundle — a near-silent "success" that hides real drift. Make it a
+    // loud, separately-counted outcome: strict mode (or required) treats it as
+    // FATAL; default mode applies it but warns prominently and counts it.
     status = 'applied-fallback';
+    failReason = 'applied via stale fallback diff (anchors have drifted — fix anchors)';
+    logger.warn(`  [!] Patch "${name}" applied via STALE FALLBACK DIFF — anchors have drifted (capturedAgainst=${normalized.fallbackDiff?.capturedAgainst}). Fix anchors.`);
+    if (globalStrict) forceFail = true;
   } else if (noChange && !hasOnlyAbsentVerify) {
     logger.warn(`  [!] Patch "${name}" produced no changes. (check anchors)`);
     status = 'no-change';
     failReason = 'no-change (anchor likely drifted)';
+    // Finding #1: a patch that declared a real verify.present clearly had a
+    // positive thing to inject and failed to do so. That is a build failure by
+    // DEFAULT (not just under strict / required) — push it to failures so the
+    // build throws and exits non-zero — UNLESS --best-effort (CCPATCH_BEST_EFFORT)
+    // restores the lenient warn-only behavior. Patches with only verify.absent
+    // (or no real present) keep today's no-change-is-fine semantics.
+    if (declaresPresent(normalized.verify) && !bestEffort) {
+      forceFail = true;
+    }
     // Tag anchor-drift alert with patch name so patch-heal can route it.
     // ARCH1: forensic computation lives in the pure detectDrift() helper;
     // this block keeps the fs write + logging + report push.
@@ -299,7 +332,10 @@ function applySinglePatch({
   try {
     const phaseKey = phaseOf(patch);
     const changed = typeof effectiveCode === 'string' && effectiveCode !== preCode;
-    // Net delta introduced before this patch ran (shared-frame shift).
+    // Net delta introduced before this patch ran (shared-frame shift). The
+    // additive-frame invariant (preCode === original + sum of prior deltas) is
+    // asserted by the CALLER before this patch runs (Finding #5), so here it is
+    // safe to derive the shift directly from preCode's length.
     const deltaBefore = preCode.length - origLength;
     const shift = (spans) => spans.map(([s, e]) => [s - deltaBefore, e - deltaBefore]);
     let diffSpans = null;        // null => not yet computed (non-strict, lazy)
@@ -327,9 +363,16 @@ function applySinglePatch({
       _deltaBefore: deltaBefore,
       allowOverlapWith: Array.isArray(normalized.allowOverlapWith) ? normalized.allowOverlapWith : [],
     };
-  } catch (_) { /* trace is best-effort */ }
+  } catch (err) {
+    // Finding #6: trace building is best-effort (a failure here only degrades
+    // overlap detection for this patch, never the apply itself), but a silent
+    // /dev/null swallow hid real bugs. Route it to the debug sink (falling back
+    // to warn) so it is observable without aborting the build.
+    trace = null;
+    (logger.debug || logger.warn)?.(`  [trace] ${name}: overlap-trace build failed (non-fatal): ${err.message}`);
+  }
 
-  return { name, status, effectiveCode, timingMs, failReason, trace, driftEntry };
+  return { name, status, effectiveCode, timingMs, failReason, forceFail, trace, driftEntry };
 }
 
 export async function applyNamedPatches(code, patches, patchNames, logger = console, patchOptions = {}) {
@@ -540,6 +583,31 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
       atSites = resolved.sites;
     }
 
+    // Finding #5: assert the additive overlap-coordinate invariant BEFORE applying
+    // this patch — and OUTSIDE the apply try/catch below, so a violation throws a
+    // clear diagnostic instead of being downgraded to a swallowed "apply() threw".
+    // The shared-frame overlap math (A2) assumes preCode is exactly
+    // original + the cumulative net length change of every prior patch. `nextCode`
+    // is the accumulated result of those prior patches, so its delta from the
+    // original `code` is the EXPECTED deltaBefore; `beforeCode` is what this patch
+    // will actually see. They diverge only if the additive frame was broken — e.g.
+    // a future non-additive patch kind, or an onBeforeApply hook that replaced
+    // ctx.code with an unrelated string. Subtracting both deltas from preCode would
+    // then mis-translate every span and silently mis-detect overlaps.
+    {
+      const expectedDeltaBefore = nextCode.length - code.length;
+      const actualDeltaBefore = beforeCode.length - code.length;
+      if (actualDeltaBefore !== expectedDeltaBefore) {
+        throw new Error(
+          `Overlap-frame invariant violated at patch "${name}": beforeCode.length-origLength=${actualDeltaBefore} ` +
+          `but cumulative prior delta=${expectedDeltaBefore}. The shared-frame overlap math (A2) assumes an ` +
+          `additive frame (preCode === original + sum of prior patch deltas). A non-additive patch kind, or an ` +
+          `onBeforeApply hook that replaced ctx.code with an unrelated string, broke it — overlap detection ` +
+          `would silently mis-translate spans. Fix the patch so it preserves the additive frame.`
+        );
+      }
+    }
+
     try {
       const preCode = beforeCode;
       // Arch#2: the ~10-things-in-one-try body now lives in applySinglePatch(),
@@ -553,7 +621,14 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
       });
       timings.push({ name, ms: r.timingMs });
       results[name] = r.status;
-      if (r.failReason) fail(r.failReason);
+      // Finding #1/#2: forceFail escalates to a build failure REGARDLESS of
+      // per-patch strictness (a verify.present no-change in default mode, or a
+      // stale-fallback apply under strict). Otherwise fall back to the normal
+      // strict/required gate via fail().
+      if (r.failReason) {
+        if (r.forceFail) failures.push(`${name}: ${r.failReason}`);
+        else fail(r.failReason);
+      }
       if (r.driftEntry) drifts.push(r.driftEntry);
       if (r.trace) {
         phaseTraces[r.trace.phase] = phaseTraces[r.trace.phase] || [];
@@ -678,10 +753,29 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
   // build that aborts still leaves the conflict forensics behind). ARCH1.
   writeConflictsArtifact(allConflicts, warnStorageOnce);
 
+  // Finding #1/#2: tally the loud outcomes so the build summary can surface
+  // them. `noChange` patches silently injected nothing (anchors likely drifted);
+  // `appliedFallback` patches only applied by replaying a stale stored diff.
+  const noChangeCount = Object.values(results).filter(s => s === 'no-change').length;
+  const fallbackCount = Object.values(results).filter(s => s === 'applied-fallback').length;
+  if (fallbackCount > 0) {
+    logger.warn('');
+    logger.warn(`  [!] ${fallbackCount} patch(es) applied via STALE FALLBACK DIFF — anchors have drifted, fix anchors`);
+    logger.warn('');
+  }
+
   if (failures.length > 0) {
+    // The gate that produced these failures may be global strict, per-patch
+    // required, OR the default-mode Finding #1/#2 escalation (a verify.present
+    // patch that no-op'd / a stale-fallback apply). Keep the historical
+    // strict/required labels; append the --best-effort hint outside strict so a
+    // default-mode no-op failure tells the user how to downgrade it to a warning.
     const mode = globalStrict ? 'strict mode' : 'required patches';
+    const hint = globalStrict
+      ? ''
+      : '\n  (set --best-effort or CCPATCH_BEST_EFFORT=1 to downgrade no-op/fallback failures to warnings)';
     throw new Error(
-      `${failures.length} patch failure(s) in ${mode}:\n  - ${failures.join('\n  - ')}`
+      `${failures.length} patch failure(s) in ${mode}:\n  - ${failures.join('\n  - ')}${hint}`
     );
   }
 
@@ -693,6 +787,12 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
   // map (`results`: name -> status string), and a structured `report` with
   // { timings, drifts, verifyIssues }. Callers that only need per-patch
   // outcomes can destructure: const { results } = await applyNamedPatches(...)
-  const report = { timings, drifts, verifyIssues: verifyIssuesReport };
+  // Finding #1/#2: `noChange` / `appliedFallback` counts let the build summary
+  // print no-op and stale-fallback tallies prominently (see cli/build-report.mjs).
+  const report = {
+    timings, drifts, verifyIssues: verifyIssuesReport,
+    noChange: noChangeCount,
+    appliedFallback: fallbackCount,
+  };
   return { code: nextCode, results, report };
 }
