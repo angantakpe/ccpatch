@@ -1,10 +1,23 @@
+import { forceFeatureFlag } from '../runner/patch-helpers.mjs';
 
 export default {
     category: 'feature',
 
     description: 'Unhide client-side gated features (remote-control, web-setup, etc.)',
     capabilities: [],
-    verify: { absent: 'isHidden(){return!0}' },
+    // verify covers every pass that has a stable, always-present target:
+    //   - passes 1–3: the gated `isHidden(){return!0}` form must be gone.
+    //   - pass 4: the push-notification flag's standalone gated getter
+    //     `…("tengu_kairos_push_notifications",!1)}` must be gone (rewritten to
+    //     `return !0`). This is present in every bundle we target (v2.1.148+),
+    //     so a future no-op here fails loud.
+    // Pass 5's flag (tengu_streaming_tool_execution2) is NOT present in any
+    // shipped bundle yet, so it cannot carry a hard present/absent assertion
+    // without failing on bundles that legitimately lack it — it self-reports a
+    // no-op via the per-pass log + the patched===0 guard instead.
+    verify: {
+      absent: ['isHidden(){return!0}', '"tengu_kairos_push_notifications",!1)}'],
+    },
     apply: (code) => {
       let patched = 0;
 
@@ -38,19 +51,34 @@ export default {
         patched++;
       }
 
-      // H-3: Unlock tengu_kairos_push_notifications
-      const pushNotifRe = /function szH\(\)\{return Z\$\("tengu_kairos_push_notifications",!1\)\}/;
-      if (pushNotifRe.test(code)) {
-        code = code.replace(pushNotifRe, 'function szH(){return !0}');
-        console.log('  [unhide_features] push notifications enabled (szH)');
+      // H-3: Unlock tengu_kairos_push_notifications.
+      // Re-anchored on the STABLE feature-flag literal rather than the rotating
+      // minified getter name (was `szH`, which matched no shipped bundle — the
+      // real name is e.g. `IwH` in v2.1.156, `rwH` in v2.1.157/158) or the
+      // rotating helper (`Z$`/`V$`). forceFeatureFlag resolves the enclosing
+      // function via the literal (AST/brace walk) and rewrites its body to
+      // `return !0`, the same resilient path durable_cron uses. The literal also
+      // appears in an `isEnabled(){return …(…,!1,<ref>)}` method later in the
+      // bundle, but findFunctionByLiteral resolves the FIRST hit — the standalone
+      // getter — which is exactly the one we want.
+      const pushRes = forceFeatureFlag(code, 'tengu_kairos_push_notifications', { allowMissing: true });
+      if (pushRes.changed) {
+        code = pushRes.code;
+        console.log('  [unhide_features] push notifications enabled (' + pushRes.fnName + ')');
         patched++;
       }
 
-      // H-4: Unlock tengu_streaming_tool_execution2 direct flag
-      const streamRe = /Z\$\("tengu_streaming_tool_execution2",!1\)/;
-      if (streamRe.test(code)) {
-        code = code.replace(streamRe, 'Z$("tengu_streaming_tool_execution2",!0)');
-        console.log('  [unhide_features] streaming tool execution enabled');
+      // H-4: Unlock tengu_streaming_tool_execution2 direct flag.
+      // Anchored on the stable flag literal; the helper name (was pinned as the
+      // rotating `Z$`) is captured by a group so it survives minifier rotation.
+      // This flag is not present in current bundles, so the regex no-ops cleanly
+      // there — it activates only once the flag ships.
+      const streamRe = /([A-Za-z_$][\w$]*)\("tengu_streaming_tool_execution2",!1\)/;
+      const streamMatch = streamRe.exec(code);
+      if (streamMatch) {
+        const helper = streamMatch[1];
+        code = code.replace(streamRe, helper + '("tengu_streaming_tool_execution2",!0)');
+        console.log('  [unhide_features] streaming tool execution enabled (' + helper + ')');
         patched++;
       }
 

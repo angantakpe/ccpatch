@@ -40,12 +40,18 @@ function buildLiteralIndex(items) {
   // Shortest literal length caps prefix size; anything shorter than the prefix
   // is handled by a one-shot indexOf in scanCode (never bucketed here).
   const prefixLen = 2;
-  // Buckets are keyed by a numeric 2-char prefix (charCodeAt(0)*256+charCodeAt(1))
-  // to avoid allocating a 2-char substring per byte during the scan.
+  // Buckets are keyed by a numeric 2-char prefix
+  // (charCodeAt(0)*65536+charCodeAt(1)) to avoid allocating a 2-char substring
+  // per byte during the scan. The *65536 stride (not *256) keeps the key
+  // injective for the full 16-bit code-unit range: with *256, prefixes like
+  // (0,256) and (1,0) collide, which would over-populate a bucket for
+  // non-Latin-1 literals and degrade the scan. (Correctness never depended on
+  // the key — scanCode re-verifies every char — but a clean key keeps buckets
+  // tight.)
   const bucketsByPrefix = new Map();
   for (const lit of literals) {
     if (lit.length < prefixLen) continue; // short literals use indexOf in scanCode
-    const key = lit.charCodeAt(0) * 256 + lit.charCodeAt(1);
+    const key = lit.charCodeAt(0) * 65536 + lit.charCodeAt(1);
     let arr = bucketsByPrefix.get(key);
     if (!arr) { arr = []; bucketsByPrefix.set(key, arr); }
     arr.push(lit);
@@ -82,7 +88,7 @@ function scanCode(code, index) {
   const last = n - plen;
   for (let i = 0; i <= last; i++) {
     // Numeric 2-char prefix key — same keying as buildLiteralIndex, no slice alloc.
-    const key = code.charCodeAt(i) * 256 + code.charCodeAt(i + 1);
+    const key = code.charCodeAt(i) * 65536 + code.charCodeAt(i + 1);
     const bucket = index.bucketsByPrefix.get(key);
     if (!bucket) continue;
     for (const lit of bucket) {
@@ -90,9 +96,10 @@ function scanCode(code, index) {
       const L = lit.length;
       if (i + L > n) continue;
       let ok = true;
-      // Full char compare from 0: the numeric prefix key can alias distinct
-      // 2-char prefixes (e.g. when a code unit exceeds 255), so we cannot trust
-      // the key alone — re-verify all chars to keep matches byte-identical.
+      // Full char compare from 0: the prefix key only confirms the first two
+      // chars, so we re-verify the whole literal to keep matches byte-identical.
+      // (The *65536 stride makes the 2-char key itself collision-free, but the
+      // full compare is still required for chars 2..L.)
       for (let j = 0; j < L; j++) {
         if (code.charCodeAt(i + j) !== lit.charCodeAt(j)) { ok = false; break; }
       }

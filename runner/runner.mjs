@@ -287,32 +287,16 @@ function applySinglePatch({
   } else {
     status = noChange ? 'no-change-ok' : 'applied';
   }
-  // Capture a reverse diff from the effective post-apply code back to
-  // `preCode` so the patched bundle can be restored byte-for-byte later.
-  // Skip no-change applies — they contribute nothing to a revert.
+  // Finding #3 (hook ordering): the reverse-diff capture and coverage-marker
+  // injection used to run HERE — against `effectiveCode` BEFORE the async
+  // onAfterApply hook ran in the caller. A last-mile onAfterApply that returns
+  // fresh code (different length) then left a reverse diff that no longer
+  // restores byte-for-byte, and silently dropped coverage instrumentation. Both
+  // now run in the CALLER, after onAfterApply resolves, against the FINAL
+  // effectiveCode. The trace below is intentionally built on this patch's raw
+  // apply footprint (pre-hook) — overlap detection is about what apply() touched,
+  // not hook fixups.
   //
-  // Perf#2: createPatch over the ~15MB bundle is the most expensive thing
-  // per patch and ran ~24x per build. A --dry-run never writes the bundle
-  // OR the .ccp-revert.json sidecar (cmd-build returns before the sidecar
-  // write), so the captured diffs would be thrown away — pass nothing so
-  // captureReverseDiff's explicit-request gate skips the whole computation.
-  // Real (non-dry-run) builds still capture exactly as before, so the
-  // revert feature and sidecar schema are untouched.
-  const reverseSink = patchOptions.dryRun ? undefined : patchOptions.captureReverse;
-  captureReverseDiff(name, preCode, effectiveCode, reverseSink);
-  // Auto-inject __ccpCovHit() for patches that opted in via coverageMarker.
-  // Best-effort: only attempt when the patch actually changed code, and
-  // skip silently (with a notice) when no hook site is findable.
-  if (normalized.coverageMarker && effectiveCode !== preCode) {
-    const instrumented = injectCoverageHit(
-      preCode, effectiveCode, normalized.coverageMarker, atSites,
-    );
-    if (instrumented === null) {
-      logger.log?.(`  [coverage] ${name}: marker "${normalized.coverageMarker}" — no instrumentation site found, skipping`);
-    } else {
-      effectiveCode = instrumented;
-    }
-  }
   // Record per-patch trace for overlap detection.
   //
   // A2: all recorded ranges are translated into ONE shared coordinate
@@ -418,6 +402,15 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
   // ("did THIS patch do what it claimed when it ran"), so the batching stays.
   let pendingVerify = [];
   let currentPhase = null;
+  // Finding #2 (hook ordering): cumulative byte-length change introduced OUTSIDE
+  // patch apply() — specifically an onVerifyFail heal that reassigns nextCode to
+  // its returned (possibly differently-sized) string at a phase-boundary flush.
+  // Those bytes are NOT reflected in any trace's apply-delta accounting, so the
+  // additive-frame invariant (which models nextCode as original + sum of patch
+  // apply deltas) would otherwise mis-add them and could falsely throw on a
+  // SUCCESSFUL self-heal. We thread this into the invariant's expected-delta so a
+  // heal is accounted for explicitly rather than mistaken for a broken frame.
+  let hookDelta = 0;
   async function flushPendingVerify(_reasonPhase) {
     if (pendingVerify.length === 0) return;
     const batch = pendingVerify;
@@ -454,6 +447,11 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
           // not the raw patch.verify — `normalized` is the post-validation truth.
           const retryIssues = checkVerify(entry.verify, hookRes.result);
           if (retryIssues.length === 0) {
+            // Finding #2: a heal replaces nextCode with the hook's returned
+            // string. Record the out-of-band length change so the overlap-frame
+            // invariant can subtract it back out instead of treating it as a
+            // broken additive frame and aborting a successful self-heal.
+            hookDelta += hookRes.result.length - nextCode.length;
             nextCode = hookRes.result;
             entry.lifecycleCtx.appliedCode = hookRes.result;
             issues = [];
@@ -595,15 +593,21 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
     // ctx.code with an unrelated string. Subtracting both deltas from preCode would
     // then mis-translate every span and silently mis-detect overlaps.
     {
-      const expectedDeltaBefore = nextCode.length - code.length;
-      const actualDeltaBefore = beforeCode.length - code.length;
+      // Finding #2: subtract `hookDelta` (cumulative out-of-band length change
+      // from onVerifyFail heals) from BOTH sides so the invariant measures the
+      // PURE patch-apply frame. nextCode and beforeCode both carry the heal bytes
+      // equally, so a successful self-heal nets out and does NOT trip the gate;
+      // a genuine non-additive break (a patch kind that doesn't preserve the
+      // frame, or an onBeforeApply that swapped ctx.code) still diverges and throws.
+      const expectedDeltaBefore = (nextCode.length - code.length) - hookDelta;
+      const actualDeltaBefore = (beforeCode.length - code.length) - hookDelta;
       if (actualDeltaBefore !== expectedDeltaBefore) {
         throw new Error(
-          `Overlap-frame invariant violated at patch "${name}": beforeCode.length-origLength=${actualDeltaBefore} ` +
-          `but cumulative prior delta=${expectedDeltaBefore}. The shared-frame overlap math (A2) assumes an ` +
-          `additive frame (preCode === original + sum of prior patch deltas). A non-additive patch kind, or an ` +
-          `onBeforeApply hook that replaced ctx.code with an unrelated string, broke it — overlap detection ` +
-          `would silently mis-translate spans. Fix the patch so it preserves the additive frame.`
+          `Overlap-frame invariant violated at patch "${name}": beforeCode.length-origLength-hookDelta=${actualDeltaBefore} ` +
+          `but cumulative prior patch delta=${expectedDeltaBefore} (hookDelta=${hookDelta}). The shared-frame overlap math ` +
+          `(A2) assumes an additive frame (preCode === original + sum of prior patch deltas + heal deltas). A non-additive ` +
+          `patch kind, or an onBeforeApply hook that replaced ctx.code with an unrelated string, broke it — overlap ` +
+          `detection would silently mis-translate spans. Fix the patch so it preserves the additive frame.`
         );
       }
     }
@@ -653,6 +657,35 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
             effectiveCode = lifecycleCtx.appliedCode;
           }
         }
+
+        // Finding #3: capture the reverse diff and inject the coverage marker
+        // AFTER onAfterApply has finalized `effectiveCode`, against that final
+        // string — not the pre-hook apply result. Capturing earlier (inside
+        // applySinglePatch) left a reverse diff that no longer restored
+        // byte-for-byte when a hook mutated the code, and dropped coverage
+        // instrumentation that a hook rewrite would discard.
+        //
+        // Coverage runs FIRST so its marker bytes are themselves part of the
+        // final bundle the reverse diff is captured against (so a revert removes
+        // them too). Both are no-ops on a no-change apply (effectiveCode === preCode).
+        if (normalized.coverageMarker && effectiveCode !== preCode) {
+          const instrumented = injectCoverageHit(
+            preCode, effectiveCode, normalized.coverageMarker, atSites,
+          );
+          if (instrumented === null) {
+            logger.log?.(`  [coverage] ${name}: marker "${normalized.coverageMarker}" — no instrumentation site found, skipping`);
+          } else {
+            effectiveCode = instrumented;
+            lifecycleCtx.appliedCode = effectiveCode;
+          }
+        }
+        // Perf#2: createPatch over the ~15MB bundle is the most expensive thing
+        // per patch. A --dry-run never writes the bundle OR the .ccp-revert.json
+        // sidecar, so pass nothing to skip the whole computation via
+        // captureReverseDiff's explicit-request gate.
+        const reverseSink = patchOptions.dryRun ? undefined : patchOptions.captureReverse;
+        captureReverseDiff(name, preCode, effectiveCode, reverseSink);
+
         nextCode = effectiveCode;
         lifecycleCtx.appliedCode = effectiveCode;
       }

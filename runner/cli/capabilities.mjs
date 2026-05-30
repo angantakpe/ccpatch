@@ -72,18 +72,36 @@ export function findGateViolations(patches, names, allow, acks) {
 }
 
 /**
- * Capabilities that require explicit acknowledgement (Track B default-strict).
- * These are the high-impact capabilities a user MUST opt into per patch
- * before the build will proceed.
+ * Capabilities that the `ccpatch ack <patch>` command writes by default (the
+ * caps that command considers "acknowledgement-required" when narrowing the set
+ * it persists). This stays the original network/exec/env triple so `ccpatch ack`
+ * writes a minimal, focused ack entry — see GATE_REQUIRED_CAPS for the broader
+ * set the unconditional build gate actually ENFORCES.
  */
 export const ACK_REQUIRED_CAPS = Object.freeze(['network', 'exec', 'env']);
 
 /**
- * Given the patches selected for apply, a YAML `ack:` map, and an optional
- * --allow-capabilities allow list, return the list of patches whose ack-required
- * capabilities (network/exec/env) are not all covered.
+ * Capabilities that the unconditional (non-strict) build gate REQUIRES an ack
+ * for. Superset of ACK_REQUIRED_CAPS: it also covers `tools` and `telemetry`.
  *
- * A patch's caps are covered if for every cap in ACK_REQUIRED_CAPS the patch
+ * Rationale (framework review finding #1): the ack gate previously only fired
+ * for network/exec/env, so enabling a `tools`-capable patch (e.g.
+ * expose_tool_dispatch / expose_agent_tool — the building blocks of the headless
+ * RCE stack) or a `telemetry`-capable patch could proceed in the DEFAULT
+ * non-strict `make patch-claude-code` path with NO explicit acknowledgement;
+ * those caps only tripped the strict-mode-only legacy gate. Folding tools and
+ * telemetry in here forces a per-capability ack (or --strict + --allow-capabilities,
+ * or --allow-unacked) for them too, in every build path.
+ */
+export const GATE_REQUIRED_CAPS = Object.freeze(['network', 'exec', 'env', 'tools', 'telemetry']);
+
+/**
+ * Given the patches selected for apply, a YAML `ack:` map, and an optional
+ * --allow-capabilities allow list, return the list of patches whose
+ * gate-required capabilities (network/exec/env/tools/telemetry) are not all
+ * covered.
+ *
+ * A patch's caps are covered if for every cap in GATE_REQUIRED_CAPS the patch
  * declares, EITHER:
  *   - the YAML `ack:` entry for that patch lists the cap (or `*`/`true`), OR
  *   - the --allow-capabilities flag covers the cap (set or `all`).
@@ -95,7 +113,7 @@ export function findUnackedAckRequired(patches, names, acks, allow) {
     const p = patches[name];
     if (!p) continue;
     const caps = Array.isArray(p.capabilities) ? p.capabilities : [];
-    const ackTargets = caps.filter(c => ACK_REQUIRED_CAPS.includes(c));
+    const ackTargets = caps.filter(c => GATE_REQUIRED_CAPS.includes(c));
     if (ackTargets.length === 0) continue;
     const ackedRaw = ackMap[name];
     const ackedAll = Array.isArray(ackedRaw) && ackedRaw.includes('*');

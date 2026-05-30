@@ -1,0 +1,154 @@
+name: ci
+
+# Fast, self-contained CI that actually runs the bulk of the suite.
+#
+# The other two workflows are drift radars: drift-check.yml (nightly, @latest)
+# and version-matrix.yml (per-PR, last 3 upstream versions) both run ONLY
+# `npm run test:patches` + doctor against a real bundle. That left ~31 test
+# files and all 5 lints running on no automated machine. This workflow closes
+# that gap:
+#
+#   lint-and-test  — every push/PR: `npm run lint` + `npm run test:all`.
+#                    Needs no patched bundle, so it's fast and never flakes on
+#                    upstream availability.
+#   native-pipeline — every push/PR: exercises the REAL shipping path
+#                    (extract -> patch -> repack into the native Bun binary),
+#                    then boots the repacked binary. npm tarballs ship a native
+#                    `claude`, not cli.js, and that path had ZERO coverage.
+#                    Guarded to skip cleanly when no platform binary is
+#                    obtainable rather than false-fail.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # lint:types runs `gen-types` then `tsc`. Regenerating types/patch.d.ts in
+      # CI is a no-op when the committed types are current; if they drift, the
+      # tsc step (or a follow-up diff) surfaces it. We do NOT commit here.
+      - name: Lint
+        run: npm run lint
+
+      - name: Run full test suite
+        run: npm run test:all
+
+  native-pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Pin to @latest stable. The native binary is shipped per-platform on npm
+      # (@anthropic-ai/claude-code-linux-x64); `make patch-claude-code-native`
+      # pulls it via `make extract-from-binary`. We resolve the version up front
+      # so every step below agrees on it.
+      - name: Resolve target version
+        id: ver
+        run: |
+          CC_VERSION="$(npm view @anthropic-ai/claude-code version)"
+          if [ -z "$CC_VERSION" ]; then
+            echo "::warning::could not resolve a claude-code version; skipping native pipeline"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Resolved claude-code version: $CC_VERSION"
+            echo "version=$CC_VERSION" >> "$GITHUB_OUTPUT"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Pre-flight: confirm the platform binary is actually downloadable for
+      # this runner before we commit to the pipeline. If npm can't serve the
+      # linux-x64 package (network, yank, new platform split), skip cleanly —
+      # a missing upstream artifact is not a ccpatch regression.
+      - name: Probe native binary availability
+        id: probe
+        if: steps.ver.outputs.skip != 'true'
+        run: |
+          set +e
+          OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+          ARCH=$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/')
+          PKG="@anthropic-ai/claude-code-${OS}-${ARCH}"
+          VER="${{ steps.ver.outputs.version }}"
+          if npm view "${PKG}@${VER}" version >/dev/null 2>&1; then
+            echo "Platform binary ${PKG}@${VER} is available"
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::${PKG}@${VER} not available on npm; skipping native pipeline"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Patch native binary (extract -> patch -> repack)
+        if: steps.probe.outputs.available == 'true'
+        run: make patch-claude-code-native VERSION=${{ steps.ver.outputs.version }}
+
+      # The repacked artifact is a native Bun executable at releases/<V>/claude.
+      # Run it directly (NOT via node) and assert real Claude Code output. A
+      # corrupt repack typically either fails to launch or drops into the bare
+      # Bun runtime — both of which we fail loudly on here.
+      - name: Smoke-test repacked native binary
+        if: steps.probe.outputs.available == 'true'
+        run: |
+          set -euo pipefail
+          VER="${{ steps.ver.outputs.version }}"
+          BIN="releases/${VER}/claude"
+          if [ ! -x "$BIN" ]; then
+            echo "ERROR: expected repacked binary at $BIN, but it is missing or not executable"
+            ls -la "releases/${VER}" || true
+            exit 1
+          fi
+          echo "Booting native binary: $BIN --version"
+          OUT="$("$BIN" --version 2>&1)"
+          echo "Output: $OUT"
+          # Must look like "X.Y.Z (Claude Code)" — anchor on the brand so a bare
+          # Bun launch (which prints a bun version / usage banner) fails here.
+          if ! printf '%s' "$OUT" | grep -Eq '[0-9]+\.[0-9]+\.[0-9]+ \(Claude Code\)'; then
+            echo "ERROR: native binary did not print expected Claude Code version line."
+            echo "       This indicates a corrupt repack or a bare-bun launch."
+            exit 1
+          fi
+          echo "Native binary booted and reported a Claude Code version."
+
+      # Wire test:boot to run against a produced JS patched artifact. boot-smoke
+      # globs releases/<V>/cli.v<V>.patched.mjs (the JS bundle), which is what
+      # `make patch-claude-code` emits — distinct from the native `claude` above.
+      # This catches init-time throws that a native-only smoke might mask.
+      - name: Build JS patched bundle for boot smoke
+        if: steps.probe.outputs.available == 'true'
+        run: make patch-claude-code VERSION=${{ steps.ver.outputs.version }}
+
+      - name: Boot smoke test (JS bundle)
+        if: steps.probe.outputs.available == 'true'
+        run: npm run test:boot

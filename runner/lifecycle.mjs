@@ -24,6 +24,15 @@ export async function fireHook(patch, hookName, ctx, logger) {
   const start = Date.now();
   const beforeLen = (typeof ctx.appliedCode === 'string') ? ctx.appliedCode.length
                   : (typeof ctx.code === 'string') ? ctx.code.length : 0;
+  // NOTE (byteDelta accuracy): byteDelta below measures the change to
+  // ctx.appliedCode/ctx.code that the hook made BY MUTATION. onVerifyFail heals
+  // instead RETURN the healed bundle via the resolved value (hookRes.result);
+  // the runner only assigns ctx.appliedCode = result AFTER this function returns.
+  // So for a returning (non-mutating) onVerifyFail, byteDelta here records 0 even
+  // though the bundle changed. We deliberately do NOT diff the return value
+  // against the bundle here — it would mean a second full-length comparison on
+  // the hot path purely for a diagnostics JSONL field. The authoritative heal
+  // length change is tracked by the runner as `hookDelta` (see runner.mjs).
   let entry = {
     ts: new Date().toISOString(),
     patch: ctx.name,
