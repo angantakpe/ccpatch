@@ -111,16 +111,50 @@ export function rangesIntersect(a, b) {
 }
 
 /**
- * Arch#1: a range whose shifted start is negative lives in the "prepend region"
- * — a patch that injected near offset 0 (esm_compat / fetch_interceptor /
- * bun_shim / contracts). Subtracting the shared-frame delta drives such a span
- * NEGATIVE, collapsing every prepend onto a sentinel range like [-233,-232], so
- * they all falsely intersect each other. A prepend has no meaningful original-
- * bundle coordinate, so it cannot meaningfully conflict — drop it before
- * comparison.
+ * How close to offset 0 (in the patch's OWN pre-apply frame) an edit must start
+ * to count as a "prepend / at-offset-0 injection". Real prepends (esm_compat /
+ * fetch_interceptor / bun_shim / contracts) splice their shim within the first
+ * line of the bundle — after the shebang (`#!/usr/bin/env node\n`, ~20 bytes) or
+ * immediately before the CJS-IIFE at offset 0. A small fixed window absorbs that
+ * shebang offset without admitting genuine body edits.
  */
-function isPrependRange(r) {
-  return r[0] < 0;
+const PREPEND_REGION_BYTES = 64;
+
+/**
+ * True when a translated range describes a genuine prepend / at-offset-0
+ * injection — a patch whose edit landed within PREPEND_REGION_BYTES of the start
+ * of ITS OWN pre-apply bundle.
+ *
+ * Arch#1 (original): the old test was `r[0] < 0` — a coordinate-SIGN proxy. It
+ * dropped any overlap whose translated start was negative. That conflates two
+ * very different patches: a true prepend (no meaningful original-bundle
+ * coordinate, can't really conflict), and a genuine LOW-OFFSET body edit that
+ * ran AFTER a large net prior insertion. In the latter case `deltaBefore` is a
+ * big positive number, so `start - deltaBefore` goes negative even though the
+ * edit touched real bundle bytes — and its conflict was silently suppressed.
+ *
+ * FIX: a range is a prepend ONLY when BOTH hold:
+ *   (1) its translated start is negative — i.e. it landed in the collapsed
+ *       sentinel region that produced the false overlaps in the first place; AND
+ *   (2) its offset in its OWN pre-apply frame (recovered by adding the trace's
+ *       `_deltaBefore` back) is within PREPEND_REGION_BYTES of 0 — i.e. it
+ *       genuinely injected at the top of its bundle.
+ *
+ * Condition (2) is what the old `r[0] < 0` test was missing. A genuine LOW-OFFSET
+ * body edit running AFTER a large net prior insertion satisfies (1) — `deltaBefore`
+ * is large so `start - deltaBefore` goes negative — but FAILS (2): its pre-frame
+ * start is large (preCode already grew past the insertion before this edit's
+ * offset), so it is NO LONGER dropped and its real conflict is detected. A true
+ * top-of-bundle prepend satisfies both and is still dropped, so real prepends
+ * don't false-overlap each other. `deltaBefore` defaults to 0 so a synthetic
+ * trace without the field never trips (1) for small offsets and is left intact.
+ */
+function isPrependRange(r, deltaBefore = 0) {
+  const translatedStart = r[0];
+  const preFrameStart = translatedStart + deltaBefore;
+  return translatedStart < 0
+    && preFrameStart >= 0
+    && preFrameStart < PREPEND_REGION_BYTES;
 }
 
 /**
@@ -142,19 +176,30 @@ function isPrependRange(r) {
  */
 export function detectOverlapsInPhase(traces) {
   const conflicts = [];
-  // Arch#1: drop prepend-region ranges (shifted start < 0) up front. These are
-  // near-offset-0 injections whose shared-frame translation made them negative;
-  // they share a meaningless sentinel range and would all false-overlap. A
-  // prepend has no original-bundle coordinate, so it can't truly conflict.
-  const cleaned = traces.map((t) => ({
-    ...t,
-    atSites: Array.isArray(t.atSites)
-      ? t.atSites.filter((s) => (s.start ?? 0) >= 0)
-      : t.atSites,
-    diffSpans: Array.isArray(t.diffSpans)
-      ? t.diffSpans.filter((r) => !isPrependRange(r))
-      : t.diffSpans,
-  }));
+  // Arch#1: drop genuine prepend-region ranges up front. These are the
+  // near-offset-0 shim injections (esm_compat / fetch_interceptor / bun_shim /
+  // contracts) whose shared-frame translation collapses them onto a meaningless
+  // sentinel range — they'd all false-overlap each other. A prepend has no
+  // meaningful original-bundle coordinate, so it can't truly conflict.
+  //
+  // The discriminator is each edit's offset in its OWN pre-apply frame (recovered
+  // via the trace's `_deltaBefore`), NOT the sign of the translated coordinate.
+  // That distinction is load-bearing: after a large net prior insertion a genuine
+  // LOW-OFFSET body edit also translates negative, and the old `< 0` test
+  // silently suppressed its real conflict. Classifying by pre-frame offset keeps
+  // real prepends from false-overlapping while no longer dropping such edits.
+  const cleaned = traces.map((t) => {
+    const delta = typeof t._deltaBefore === 'number' ? t._deltaBefore : 0;
+    return {
+      ...t,
+      atSites: Array.isArray(t.atSites)
+        ? t.atSites.filter((s) => !isPrependRange([s.start ?? 0, s.end ?? s.start ?? 0], delta))
+        : t.atSites,
+      diffSpans: Array.isArray(t.diffSpans)
+        ? t.diffSpans.filter((r) => !isPrependRange(r, delta))
+        : t.diffSpans,
+    };
+  });
   for (let i = 0; i < cleaned.length; i++) {
     for (let j = i + 1; j < cleaned.length; j++) {
       const A = cleaned[i];

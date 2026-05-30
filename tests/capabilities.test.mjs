@@ -316,10 +316,14 @@ describe('findUnackedAckRequired', () => {
     netty:    { capabilities: ['network'] },
     envy:     { capabilities: ['env'] },
     big:      { capabilities: ['network', 'env', 'exec'] },
-    toolish:  { capabilities: ['tools'] }, // high-risk but NOT ack-required
+    toolish:  { capabilities: ['tools'] }, // gate-required post-hardening (finding #1)
   };
 
   it('exports the ack-required capability list', () => {
+    // ACK_REQUIRED_CAPS stays the network/exec/env triple — it drives the
+    // `ccpatch ack` default-write set. The broader set the build gate enforces
+    // (tools/telemetry too) lives in GATE_REQUIRED_CAPS; see
+    // tests/capgate-required-caps.test.mjs.
     assert.deepEqual([...ACK_REQUIRED_CAPS].sort(), ['env', 'exec', 'network']);
   });
 
@@ -327,8 +331,15 @@ describe('findUnackedAckRequired', () => {
     assert.deepEqual(findUnackedAckRequired(PATCHES, ['cosmetic'], null, null), []);
   });
 
-  it('tools-only patch is not ack-required', () => {
-    assert.deepEqual(findUnackedAckRequired(PATCHES, ['toolish'], null, null), []);
+  it('tools-only patch IS now gate-required (finding #1 hardening)', () => {
+    // Post-hardening: a `tools`-capable patch (the building block of the headless
+    // RCE stack — expose_tool_dispatch / expose_agent_tool) must be explicitly
+    // acked before the build proceeds, in every path. It previously only tripped
+    // the strict-mode-only legacy gate.
+    const v = findUnackedAckRequired(PATCHES, ['toolish'], null, null);
+    assert.equal(v.length, 1);
+    assert.equal(v[0].name, 'toolish');
+    assert.deepEqual(v[0].missing, ['tools']);
   });
 
   it('unacked network patch violates', () => {
@@ -390,8 +401,10 @@ describe('Track B CLI ack gate', () => {
     const { dir, inputPath, outputPath } = setupTempProject();
     fs.writeFileSync(
       path.join(dir, 'ccpatch.yml'),
+      // webhook declares network+env+telemetry; telemetry is gate-required
+      // post-hardening (finding #1), so the ack must cover it too.
       'version: 1\nack:\n' +
-      '  webhook: [network, env]\n' +
+      '  webhook: [network, env, telemetry]\n' +
       '  fetch_interceptor: [network]\n' +
       '  bun_shim: [env, network]\n' +
       '  tool_result_error_content: [network]\n',

@@ -144,14 +144,33 @@ ccpatch capabilities --json           # machine-readable form
 
 ### Apply-time gate
 
-When the CLI runs in **strict mode** (`--strict` or `CCPATCH_STRICT=1`), it refuses to apply patches with `high`-risk capabilities unless the user explicitly acknowledges them:
+There are two layers to the gate.
+
+**Default-strict ack gate (always on).** Patches that declare `network`, `exec`,
+`env`, `tools`, or `telemetry` are gate-required **unconditionally** — even in
+the default, non-strict `make patch-claude-code` path. A build refuses to apply
+such a patch until every one of those capabilities is acknowledged, either by an
+`ack:` entry in `ccpatch.yml` or via `--allow-capabilities`. This closes the hole
+where the most dangerous patches (`expose_tool_dispatch` / `expose_agent_tool`,
+both `tools`; any `telemetry` sink) could previously be applied with only a
+warning. The acknowledgement is rejected up front, before any code is rewritten.
+(The set of caps that *force* this gate — `GATE_REQUIRED_CAPS` — is broader than
+`ACK_REQUIRED_CAPS`, which still governs only what `ccpatch ack` writes by
+default: `network`, `exec`, `env`.)
+
+**Strict mode (`--strict` / `CCPATCH_STRICT=1`)** additionally refuses any
+remaining `high`-risk capability not covered by `--allow-capabilities`:
 
 ```
 ccpatch apply ... --strict --allow-capabilities network,fs,telemetry
 ccpatch apply ... --strict --allow-capabilities=all
 ```
 
-Any high-risk patch whose capabilities aren't fully covered by `--allow-capabilities` is rejected up front, before any code is rewritten. In non-strict mode the CLI emits a `[capabilities] WARN` line and proceeds — the gate exists to make capability acknowledgement a first-class, auditable step in CI / release pipelines, not to be a barrier in interactive use.
+The curated **`daemon` / `daemon_native` / `orchestrator`** profiles compose the
+full remote tool/code-execution stack (`headless_bridge` + the `expose_*`
+patches). They are **intentionally not pre-acked** — selecting one still forces
+explicit per-capability acknowledgement of its `tools`/`network`/`telemetry`
+patches, so standing up the bridge is always a deliberate, auditable act.
 
 ## Dangerous combinations & full-bypass flags
 
@@ -227,6 +246,15 @@ dev) and refuses anything else, but it does **not** filter what is sent. Point
 it only at an endpoint you control and trust, and assume that endpoint sees the
 full content of your session.
 
+Beyond the scheme check, the patch also **rejects destinations that resolve to
+private, loopback, link-local, or cloud-metadata hosts** — RFC-1918 ranges,
+`127.0.0.0/8`, `0.0.0.0/8`, `169.254.0.0/16` (including the
+`169.254.169.254` cloud-metadata endpoint), and the IPv6 equivalents
+(`::1`, `fe80::/10`, `fc00::/7`, `::ffff:` mapped v4). `http://localhost` and
+`127.0.0.1` / `[::1]` remain allowed as an explicit dev exception. This blocks
+the obvious SSRF / metadata-exfil targets; it does **not** defend against
+DNS-rebinding, so still only point it at endpoints you trust.
+
 ### Project-local `.env` injection (`dotenv_loader`)
 
 The `dotenv_loader` patch loads `.env` from `CC_PROJECT_ROOT || process.cwd()`
@@ -236,8 +264,9 @@ unrestricted, a hostile repo could silently stand up the bridge
 (`CC_BRIDGE_TOKEN` / `CC_BRIDGE_ADDR`) or repoint all API traffic through an
 MITM (`ANTHROPIC_BASE_URL`). To prevent this, the loader enforces a denylist:
 it **refuses to set** `CC_BRIDGE_TOKEN`, `CC_BRIDGE_ADDR`, `ANTHROPIC_BASE_URL`,
-`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and any key matching `CC_*_TOKEN`
-from `.env`, emitting a warning when it skips one. These keys can still be set
+`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CC_WEBHOOK_URL` (so a hostile repo
+cannot silently set an egress target for the `webhook` patch), and any key
+matching `CC_*_TOKEN` from `.env`, emitting a warning when it skips one. These keys can still be set
 in the shell — shell-set values always take precedence over `.env` regardless.
 Note the denylist does not cover every conceivable sensitive var; review a
 repo's `.env` before opening it in a patched CLI.

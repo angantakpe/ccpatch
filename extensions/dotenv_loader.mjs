@@ -9,6 +9,7 @@ export default {
   //   - CC_BRIDGE_TOKEN, CC_BRIDGE_ADDR   (would stand up / configure the bridge)
   //   - ANTHROPIC_BASE_URL                (would repoint API traffic to an MITM)
   //   - ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN (credential override)
+  //   - CC_WEBHOOK_URL                    (would set an egress/exfil target)
   //   - any CC_*_TOKEN                    (bridge / integration tokens)
   // A blocked key found in .env is skipped and a warning is emitted.
   capabilities: ["env","fs"],
@@ -43,7 +44,7 @@ if (!globalThis.__ccpDotenvLoaded) {
       // SECURITY: security-critical keys must never be settable from a
       // repo-local .env (see file header). Exact-match denylist + a pattern
       // for any CC_*_TOKEN. Shell-set values are unaffected (handled below).
-      var __envDeny = { 'CC_BRIDGE_TOKEN': 1, 'CC_BRIDGE_ADDR': 1, 'ANTHROPIC_BASE_URL': 1, 'ANTHROPIC_API_KEY': 1, 'ANTHROPIC_AUTH_TOKEN': 1 };
+      var __envDeny = { 'CC_BRIDGE_TOKEN': 1, 'CC_BRIDGE_ADDR': 1, 'ANTHROPIC_BASE_URL': 1, 'ANTHROPIC_API_KEY': 1, 'ANTHROPIC_AUTH_TOKEN': 1, 'CC_WEBHOOK_URL': 1 };
       var __isBlocked = function(k) {
         if (__envDeny[k]) return true;
         if (/^CC_.*_TOKEN$/.test(k)) return true;

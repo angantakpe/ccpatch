@@ -24,15 +24,61 @@ export default {
 
 const WEBHOOK_URL = process.env.CC_WEBHOOK_URL;
 
-// Scheme allowlist: only https:, or http://localhost (+127.0.0.1/[::1]) for
-// local dev. Anything else (plain http:, file:, etc.) is rejected so secrets
-// and conversation data can't egress over an unauthenticated/cleartext channel.
+// SSRF / cloud-metadata guard: reject any host that resolves (literally) to a
+// private, loopback-other-than-localhost, or link-local address. This blocks the
+// obvious internal-pivot and credential-theft targets — RFC-1918
+// (10/8, 172.16/12, 192.168/16), the 169.254.0.0/16 link-local range (which
+// includes the 169.254.169.254 cloud-metadata endpoint on AWS/GCP/Azure), and
+// bare loopback IPs other than the explicitly-allowed localhost. Hostnames that
+// only resolve to internal IPs via DNS still slip through (we don't resolve
+// here), but literal-IP exfil targets — the common SSRF case — are denied.
+const __ccpWebhookIsBlockedHost = (host) => {
+  let h = String(host || '').toLowerCase();
+  // Strip IPv6 brackets and any zone id.
+  if (h.startsWith('[') && h.endsWith(']')) h = h.slice(1, -1);
+  h = h.replace(/%.*$/, '');
+  // IPv6 loopback / unspecified.
+  if (h === '::1' || h === '::') return true;
+  // IPv4-mapped IPv6 (::ffff:a.b.c.d) → unwrap to the v4 tail and fall through.
+  const mapped = h.match(/^::ffff:(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})$/);
+  if (mapped) h = mapped[1];
+  // IPv6 link-local (fe80::/10) and unique-local (fc00::/7).
+  if (/^fe[89ab][0-9a-f]:/.test(h)) return true;
+  if (/^f[cd][0-9a-f]{2}:/.test(h)) return true;
+  const m = h.match(/^(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})$/);
+  if (m) {
+    const o = m.slice(1).map(Number);
+    if (o.some(n => n > 255)) return false; // not a valid dotted-quad
+    if (o[0] === 10) return true;                          // 10.0.0.0/8
+    if (o[0] === 172 && o[1] >= 16 && o[1] <= 31) return true; // 172.16.0.0/12
+    if (o[0] === 192 && o[1] === 168) return true;         // 192.168.0.0/16
+    if (o[0] === 169 && o[1] === 254) return true;         // 169.254.0.0/16 (incl. cloud metadata)
+    if (o[0] === 127) return true;                         // 127.0.0.0/8 loopback
+    if (o[0] === 0) return true;                           // 0.0.0.0/8
+  }
+  return false;
+};
+
+// Scheme allowlist + SSRF guard: only https:, or http://localhost (+127.0.0.1/
+// [::1]) for local dev. Anything else (plain http:, file:, etc.) is rejected so
+// secrets and conversation data can't egress over an unauthenticated/cleartext
+// channel. On top of the scheme check, any private/link-local/loopback host
+// (other than the explicitly-allowed dev localhost) is blocked to deny obvious
+// SSRF and 169.254.169.254 cloud-metadata exfil targets.
 const __ccpWebhookAllowed = (raw) => {
   try {
     const u = new URL(raw);
-    if (u.protocol === 'https:') return true;
-    if (u.protocol === 'http:' && (u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '[::1]' || u.hostname === '::1')) return true;
-    return false;
+    const isDevLocalhost = (u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '[::1]' || u.hostname === '::1');
+    if (u.protocol === 'http:') {
+      // Plain http is only ever allowed for the dev localhost loopback.
+      return isDevLocalhost;
+    }
+    if (u.protocol !== 'https:') return false;
+    // https: — permitted, but deny private/link-local/loopback destinations
+    // (SSRF / cloud-metadata). The dev localhost names stay allowed.
+    if (isDevLocalhost) return true;
+    if (__ccpWebhookIsBlockedHost(u.hostname)) return false;
+    return true;
   } catch (_) { return false; }
 };
 

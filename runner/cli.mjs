@@ -628,6 +628,56 @@ export function makeWatchLoop({ patches, names, outputDir, debounceMs = 200, log
  *
  * Exits non-zero if any patch is DEAD (applied but never executed).
  */
+
+/**
+ * Tokenize a `--smoke` command string into argv parts, honoring single and
+ * double quotes so quoted arguments with embedded spaces survive as one token.
+ *
+ * Rules (deliberately minimal — a smoke command is a program + flags, not a
+ * shell pipeline):
+ *   - Whitespace outside quotes separates tokens.
+ *   - Single quotes preserve their contents verbatim (no escapes inside).
+ *   - Double quotes preserve spaces; backslash escapes the next char inside.
+ *   - A bare backslash outside quotes escapes the next char.
+ * Quote characters themselves are stripped from the emitted tokens. An unclosed
+ * quote simply ends the final token (no throw — keeps the smoke path tolerant).
+ *
+ * @param {string} str
+ * @returns {string[]}
+ */
+export function tokenizeSmoke(str) {
+  const tokens = [];
+  let cur = '';
+  let inSingle = false;
+  let inDouble = false;
+  let started = false; // whether `cur` is an active token (handles empty "")
+  for (let i = 0; i < str.length; i++) {
+    const ch = str[i];
+    if (inSingle) {
+      if (ch === "'") inSingle = false;
+      else cur += ch;
+      continue;
+    }
+    if (inDouble) {
+      if (ch === '"') { inDouble = false; }
+      else if (ch === '\\' && i + 1 < str.length) { cur += str[++i]; }
+      else cur += ch;
+      continue;
+    }
+    if (ch === "'") { inSingle = true; started = true; continue; }
+    if (ch === '"') { inDouble = true; started = true; continue; }
+    if (ch === '\\' && i + 1 < str.length) { cur += str[++i]; started = true; continue; }
+    if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r') {
+      if (started) { tokens.push(cur); cur = ''; started = false; }
+      continue;
+    }
+    cur += ch;
+    started = true;
+  }
+  if (started) tokens.push(cur);
+  return tokens;
+}
+
 export async function runCoverage(options, logger = console) {
   const { spawn } = await import('node:child_process');
   const { bundlePath, smoke, outPath, ccVersion } = options;
@@ -671,8 +721,12 @@ export async function runCoverage(options, logger = console) {
   // Spawn the bundle / smoke command and capture stdout.
   let cmd, args;
   if (smoke) {
-    // The smoke string is a shell-style command; split on whitespace (simple).
-    const parts = smoke.match(/\S+/g) || [];
+    // The smoke string is a shell-style command. Tokenize respecting single and
+    // double quotes (so `node app.js --flag "a b"` stays 3 tokens, not 4) while
+    // stripping the quote characters from the emitted tokens. Backslash escapes
+    // the next character outside single quotes (POSIX-ish, intentionally minimal
+    // — no env expansion, globbing, or operators).
+    const parts = tokenizeSmoke(smoke);
     cmd = parts[0];
     args = parts.slice(1);
     if (!cmd) {

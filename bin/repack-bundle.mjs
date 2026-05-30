@@ -22,13 +22,24 @@
  *     releases/2.1.148/claude
  */
 
-import { readFileSync, writeFileSync, existsSync, statSync, chmodSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, statSync, chmodSync, renameSync, unlinkSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { parseModules } from '../tools/bun-decompiler/decompile.mjs';
 
 const log  = (msg) => console.log(`[repack] ${msg}`);
 const warn = (msg) => console.warn(`[repack:warn] ${msg}`);
 const die  = (msg) => { console.error(`[repack:error] ${msg}`); process.exit(1); };
+
+// Bun trailer format this repacker was validated against. The Bun SEA trailer that
+// follows the embedded JS is UNVERSIONED and UNDOCUMENTED: it is a struct of absolute
+// file offsets that we deliberately do not rewrite (we keep the JS region byte-length
+// identical so every stored offset stays valid). If a future Bun layout change alters
+// the trailer such that a length-equal splice no longer lands the offsets correctly,
+// the resulting binary launches as bare `bun` with NO error — the failure is silent.
+// We record the assumption here and best-effort warn when the embedded Bun version drifts.
+const VALIDATED_BUN_VERSIONS = ['1.3'];  // major.minor prefixes known-good for this splicer
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -177,6 +188,77 @@ function normalisePatchedJs(text) {
   return text;
 }
 
+/**
+ * Locate the index of the byte immediately AFTER the validated Bun CJS wrapper close `})`.
+ *
+ * This mirrors the validation in normalisePatchedJs (trimEnd().endsWith('})')): the true
+ * wrapper close is the `})` reached by walking back over trailing whitespace from the end
+ * of the text. We must NOT use patchedText.lastIndexOf('})') for padding placement: minified
+ * Bun output routinely contains `})` inside string/template/regex literals, and the textually
+ * last `})` in the whole file is not guaranteed to be the wrapper close (e.g. trailing
+ * whitespace, or a literal `})` appearing after the real close would defeat lastIndexOf).
+ *
+ * Returns the insertion index (after the `})`, before any trailing whitespace) — padding
+ * inserted here lands strictly outside the wrapper body, where JS treats it as insignificant
+ * whitespace and it cannot fall inside any literal. Throws if the close cannot be located.
+ */
+export function locateWrapperCloseEnd(text) {
+  let end = text.length;
+  while (end > 0) {
+    const c = text[end - 1];
+    if (c === '\n' || c === '\r' || c === ' ' || c === '\t') end--;
+    else break;
+  }
+  if (end < 2 || text.slice(end - 2, end) !== '})') {
+    throw new Error('Cannot locate Bun CJS wrapper close `})` for padding placement.');
+  }
+  return end;
+}
+
+/**
+ * Assert that a located JS region's end points at the Bun trailer's NUL terminator.
+ *
+ * Pure validation extracted so it can be unit-tested without spawning the full repack.
+ * Only the marker-parser path can fall back to a non-NUL boundary (decompile.mjs), so the
+ * check is scoped to that source; the legacy-anchor path already guarantees a NUL via
+ * indexOf(0,...). Throws with a descriptive message when the assertion fails.
+ */
+export function assertRegionEndIsNul(binary, region) {
+  if (region.source === 'marker-parser' && binary[region.end] !== 0x00) {
+    throw new Error(
+      `Marker parser returned a JS region whose end (offset ${region.end}) is not a NUL byte ` +
+      `(found 0x${(binary[region.end] ?? 0).toString(16).padStart(2, '0')}). This means the ` +
+      `parser fell back to a module/EOF boundary instead of the trailer's NUL terminator — ` +
+      `splicing here would silently shift the Bun trailer. Refusing to repack this binary.`
+    );
+  }
+}
+
+/**
+ * Best-effort detection of the Bun version a compiled binary was built with.
+ *
+ * Bun embeds a version string somewhere in the binary; common forms observed are
+ * `Bun/1.3.x` and a bare semver near runtime banner strings. This is heuristic only —
+ * it exists to WARN on layout drift, never to gate the build. Returns a version string
+ * (e.g. "1.3.20") or null if nothing plausible is found.
+ */
+export function detectBunVersion(binary) {
+  // Search a bounded window of likely matches; the binary is large, so cap the scan.
+  const haystack = binary;
+  const patterns = [
+    /Bun\/(\d+\.\d+\.\d+)/,
+    /bun-v(\d+\.\d+\.\d+)/,
+  ];
+  // Scan in chunks decoded as latin1 to find version banners without allocating the whole
+  // file as one giant string repeatedly.
+  const text = haystack.toString('latin1');
+  for (const re of patterns) {
+    const m = re.exec(text);
+    if (m) return m[1];
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -213,6 +295,32 @@ function repack(originalBinaryPath, patchedJsPath, outputBinaryPath) {
   }
   log(`Binary format: ${isElf ? 'ELF' : isFatMachO ? 'Mach-O (fat)' : 'Mach-O'}`);
 
+  // Best-effort Bun version / trailer-format check. The Bun SEA trailer is unversioned and
+  // we splice the JS region in place WITHOUT rewriting it (see VALIDATED_BUN_VERSIONS). If a
+  // future Bun layout changes the trailer, a length-equal repack can still silently produce a
+  // binary that launches as bare `bun`. We can't detect a trailer format change directly, so
+  // we warn loudly when the embedded Bun version is outside the known-good set as a proxy.
+  const detectedBun = detectBunVersion(binary);
+  if (detectedBun) {
+    const known = VALIDATED_BUN_VERSIONS.some(v => detectedBun.startsWith(v + '.') || detectedBun === v || detectedBun.startsWith(v));
+    if (known) {
+      log(`Detected Bun version ${detectedBun} (within validated set ${VALIDATED_BUN_VERSIONS.join(', ')}).`);
+    } else {
+      warn(
+        `Detected Bun version ${detectedBun}, which is OUTSIDE the validated set ` +
+        `[${VALIDATED_BUN_VERSIONS.join(', ')}]. This repacker assumes the Bun ${VALIDATED_BUN_VERSIONS.join('/')} ` +
+        `SEA trailer layout. If the trailer format changed, the repacked binary may silently launch ` +
+        `as bare \`bun\`. Verify the output runs the embedded entrypoint before shipping.`
+      );
+    }
+  } else {
+    warn(
+      `Could not detect the embedded Bun version; cannot confirm the SEA trailer layout matches ` +
+      `the validated set [${VALIDATED_BUN_VERSIONS.join(', ')}]. Proceeding on the assumption that ` +
+      `the trailer is byte-compatible. Verify the repacked binary runs the embedded entrypoint.`
+    );
+  }
+
   // Locate the embedded JS region.
   let region;
   try {
@@ -222,6 +330,21 @@ function repack(originalBinaryPath, patchedJsPath, outputBinaryPath) {
   }
   const originalRegionSize = region.end - region.start;
   log(`JS region [${region.start}, ${region.end}) — ${originalRegionSize.toLocaleString()} bytes (found via ${region.source})`);
+
+  // Guard: region.end must point at the NUL terminator that begins the Bun trailer.
+  //
+  // The marker-parser computes contentEnd as the first NUL after contentStart, BUT falls
+  // back to nextBoundary (a marker start, or buf.length) when that NUL check fails
+  // (decompile.mjs parseModules). nextBoundary is NOT a NUL byte. If we splice at a non-NUL
+  // region.end, `after` would no longer start at the trailer's NUL — the semantic boundary
+  // shifts while total length is preserved, so the equality guard below still passes and the
+  // corruption is silent. The legacy-anchor path already locates region.end via indexOf(0,...)
+  // so it is guaranteed a NUL; only the marker-parser path needs this assertion.
+  try {
+    assertRegionEndIsNul(binary, region);
+  } catch (e) {
+    die(e.message);
+  }
 
   // Read and normalise patched JS.
   let patchedText;
@@ -241,19 +364,28 @@ function repack(originalBinaryPath, patchedJsPath, outputBinaryPath) {
   // updated by this script. Keeping the JS region the same size leaves every post-region
   // byte at its original file offset, so all stored offsets remain valid.
   //
-  // Padding is injected as plain ASCII spaces immediately before the closing `})` of the
-  // CJS wrapper. JavaScript treats them as insignificant whitespace; Bun's parser accepts
-  // them. The original region size is the JS bytes only (excluding the NUL terminator
-  // that `after` begins with), so we pad to that exact byte count.
+  // Padding is injected as plain ASCII spaces immediately AFTER the validated CJS wrapper
+  // close `})`, between the close and the trailing NUL (the NUL lives in `after`, not here).
+  // Trailing whitespace at file scope is unambiguously inert: it is outside the wrapper body
+  // and therefore cannot land inside any string/template/regex literal. We deliberately do
+  // NOT use lastIndexOf('})') — minified Bun output contains `})` inside literals, and the
+  // textually-last `})` is not guaranteed to be the wrapper close, so spaces inserted there
+  // could silently corrupt a literal (and the length-equal guard would not catch it).
+  // locateWrapperCloseEnd reuses the same trimEnd().endsWith('})') logic normalisePatchedJs
+  // validates against, so the close we pad after is the same one that was validated.
+  // The original region size is the JS bytes only (excluding the NUL terminator that `after`
+  // begins with), so we pad to that exact byte count.
   if (patchedBuf.length < originalRegionSize) {
     const padBytes = originalRegionSize - patchedBuf.length;
-    const closeIdx = patchedText.lastIndexOf('})');
-    if (closeIdx < 0) {
-      die('Cannot pad patched JS: closing `})` of CJS wrapper not found.');
+    let closeEnd;
+    try {
+      closeEnd = locateWrapperCloseEnd(patchedText);
+    } catch (e) {
+      die(`Cannot pad patched JS: ${e.message}`);
     }
-    patchedText = patchedText.slice(0, closeIdx) + ' '.repeat(padBytes) + patchedText.slice(closeIdx);
+    patchedText = patchedText.slice(0, closeEnd) + ' '.repeat(padBytes) + patchedText.slice(closeEnd);
     patchedBuf = Buffer.from(patchedText, 'utf8');
-    log(`Padded patched JS with ${padBytes.toLocaleString()} space(s) to match original region size.`);
+    log(`Padded patched JS with ${padBytes.toLocaleString()} trailing space(s) after the wrapper close to match original region size.`);
   } else if (patchedBuf.length > originalRegionSize) {
     die(
       `Patched JS (${patchedBuf.length.toLocaleString()} bytes) exceeds original JS region ` +
@@ -286,25 +418,98 @@ function repack(originalBinaryPath, patchedJsPath, outputBinaryPath) {
     );
   }
 
-  // Write output binary with execute permissions.
-  writeFileSync(outputBinaryPath, output);
-  chmodSync(outputBinaryPath, 0o755);
+  // Write atomically: write to a sibling .tmp, set execute bits on it, then rename into
+  // place. renameSync is atomic on the same filesystem, so a crash / full disk mid-write
+  // leaves any prior good binary at outputBinaryPath untouched rather than truncated. On any
+  // failure we remove the tmp so we never leave a partial file behind.
+  const tmpPath = outputBinaryPath + '.tmp';
+  try {
+    writeFileSync(tmpPath, output);
+    chmodSync(tmpPath, 0o755);
+    renameSync(tmpPath, outputBinaryPath);
+  } catch (e) {
+    try { if (existsSync(tmpPath)) unlinkSync(tmpPath); } catch { /* best-effort cleanup */ }
+    die(`Failed to write output binary atomically: ${e.message}`);
+  }
 
   const outStats = statSync(outputBinaryPath);
   log(`Wrote ${(outStats.size / 1024 / 1024).toFixed(2)} MB to ${outputBinaryPath}`);
   log(`Execute permissions set (0o755)`);
+
+  // Optional post-repack smoke check: spawn the repacked binary with --version and confirm it
+  // does NOT behave as bare `bun` (which would indicate the SEA dispatch broke). This is the
+  // only reliable way to catch a silent trailer-layout regression. It is wired but guarded:
+  //   - skipped on CCPATCH_REPACK_SMOKE=0 (default-on, opt-out)
+  //   - any spawn failure (wrong arch, sandbox can't exec, ENOEXEC) is treated as SKIPPED with
+  //     a warning, NOT a hard failure — CI sandboxes frequently can't run a freshly-built
+  //     foreign binary, and we must not fail the build solely because the smoke run can't execute.
+  // Only a binary that runs AND prints the bare Bun runtime banner is treated as a real failure.
+  if (process.env.CCPATCH_REPACK_SMOKE !== '0') {
+    runSmokeCheck(outputBinaryPath);
+  } else {
+    log('Post-repack smoke check skipped (CCPATCH_REPACK_SMOKE=0).');
+  }
+
   log(`Done. Run the repacked binary with: ${outputBinaryPath}`);
+}
+
+/**
+ * Best-effort post-repack smoke check. Spawns `<binary> --version` and inspects output.
+ *
+ * Failure modes:
+ *   - Cannot spawn (foreign arch, no-exec sandbox, ENOEXEC, ETXTBSY): SKIPPED with a warning.
+ *   - Runs and output looks like bare Bun (`Bun ` banner / `usage: bun`): real FAILURE → die.
+ *   - Runs and produces any other output: treated as plausibly-OK and logged.
+ *
+ * Deliberately does not assert a specific Claude version string — the embedded entrypoint may
+ * print its own version which we don't know here. The goal is to catch the bare-`bun` fallback.
+ */
+function runSmokeCheck(binaryPath) {
+  let res;
+  try {
+    res = spawnSync(binaryPath, ['--version'], {
+      timeout: 15_000,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch (e) {
+    warn(`Post-repack smoke check skipped: could not spawn repacked binary (${e.message}).`);
+    return;
+  }
+  if (res.error) {
+    warn(`Post-repack smoke check skipped: ${res.error.code || res.error.message} — environment cannot execute the repacked binary.`);
+    return;
+  }
+  const out = `${res.stdout || ''}${res.stderr || ''}`;
+  // Bare Bun, when handed an unknown script path / no embedded SEA, prints its own runtime
+  // banner or usage. If we see that, the SEA dispatch is broken — fail loudly.
+  if (/^\s*Bun\s+\d+\.\d+\.\d+/.test(out) || /\busage:\s*bun\b/i.test(out)) {
+    die(
+      `Post-repack smoke check FAILED: \`${binaryPath} --version\` produced bare Bun output:\n` +
+      `${out.trim().slice(0, 200)}\n` +
+      `The repacked binary is launching as bare \`bun\` instead of the embedded entrypoint — ` +
+      `the Bun trailer offsets are likely invalid. Do not ship this binary.`
+    );
+  }
+  log(`Post-repack smoke check passed (binary ran, no bare-bun fallback detected).`);
 }
 
 // ---------------------------------------------------------------------------
 // CLI entry point
 // ---------------------------------------------------------------------------
 
-const args = process.argv.slice(2).filter(a => a !== '--');
-if (args.length < 3 || args.includes('--help') || args.includes('-h')) {
-  usage();
+// Only run the CLI when invoked directly (`node bin/repack-bundle.mjs ...`), not when
+// imported as a module (e.g. by tests/repack.test.mjs). This lets the pure helpers above
+// be unit-tested without triggering usage()/repack() at import time.
+if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
+  const args = process.argv.slice(2).filter(a => a !== '--');
+  if (args.length < 3 || args.includes('--help') || args.includes('-h')) {
+    usage();
+  }
+
+  const [originalBinaryPath, patchedJsPath, outputBinaryPath] = args.map(a => resolve(a));
+
+  repack(originalBinaryPath, patchedJsPath, outputBinaryPath);
 }
 
-const [originalBinaryPath, patchedJsPath, outputBinaryPath] = args.map(a => resolve(a));
-
-repack(originalBinaryPath, patchedJsPath, outputBinaryPath);
+export { repack };

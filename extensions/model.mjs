@@ -29,14 +29,15 @@ if (!process.env.ANTHROPIC_MODEL) {
   const display = String(process.env.CLAUDE_MODEL_DISPLAY || process.env.CLAUDE_MODEL || '').trim().toLowerCase();
   if (!display) return;
   const modelIds = {
-    'opus': 'claude-opus-4-7',
+    'opus': 'claude-opus-4-8',
+    'opus 4.8': 'claude-opus-4-8',
     'opus 4.7': 'claude-opus-4-7',
     'opus 4.6': 'claude-opus-4-6',
     'sonnet': 'claude-sonnet-4-6',
     'sonnet 4.6': 'claude-sonnet-4-6',
     'sonnet 4.5': 'claude-sonnet-4-5',
-    'haiku': 'claude-haiku-4-5',
-    'haiku 4.5': 'claude-haiku-4-5',
+    'haiku': 'claude-haiku-4-5-20251001',
+    'haiku 4.5': 'claude-haiku-4-5-20251001',
   };
   process.env.ANTHROPIC_MODEL = modelIds[display] || process.env.CLAUDE_MODEL || process.env.CLAUDE_MODEL_DISPLAY;
 })();

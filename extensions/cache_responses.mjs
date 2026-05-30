@@ -34,6 +34,30 @@ export default {
   //     account can never be replayed to a different account/credential. We
   //     hash the secret; the raw token never lands in any on-disk path.
   //   - cache files are written 0600 (owner read/write only), like auth_token.
+
+  // SECURITY: when a request carries NO Authorization / x-api-key header the
+  // per-request auth dimension would otherwise collapse to sha256('') — a single
+  // constant shared by every uncredentialed caller, breaking the "never replayed
+  // across credentials" guarantee for that edge. We fold in a stable
+  // per-account/per-process discriminator instead:
+  //   1. the credential that the real fetch would actually use (the
+  //      ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN / CLAUDE env the SDK reads),
+  //      so two accounts on the same box still get distinct keys; failing that
+  //   2. a per-process random salt generated once at load, so distinct processes
+  //      never share an uncredentialed cache entry. (2) sacrifices cross-run
+  //      cache reuse for header-less requests in exchange for the safety
+  //      property — acceptable for a dev-only cache. The discriminator is hashed
+  //      with the same one-way sha256; no raw secret is stored.
+  const _envCredential = () =>
+    process.env.ANTHROPIC_AUTH_TOKEN ||
+    process.env.ANTHROPIC_API_KEY ||
+    process.env.CLAUDE_CODE_OAUTH_TOKEN ||
+    '';
+  // Generated once per process; only consulted when neither a request auth
+  // header nor an env credential is available.
+  const _processSalt = _createHash('sha256')
+    .update('ccpatch-cache:' + process.pid + ':' + Date.now() + ':' + Math.random())
+    .digest('hex');
   const _hashHeaders = (headers) => {
     // Pull the auth-bearing header out of whatever shape headers arrives in
     // (plain object, Headers instance, or array of pairs), then return a
@@ -50,6 +74,10 @@ export default {
         auth = _get(headers, 'authorization') || _get(headers, 'x-api-key') || '';
       }
     } catch {}
+    // No request-level credential → fall back to the env credential, then to a
+    // per-process salt, so the auth dimension is never a shared constant.
+    if (!auth) auth = 'env:' + _envCredential();
+    if (auth === 'env:') auth = 'proc:' + _processSalt;
     return _createHash('sha256').update(String(auth)).digest('hex');
   };
   const _cacheKey = (url, body, headers) =>

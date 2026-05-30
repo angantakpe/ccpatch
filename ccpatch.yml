@@ -23,9 +23,14 @@ version: 1
 # ──────────────────────────────────────────────────────────────────────────────
 # ack: — Capability acknowledgements (default-strict gate)
 #
-# Patches that declare `network`, `exec`, or `env` capabilities require an
-# explicit ack entry here before the build will proceed. By acknowledging a
-# capability you confirm you've read THREAT_MODEL.md for that patch and
+# Patches that declare `network`, `exec`, `env`, `tools`, or `telemetry`
+# capabilities require an explicit ack entry here before the build will proceed
+# (this is the GATE_REQUIRED_CAPS set in runner/cli/capabilities.mjs — it fires
+# unconditionally, not just under --strict). `tools` and `telemetry` were folded
+# in so the headless RCE stack (expose_tool_dispatch / expose_agent_tool, both
+# capabilities:["tools"]) and telemetry exfil patches can't slip through the
+# default `make patch-claude-code` path without re-confirmation. By acknowledging
+# a capability you confirm you've read THREAT_MODEL.md for that patch and
 # understand the runtime privileges it claims.
 #
 # Pass --allow-unacked on the CLI to bypass this check (legacy warn-only mode).
@@ -263,6 +268,18 @@ profiles:
     - cache_responses
     - input_bar_color
 
+  # ⚠ SECURITY: the daemon / daemon_native / orchestrator profiles below compose
+  # the full headless remote-control stack — expose_tool_dispatch +
+  # expose_api_client + expose_agent_tool + expose_submit_input + headless_bridge.
+  # Together these expose the native AgentTool, the Anthropic SDK client, and an
+  # NDJSON socket that can submit input and dispatch tools from outside the
+  # process: effectively remote code/tool execution. They declare `tools`,
+  # `network`, and `telemetry` capabilities, which are ALL gate-required (see the
+  # ack: block above). These profiles are intentionally NOT pre-acked: building
+  # one fails loud unless you explicitly acknowledge each capability per patch in
+  # the ack: block, or pass --strict --allow-capabilities <list> (or the blunt
+  # --allow-capabilities=all). The point is to force re-confirmation of the threat
+  # model every time the RCE stack is built — do not pre-ack these here.
   daemon:
     # Headless / automation vertical — drive the running CLI from outside.
     - react_singleton
