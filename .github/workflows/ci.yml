@@ -51,6 +51,11 @@ jobs:
       # lint:types runs `gen-types` then `tsc`. Regenerating types/patch.d.ts in
       # CI is a no-op when the committed types are current; if they drift, the
       # tsc step (or a follow-up diff) surfaces it. We do NOT commit here.
+      #
+      # `npm run lint` includes `lint:anchors` (scripts/lint-anchors.mjs), the
+      # anchor-resilience gate: it fails the build on any inline regex that pins
+      # a minified shape without a stable literal and is not in the shrinking-only
+      # ALLOWED_REGEX_ANCHORS allowlist. See docs/anchors.md §3.
       - name: Lint
         run: npm run lint
 

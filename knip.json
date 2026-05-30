@@ -8,6 +8,7 @@
     "scripts/check-declarative.mjs",
     "scripts/codemod-declarative.mjs",
     "scripts/print-banner.mjs",
+    "scripts/anchor-report.mjs",
     "runner/cli.mjs",
     "tools/ccpatch-bridge.mjs",
     "tools/anchor-doctor.mjs",

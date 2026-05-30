@@ -4,7 +4,7 @@
         extract-from-binary bun-decompile bun-run bun-verify bun-reconstruct \
         coverage bun-all all beautify beautify-fast patch \
         patch-claude-code patch-list doctor print-patch anchor-catalog \
-        anchor-catalog-missing anchor-catalog-changed repatch release run-extracted \
+        anchor-catalog-missing anchor-catalog-changed anchor-report repatch release run-extracted \
         start \
         patch-claude-code-native \
         clean clean-patched clean-identifiers clean-all \
@@ -227,6 +227,9 @@ anchor-catalog-missing: ## Show only prompts NOT found in the bundle
 
 anchor-catalog-changed: ## Show only prompts whose hash drifted (changed between CC versions)
 	@$(NODE) tools/tweakcc-anchors.mjs $(if $(BUNDLE),--bundle $(BUNDLE),) --changed
+
+anchor-report: ## Show each patch's anchor resolution tier (literal/refmap/regex/fuzzy/none): make anchor-report [ENABLED=1]
+	@$(NODE) scripts/anchor-report.mjs $(if $(ENABLED),--enabled,)
 
 refmap: ## Build refmap for an upstream version: make refmap VERSION=x.y.z [BUNDLE=path]
 	@test -n "$(VERSION)" || (echo "Error: VERSION required" && exit 1)

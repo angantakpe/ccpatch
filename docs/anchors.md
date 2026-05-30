@@ -77,18 +77,44 @@ versions** — flag keys like `"tengu_kairos_*"`, fixed module wrappers, distinc
 error messages. These do not need a registry entry (per the adoption policy).
 Keep the regex narrow and anchored on the literal, not on minified identifiers.
 
-## 3. LEGACY / grandfathered — inline function-locating regex
+## 3. LEGACY — raw minified-shape regex (ENFORCED allowlist)
 
 Some older patches hand-roll a regex that matches a whole minified function
-shape (capturing the rotated name with `(\w+)` etc.) directly inside `apply()`.
-**This is legacy. Do not write new patches this way.** It duplicates per-version
-knowledge inside the patch, so when a release drifts the anchor you have to edit
-the patch itself rather than one registry line.
+*shape* (boolean flags `!0`/`!1`, bare `\w+`/`[A-Za-z_$][\w$]*` name slots)
+without pinning any stable string the bundle keeps across versions. **This is
+legacy. Do not write new patches this way** — it matches minifier output
+directly, so one upstream reshuffle silently breaks it and there is nothing for
+`findFunctionByLiteral()` to pivot on.
 
-Existing inline-regex patches are **grandfathered** — there is no campaign to
-rewrite them. Migrate opportunistically: when an anchor drifts and you're
-already editing the patch, move it to a `runner/anchors.mjs` entry and switch to
-`findFunctionByLiteral` / `resolveAnchorLiteral`.
+### This is now enforced, not just discouraged
+
+`scripts/lint-anchors.mjs` (run by `npm run lint`, and therefore CI) FAILS on
+any inline regex that pins a minified shape but carries no stable string or
+property literal. A regex is exempt when it embeds a stable token — a quoted
+flag key (`"tengu_kairos_*"`), an error message, or a minifier-stable property
+skeleton (`{apiKey:…,maxRetries:…}`, `isHidden(){…}`). Capturing the rotating
+*name* with a group (`([A-Za-z_$][\w$]*)`) does not, by itself, make a regex
+resilient — the regex must still anchor on something stable.
+
+The single, explicit home for raw minified-shape regex that has no stable token
+is the **`ALLOWED_REGEX_ANCHORS`** allowlist in `scripts/lint-anchors.mjs`,
+keyed by patch file → exact pattern source. It exists only to grandfather a
+handful of structural secondary matches that are already scoped by a stable
+sibling anchor (e.g. a closer match that follows a stable property skeleton) or
+that are post-apply self-checks rather than locators.
+
+**The allowlist may only SHRINK — never add entries.** A brand-new
+minified-shape anchor fails CI until it is re-anchored on a stable literal. To
+remove an entry, re-anchor the patch on the stable string the bundle keeps
+(`resolveAnchorLiteral` + `findFunctionByLiteral`, §1 above), then delete the
+line from the allowlist.
+
+### Seeing where each patch stands
+
+`make anchor-report` (or `node scripts/anchor-report.mjs`) prints every patch's
+resolution tier — `literal` / `refmap` / `regex` / `fuzzy` / `none` — so the
+distribution of strategies is visible at a glance without a real bundle. Add
+`ENABLED=1` to limit it to enabled patches.
 
 ---
 

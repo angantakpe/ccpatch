@@ -1,6 +1,13 @@
 import { forceFeatureFlag, spliceAfter } from '../runner/patch-helpers.mjs';
+import { resolveAnchorLiteral } from '../runner/anchors.mjs';
 
 const SHEBANG = '#!/usr/bin/env node';
+
+// Resolve the stable feature-flag literal from the central registry rather than
+// re-typing it here — the registry (runner/anchors.mjs) is the single home for
+// the "isDurableCronEnabled" anchor, the same way loop_dynamic resolves its
+// literals. A version bump only ever edits the registry.
+const CRON_FLAG_LITERAL = resolveAnchorLiteral('isDurableCronEnabled');
 
 export default {
     category: 'feature',
@@ -17,10 +24,10 @@ export default {
     // override logic with the other feature-flag patches.
     at: {
       kind: 'HEAD',
-      target: { function: { literal: 'tengu_kairos_cron_durable' } },
+      target: { function: { literal: CRON_FLAG_LITERAL } },
     },
     apply: (code) => {
-      const res = forceFeatureFlag(code, 'tengu_kairos_cron_durable', { allowMissing: true });
+      const res = forceFeatureFlag(code, CRON_FLAG_LITERAL, { allowMissing: true });
       if (!res.fnName) {
         console.error('  [durable_cron] WARNING: isDurableCronEnabled anchor not matched — update runner/anchors.mjs for this version');
         return code;
