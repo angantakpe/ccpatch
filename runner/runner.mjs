@@ -5,6 +5,7 @@ import { validateManifest } from './manifest.mjs';
 import { resolveAt } from './at-selector.mjs';
 import { compileKind } from './patch-kinds.mjs';
 import { diffSpansFromPatch, detectOverlapsInPhase } from './conflict.mjs';
+import { CoordinateFrame } from './coordinate-frame.mjs';
 import { buildDriftRecord } from './drift-record.mjs';
 import { fireHook } from './lifecycle.mjs';
 import { injectCoverageHit } from './coverage.mjs';
@@ -180,7 +181,7 @@ export function detectDrift(preCode, normalized, name, patchOptions) {
  */
 function applySinglePatch({
   name, patch, normalized, preCode, beforeOpts, atSites,
-  origLength, globalStrict, patchOptions, logger, warnStorageOnce,
+  frame, globalStrict, patchOptions, logger, warnStorageOnce,
 }) {
   const bestEffort = patchOptions.bestEffort === true;
   const _patchStart = Date.now();
@@ -320,19 +321,16 @@ function applySinglePatch({
     // additive-frame invariant (preCode === original + sum of prior deltas) is
     // asserted by the CALLER before this patch runs (Finding #5), so here it is
     // safe to derive the shift directly from preCode's length.
-    const deltaBefore = preCode.length - origLength;
-    const shift = (spans) => spans.map(([s, e]) => [s - deltaBefore, e - deltaBefore]);
+    const deltaBefore = frame.deltaBefore(preCode);
     let diffSpans = null;        // null => not yet computed (non-strict, lazy)
     let diffSpanCount = changed ? 1 : 0; // cheap count for the coverage manifest
     if (changed && globalStrict) {
       const sp = structuredPatch(name, name, preCode, effectiveCode, 'pre', 'post', { context: 0 });
-      diffSpans = shift(diffSpansFromPatch(preCode, sp));
+      diffSpans = frame.shiftToOriginal(diffSpansFromPatch(preCode, sp), deltaBefore);
       diffSpanCount = diffSpans.length;
     }
     // at-sites resolved on beforeCode (== preCode frame) → shift to original.
-    const atSitesShifted = atSites
-      ? atSites.map(s => ({ ...s, start: s.start - deltaBefore, end: (s.end ?? s.start) - deltaBefore }))
-      : null;
+    const atSitesShifted = frame.shiftSites(atSites, deltaBefore);
     trace = {
       name,
       phase: phaseKey,
@@ -402,15 +400,11 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
   // ("did THIS patch do what it claimed when it ran"), so the batching stays.
   let pendingVerify = [];
   let currentPhase = null;
-  // Finding #2 (hook ordering): cumulative byte-length change introduced OUTSIDE
-  // patch apply() — specifically an onVerifyFail heal that reassigns nextCode to
-  // its returned (possibly differently-sized) string at a phase-boundary flush.
-  // Those bytes are NOT reflected in any trace's apply-delta accounting, so the
-  // additive-frame invariant (which models nextCode as original + sum of patch
-  // apply deltas) would otherwise mis-add them and could falsely throw on a
-  // SUCCESSFUL self-heal. We thread this into the invariant's expected-delta so a
-  // heal is accounted for explicitly rather than mistaken for a broken frame.
-  let hookDelta = 0;
+  // The additive overlap-coordinate frame owns origLength and the cumulative
+  // out-of-band `hookDelta` (byte-length changes from onVerifyFail heals). See
+  // runner/coordinate-frame.mjs — the span/at-site shifting and the additive
+  // invariant assertion below delegate to it.
+  const frame = new CoordinateFrame(code.length);
   async function flushPendingVerify(_reasonPhase) {
     if (pendingVerify.length === 0) return;
     const batch = pendingVerify;
@@ -451,7 +445,7 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
             // string. Record the out-of-band length change so the overlap-frame
             // invariant can subtract it back out instead of treating it as a
             // broken additive frame and aborting a successful self-heal.
-            hookDelta += hookRes.result.length - nextCode.length;
+            frame.recordHookDelta(nextCode.length, hookRes.result.length);
             nextCode = hookRes.result;
             entry.lifecycleCtx.appliedCode = hookRes.result;
             issues = [];
@@ -592,25 +586,13 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
     // a future non-additive patch kind, or an onBeforeApply hook that replaced
     // ctx.code with an unrelated string. Subtracting both deltas from preCode would
     // then mis-translate every span and silently mis-detect overlaps.
-    {
-      // Finding #2: subtract `hookDelta` (cumulative out-of-band length change
-      // from onVerifyFail heals) from BOTH sides so the invariant measures the
-      // PURE patch-apply frame. nextCode and beforeCode both carry the heal bytes
-      // equally, so a successful self-heal nets out and does NOT trip the gate;
-      // a genuine non-additive break (a patch kind that doesn't preserve the
-      // frame, or an onBeforeApply that swapped ctx.code) still diverges and throws.
-      const expectedDeltaBefore = (nextCode.length - code.length) - hookDelta;
-      const actualDeltaBefore = (beforeCode.length - code.length) - hookDelta;
-      if (actualDeltaBefore !== expectedDeltaBefore) {
-        throw new Error(
-          `Overlap-frame invariant violated at patch "${name}": beforeCode.length-origLength-hookDelta=${actualDeltaBefore} ` +
-          `but cumulative prior patch delta=${expectedDeltaBefore} (hookDelta=${hookDelta}). The shared-frame overlap math ` +
-          `(A2) assumes an additive frame (preCode === original + sum of prior patch deltas + heal deltas). A non-additive ` +
-          `patch kind, or an onBeforeApply hook that replaced ctx.code with an unrelated string, broke it — overlap ` +
-          `detection would silently mis-translate spans. Fix the patch so it preserves the additive frame.`
-        );
-      }
-    }
+    // Finding #2: the frame subtracts `hookDelta` (cumulative out-of-band length
+    // change from onVerifyFail heals) from BOTH sides so the invariant measures
+    // the PURE patch-apply frame. nextCode and beforeCode both carry the heal
+    // bytes equally, so a successful self-heal nets out and does NOT trip the
+    // gate; a genuine non-additive break (a patch kind that doesn't preserve the
+    // frame, or an onBeforeApply that swapped ctx.code) still diverges and throws.
+    frame.assertAdditive(beforeCode, nextCode, code, name);
 
     try {
       const preCode = beforeCode;
@@ -621,7 +603,7 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
       // need `await` and loop control and so must stay in the loop).
       const r = applySinglePatch({
         name, patch, normalized, preCode, beforeOpts, atSites,
-        origLength: code.length, globalStrict, patchOptions, logger, warnStorageOnce,
+        frame, globalStrict, patchOptions, logger, warnStorageOnce,
       });
       timings.push({ name, ms: r.timingMs });
       results[name] = r.status;
@@ -744,7 +726,7 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
       // now match what strict mode would flag as FATAL.
       const sp = structuredPatch(t.name, t.name, t._preCode, t._effectiveCode, 'pre', 'post', { context: 0 });
       const raw = diffSpansFromPatch(t._preCode, sp);
-      t.diffSpans = raw.map(([s, e]) => [s - t._deltaBefore, e - t._deltaBefore]);
+      t.diffSpans = frame.shiftToOriginal(raw, t._deltaBefore);
     }
     const conflicts = detectOverlapsInPhase(traces);
     for (const c of conflicts) {
