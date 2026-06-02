@@ -1,7 +1,10 @@
 {
-  "name": "ccpatch",
+  "name": "@angantakpe/ccpatch",
   "version": "0.2.0",
   "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
   "description": "A patch framework for the official Anthropic Claude Code CLI — extract, unminify, and apply JavaScript-level patches to add features, fix bugs, and expose internals.",
   "keywords": [
     "claude",
