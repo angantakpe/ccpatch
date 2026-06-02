@@ -1,6 +1,6 @@
 {
   "name": "ccpatch",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "A patch framework for the official Anthropic Claude Code CLI — extract, unminify, and apply JavaScript-level patches to add features, fix bugs, and expose internals.",
   "keywords": [
@@ -19,12 +19,30 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/codehornets/ccpatch.git"
+    "url": "git+https://github.com/angantakpe/ccpatch.git"
   },
   "bugs": {
-    "url": "https://github.com/codehornets/ccpatch/issues"
+    "url": "https://github.com/angantakpe/ccpatch/issues"
   },
-  "homepage": "https://github.com/codehornets/ccpatch#readme",
+  "homepage": "https://github.com/angantakpe/ccpatch#readme",
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "bin/",
+    "runner/",
+    "core/",
+    "extensions/",
+    "tools/",
+    "types/",
+    "refmaps/",
+    "ccpatch.yml",
+    "README.md",
+    "LICENSE",
+    "NOTICE",
+    "SECURITY.md",
+    "THREAT_MODEL.md"
+  ],
   "scripts": {
     "test:patches": "node --test tests/patch-verification.test.mjs",
     "test:boot": "node --test tests/boot-smoke.test.mjs",
@@ -39,7 +57,17 @@
     "lint:anchors": "node scripts/lint-anchors.mjs",
     "lint": "npm run lint:dead && npm run lint:unused && npm run lint:types && npm run lint:declarative && npm run lint:anchors",
     "gen:types": "node scripts/gen-types.mjs",
-    "tui": "node bin/patch-tui.mjs"
+    "tui": "node bin/patch-tui.mjs",
+    "test-patches": "npm run test:patches",
+    "test-boot": "npm run test:boot",
+    "test-integration": "npm run test:integration",
+    "test-all": "npm run test:all",
+    "lint-dead": "npm run lint:dead",
+    "lint-unused": "npm run lint:unused",
+    "lint-types": "npm run lint:types",
+    "lint-declarative": "npm run lint:declarative",
+    "lint-anchors": "npm run lint:anchors",
+    "gen-types": "npm run gen:types"
   },
   "dependencies": {
     "acorn": "^8.14.0",
