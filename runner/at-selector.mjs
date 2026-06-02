@@ -34,6 +34,7 @@ import { findFunctionByLiteral, firstOffsetOf } from './ast-anchor.mjs';
 import { fuzzyMatch } from './anchors.mjs';
 import { findClosingBrace } from './brace-walker.mjs';
 import { getAst } from './ast-cache.mjs';
+import { RESOLVER_REGISTRY } from './resolvers/index.mjs';
 
 export const AT_KINDS = Object.freeze(['HEAD', 'RETURN', 'INVOKE', 'BEFORE', 'AFTER']);
 
@@ -478,21 +479,16 @@ function describeFnSpec(spec) {
 }
 
 /**
- * Main resolver. Dispatch on at.kind.
+ * Main resolver. Dispatch on at.kind via RESOLVER_REGISTRY.
  */
-export function resolveAt(at, code, _opts = {}) {
+export function resolveAt(at, code, opts = {}) {
   if (!at || typeof at !== 'object') return { ok: false, error: '@At: missing selector object' };
   if (!AT_KINDS.includes(at.kind)) {
     return { ok: false, error: `@At: unknown kind "${at.kind}" (allowed: ${AT_KINDS.join(', ')})` };
   }
-  switch (at.kind) {
-    case 'HEAD':   return resolveHead(at, code);
-    case 'RETURN': return resolveReturn(at, code);
-    case 'INVOKE': return resolveInvoke(at, code);
-    case 'BEFORE': return resolveBeforeAfter(at, code, 'BEFORE');
-    case 'AFTER':  return resolveBeforeAfter(at, code, 'AFTER');
-  }
-  return { ok: false, error: `@At: unhandled kind ${at.kind}` };
+  const fn = RESOLVER_REGISTRY.get(at.kind);
+  if (!fn) return { ok: false, error: 'Unknown @At kind: ' + at.kind };
+  return fn(at.target, code, opts);
 }
 
 // ───────────────────────── Helpers patches can use ─────────────────────────
