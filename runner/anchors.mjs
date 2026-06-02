@@ -50,7 +50,7 @@
  */
 
 import { loadRefmap, resolveSymbol } from './refmap.mjs';
-import { checkVerifyCore } from './verify-core.mjs';
+import { checkVerifyCore, toList } from './verify-core.mjs';
 
 export const anchors = {
   isDurableCronEnabled: {
@@ -217,10 +217,6 @@ function isWeakLocal(verify) {
   const hasA = toList(verify.absent).length > 0;
   const hasC = verify.count !== undefined && verify.count !== null;
   return hasP && !hasA && !hasC;
-}
-
-function toList(x) {
-  return Array.isArray(x) ? x : (x ? [x] : []);
 }
 
 function classifyDrift(patch, code, detail) {

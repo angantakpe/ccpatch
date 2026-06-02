@@ -11,6 +11,7 @@
 import { mkdirSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { getResolvedVariant } from './loader.mjs';
+import { PROJECT_ROOT } from './paths.mjs';
 
 /**
  * S5: build a run-scoped "warn once" reporter for storage-write failures. The
@@ -41,9 +42,9 @@ export function makeStorageWarnOnce(logger) {
 export function writeConflictsArtifact(allConflicts, warnStorageOnce) {
   if (allConflicts.length === 0) return;
   try {
-    mkdirSync('storage/outputs', { recursive: true });
+    mkdirSync(join(PROJECT_ROOT, 'storage', 'outputs'), { recursive: true });
     const out = allConflicts.map(c => JSON.stringify(c)).join('\n') + '\n';
-    appendFileSync(join('storage/outputs', 'patch-conflicts.jsonl'), out, 'utf8');
+    appendFileSync(join(PROJECT_ROOT, 'storage', 'outputs', 'patch-conflicts.jsonl'), out, 'utf8');
   } catch (err) { warnStorageOnce?.('patch-conflicts.jsonl', err); }
 }
 
@@ -68,7 +69,7 @@ export function writeApplyArtifacts({ results, patches, phaseTraces, patchOption
   // version is known so multiple builds don't clobber each other.
   // Cross-referenced by `ccpatch coverage` against runtime hits.
   try {
-    mkdirSync('storage/outputs', { recursive: true });
+    mkdirSync(join(PROJECT_ROOT, 'storage', 'outputs'), { recursive: true });
     const coverageManifest = {
       ccVersion: patchOptions.version ?? null,
       appliedAt: new Date().toISOString(),
@@ -97,7 +98,7 @@ export function writeApplyArtifacts({ results, patches, phaseTraces, patchOption
       coverageManifest.patches[name] = entry;
     }
     const tag = patchOptions.version ? `v${patchOptions.version}` : 'unknown';
-    const covPath = join('storage/outputs', `coverage-apply-${tag}.json`);
+    const covPath = join(PROJECT_ROOT, 'storage', 'outputs', `coverage-apply-${tag}.json`);
     writeFileSync(covPath, JSON.stringify(coverageManifest, null, 2), 'utf8');
   } catch (err) {
     // S5: route through the run-scoped warn-once latch.
@@ -108,8 +109,8 @@ export function writeApplyArtifacts({ results, patches, phaseTraces, patchOption
   // resolved variant per patch (ARCH5: via getResolvedVariant, not __resolvedVariant).
   if (patchOptions.version) {
     try {
-      mkdirSync('storage/outputs', { recursive: true });
-      const outPath = join('storage/outputs', `patch-results-v${patchOptions.version}.json`);
+      mkdirSync(join(PROJECT_ROOT, 'storage', 'outputs'), { recursive: true });
+      const outPath = join(PROJECT_ROOT, 'storage', 'outputs', `patch-results-v${patchOptions.version}.json`);
       const decorated = {};
       for (const name of Object.keys(results)) {
         const status = results[name];

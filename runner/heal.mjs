@@ -17,7 +17,7 @@ import path from 'node:path';
 
 import { PROJECT_ROOT } from './paths.mjs';
 
-export const DEFAULT_DRIFT_PATH = path.join('storage', 'outputs', 'anchor-drift.jsonl');
+export const DEFAULT_DRIFT_PATH = path.join(PROJECT_ROOT, 'storage', 'outputs', 'anchor-drift.jsonl');
 export const DEFAULT_ANCHORS_PATH = path.join(PROJECT_ROOT, 'runner', 'anchors.mjs');
 
 /**
