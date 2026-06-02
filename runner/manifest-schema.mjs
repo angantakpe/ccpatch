@@ -176,6 +176,8 @@ export const INTERFACES = Object.freeze([
     fields: [
       { name: 'literal',     type: 'string' },
       { name: 'byteOffset?', type: 'number' },
+      /** When true, regex anchors are permitted for this patch. Requires maintainer approval. */
+      { name: 'allowRegex?', type: 'boolean', doc: 'When true, regex anchors are permitted for this patch. Requires maintainer approval.' },
     ],
   },
   {
