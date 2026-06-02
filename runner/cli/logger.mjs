@@ -34,10 +34,11 @@ void LOG_LEVEL_NAMES;
  * with the level flags removed), so downstream parsers don't have to think
  * about them.
  *
- * Returns: { level, json, args }
- *   - level: one of LOG_LEVEL_NAMES
- *   - json:  true iff --json appears (also consumed)
- *   - args:  copy of input with global flags stripped
+ * Returns: { level, json, jsonOutput, args }
+ *   - level:      one of LOG_LEVEL_NAMES
+ *   - json:       true iff --json appears (also consumed) — legacy alias
+ *   - jsonOutput: same as json; explicit alias used by cmd-build / cmd-doctor
+ *   - args:       copy of input with global flags stripped
  */
 export function extractGlobalFlags(args) {
   let level = 'info';
@@ -69,7 +70,7 @@ export function extractGlobalFlags(args) {
       && Object.prototype.hasOwnProperty.call(LEVELS, process.env.CCPATCH_LOG_LEVEL)) {
     level = process.env.CCPATCH_LOG_LEVEL;
   }
-  return { level, json, args: out };
+  return { level, json, jsonOutput: json, args: out };
 }
 
 /**

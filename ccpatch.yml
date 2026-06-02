@@ -21,6 +21,27 @@
 version: 1
 
 # ──────────────────────────────────────────────────────────────────────────────
+# bundle_sha: — Optional sha256 integrity gate on the input cli.js (#8)
+#
+# If a sha is listed for a version, `ccpatch build` will compute sha256 of the
+# input bundle and fail (exit 1) if it does not match, UNLESS --allow-unverified
+# is passed. This prevents accidentally applying patches to a wrong/tampered
+# bundle.
+#
+# Generate the sha for a new version with:
+#   node -e "const {createHash}=require('crypto'),{readFileSync}=require('fs');\
+#     console.log(createHash('sha256').update(readFileSync(process.argv[1]))\
+#     .digest('hex'))" /path/to/cli.js
+#
+# Example (fill in real values):
+#   bundle_sha:
+#     2.1.160: "deadbeef..."
+# ──────────────────────────────────────────────────────────────────────────────
+bundle_sha:
+  # Add entries here as new Claude Code versions are released.
+  # e.g.:  2.1.160: "abc123..."
+
+# ──────────────────────────────────────────────────────────────────────────────
 # ack: — Capability acknowledgements (default-strict gate)
 #
 # Patches that declare `network`, `exec`, `env`, `tools`, or `telemetry`
