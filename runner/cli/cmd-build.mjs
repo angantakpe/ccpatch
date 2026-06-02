@@ -45,6 +45,27 @@ export async function runBuild(ctx) {
   });
   let patchesToApply = resolution.selected;
 
+  // Single-patch dry-run iteration: when an author dry-runs exactly ONE explicit
+  // `--patch X` (not a profile, not `all`), they're iterating on that one patch.
+  // Don't drag in unrelated required-infra patches and don't make them clear an
+  // ack wall about capabilities those infra patches declare — that's noise for a
+  // read-only preview. We narrow back to the single requested patch and relax the
+  // ack gate to warn-only below. Non-dry-run and profile runs are unaffected.
+  const requested = Array.isArray(options.requestedPatches) ? options.requestedPatches : [];
+  const isSinglePatchDryRun =
+    !!options.patchOptions?.dryRun &&
+    !options.profile &&
+    requested.length === 1 &&
+    requested[0] !== 'all';
+  let narrowedSinglePatch = false;
+  if (isSinglePatchDryRun) {
+    const only = requested.filter(n => patchesToApply.includes(n));
+    if (only.length === 1 && patchesToApply.length > only.length) {
+      patchesToApply = only;
+      narrowedSinglePatch = true;
+    }
+  }
+
   // Build banner — heads the build output (mirrors the runtime boot banner).
   if (patchesToApply.length > 0) {
     const bannerVersion = options.patchOptions?.version || process.env.CCPATCH_CLI_VERSION || null;
@@ -57,7 +78,16 @@ export async function runBuild(ctx) {
     logger.log('');
   }
 
-  for (const line of resolution.notices) logger.log(line);
+  for (const line of resolution.notices) {
+    // When we've narrowed to a single dry-run patch, the resolver's
+    // "auto-including N required patch(es)" notice is now stale (we just undid
+    // it) — suppress it and emit a matching counter-notice instead.
+    if (narrowedSinglePatch && line.includes('auto-including')) continue;
+    logger.log(line);
+  }
+  if (narrowedSinglePatch) {
+    logger.log(`  [dry-run] single --patch ${patchesToApply[0]}: not auto-including required infra patches (preview of this patch only)`);
+  }
 
   if (patchesToApply.length === 0) {
     logger.log(`No patches specified. Use --patch <name> or --patch all.`);
@@ -147,13 +177,14 @@ export async function runBuild(ctx) {
     const acks = readAcks(ackYamlPath);
     const ackViolations = findUnackedAckRequired(patches, patchesToApply, acks, allow);
     if (ackViolations.length > 0) {
-      if (patchOptions.allowUnacked) {
+      if (patchOptions.allowUnacked || isSinglePatchDryRun) {
+        const reason = patchOptions.allowUnacked ? '--allow-unacked set' : 'single --patch dry-run';
         const summary = ackViolations
           .map(v => `  ${v.name.padEnd(28)} ${v.capabilities.join(', ')}  [unacked: ${v.missing.join(', ')}]`)
           .join('\n');
         logger.log(
           `  [capabilities] WARN: ${ackViolations.length} patch(es) with unacked capabilities ` +
-          `(--allow-unacked set, proceeding):\n${summary}`
+          `(${reason}, proceeding):\n${summary}`
         );
       } else {
         const first = ackViolations[0];

@@ -68,6 +68,17 @@ export function parseBuildArgs(args) {
     return { error: USAGE };
   }
 
+  // Guard: the first two positionals are <input> <output>. A flag landing in
+  // either slot means the author omitted a positional (a flag is being silently
+  // swallowed as a filename — e.g. `patch-cli.mjs bundle.js --patch foo` writes a
+  // file literally named "--patch"). Reject with a pointed message instead.
+  if (args[0].startsWith('--')) {
+    return { error: `Error: expected <input> <output>; got flag '${args[0]}' in input position — did you omit the input path?\n${USAGE}` };
+  }
+  if (args[1].startsWith('--')) {
+    return { error: `Error: expected <input> <output>; got flag '${args[1]}' in output position — did you omit the output path?\n${USAGE}` };
+  }
+
   const inputPath = path.resolve(args[0]);
   const outputPath = path.resolve(args[1]);
   const requestedPatches = [];

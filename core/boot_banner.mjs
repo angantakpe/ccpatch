@@ -25,6 +25,9 @@ export default {
   description: 'Render ccpatch boot-log lines in a responsive rounded box before the Claude Code banner.',
   // stderr-only — no network/env/exec capability.
   verify: { present: '__ccpBootBanner', count: { present: 1 } },
+  // Co-locates at the boot point (before the CJS-IIFE) with other boot hooks on
+  // shebang-less Bun-extracted bundles. Benign stacking, not a clobber.
+  allowOverlapWith: ['tool_result_error_content'],
   apply: (code, options = {}) => {
     const version = options && typeof options.version === 'string' ? options.version : null;
     const title = version ? `ccpatch v${version}` : 'ccpatch';

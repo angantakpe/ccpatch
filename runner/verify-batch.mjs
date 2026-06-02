@@ -71,6 +71,7 @@ function scanCode(code, index) {
   for (const lit of index.literals) positions.set(lit, []);
 
   // Short literals (< prefixLen) are uncommon; handle with one-shot indexOf.
+  const longLits = [];
   for (const lit of index.literals) {
     if (lit.length < index.prefixLen) {
       const list = positions.get(lit);
@@ -79,10 +80,35 @@ function scanCode(code, index) {
         list.push(idx);
         idx += lit.length;
       }
+    } else {
+      longLits.push(lit);
     }
   }
 
-  // Main single-pass walk for literals >= prefixLen.
+  // PERF (MEASURED 2026-06): the single-pass walk below pays a FIXED
+  // O(code.length) cost — ~200ms on a 15MB bundle — that only amortizes when
+  // there are many literals to find in that one walk. But the runner verifies
+  // each mutating patch in its own snapshot group (see runner.mjs flushPendingVerify
+  // PERF2), so most groups carry just 1–2 literals; for those, the walk is ~34x
+  // slower than letting V8's native indexOf find each literal directly. Below
+  // FAST_PATH_MAX, record positions per-literal via indexOf. Advancing by 1
+  // records overlapping matches IDENTICALLY to the main walk (which checks every
+  // offset), so count semantics stay byte-identical between the two paths.
+  const FAST_PATH_MAX = 64;
+  if (longLits.length <= FAST_PATH_MAX) {
+    for (const lit of longLits) {
+      const list = positions.get(lit);
+      let idx = 0;
+      while ((idx = code.indexOf(lit, idx)) !== -1) {
+        list.push(idx);
+        idx += 1;
+      }
+    }
+    return positions;
+  }
+
+  // Main single-pass walk for large literal sets (>FAST_PATH_MAX): one linear
+  // scan amortized across all literals via the 2-char prefix buckets.
   const n = code.length;
   const plen = index.prefixLen;
   const last = n - plen;

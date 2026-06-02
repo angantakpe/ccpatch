@@ -185,6 +185,18 @@ function fixtureFor(name, _patch) {
   return pickFixture(name, (n) => readFileSync(patchPaths[n].path, 'utf8'));
 }
 
+/** A freshly-scaffolded patch gets a registry stub that returns `null` (= "no
+ *  synthetic fixture yet"). Without a real bundle, that patch can't be exercised
+ *  — but it must NOT skip with the generic bundle-required reason, or the author
+ *  never learns their stub is still the placeholder. Detect the null-fixture
+ *  case so the skip message can name it distinctly. */
+function isNullFixture(name) {
+  if (HAS_REAL_BUNDLE) return false;
+  return pickFixture(name, (n) => readFileSync(patchPaths[n].path, 'utf8')) === null;
+}
+const NULL_FIXTURE_SKIP = (name) =>
+  `${name}: fixture is still null — replace it in tests/fixtures/registry.mjs`;
+
 /** Some patches' anchors only exist in the real bundle. When there's no real
  *  bundle, skip rather than fail — synthetic fixtures aren't a substitute. */
 function shouldSkipWithoutBundle(name) {
@@ -207,6 +219,10 @@ test('Layer 1 — every patch.apply() mutates its input', async (t) => {
       const applyFn = resolveApply(patch);
       if (!applyFn) {
         t.skip('no apply() exported');
+        return;
+      }
+      if (isNullFixture(name)) {
+        t.skip(NULL_FIXTURE_SKIP(name));
         return;
       }
       if (shouldSkipWithoutBundle(name)) {
@@ -252,6 +268,10 @@ test('Layer 2 — verify.present string exists after apply()', async (t) => {
       const applyFn = resolveApply(patch);
       if (!applyFn) {
         t.skip('no apply() — declarative kind: patch is synthesized at runtime');
+        return;
+      }
+      if (isNullFixture(name)) {
+        t.skip(NULL_FIXTURE_SKIP(name));
         return;
       }
       if (shouldSkipWithoutBundle(name)) {

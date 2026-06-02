@@ -76,7 +76,7 @@ export default {
       return code.slice(0, idx) + '\n' + hook + '\n' + code.slice(idx);
     }
     const SHEBANG = '#!/usr/bin/env node';
-    if (code.includes(SHEBANG)) return code.replace(SHEBANG, () => SHEBANG + '\n' + hook);
+    if (code.startsWith(SHEBANG)) return code.replace(SHEBANG, () => SHEBANG + '\n' + hook);
     console.warn('  [!] assistant_stream_events: anchor not found — skipping');
     return code;
   },

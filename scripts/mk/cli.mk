@@ -1,5 +1,17 @@
 # ── CLI / Patch / Bun ────────────────────────────────────────────────────────
 
+# ── Supply-chain integrity gate ───────────────────────────────────────────────
+# Before patching, verify the extracted/downloaded cli.js against a pinned
+# sha256 registry (storage/known-shas.json). Policy:
+#   known version + sha match    -> proceed
+#   known version + sha mismatch -> FAIL CLOSED (loud error, build stops)
+#   unknown/new version          -> TOFU warning, proceed (new versions still work)
+# Bypass intentionally with CCPATCH_SKIP_SHA_CHECK=1.
+SHA_REGISTRY    ?= storage/known-shas.json
+VERIFY_SHA_TOOL := scripts/verify-bundle-sha.mjs
+# verify_bundle_sha <path-to-cli.js> — call inside a recipe ($$VAR ok).
+verify_bundle_sha = $(NODE) $(VERIFY_SHA_TOOL) "$(1)" --version "$(VERSION)" --registry $(SHA_REGISTRY)
+
 .PHONY: install reconstruct build smoke run run-p test download \
         extract-from-binary bun-decompile bun-run bun-verify bun-reconstruct \
         coverage bun-all all beautify beautify-fast patch \
@@ -75,10 +87,20 @@ download: ## Download a new version from npm: make download VERSION=2.1.90
 	@if [ -d storage/archives/claude-code-v$(VERSION) ]; then \
 		echo "storage/archives/claude-code-v$(VERSION) already exists — skipping download"; \
 	else \
-		npm pack @anthropic-ai/claude-code@$(VERSION); \
-		tar xzf anthropic-ai-claude-code-$(VERSION).tgz; \
+		PACK_JSON=$$(npm pack @anthropic-ai/claude-code@$(VERSION) --json); \
+		TARBALL=$$(printf '%s' "$$PACK_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const a=JSON.parse(s);process.stdout.write(a[0].filename||"")})'); \
+		INTEGRITY=$$(printf '%s' "$$PACK_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const a=JSON.parse(s);process.stdout.write(a[0].integrity||"")})'); \
+		[ -z "$$TARBALL" ] && TARBALL=anthropic-ai-claude-code-$(VERSION).tgz; \
+		if [ -n "$$INTEGRITY" ]; then \
+			echo "[download] npm registry integrity: $$INTEGRITY"; \
+			$(NODE) $(VERIFY_SHA_TOOL) --tarball-only \
+				--tarball "$$TARBALL" --tarball-integrity "$$INTEGRITY" || exit 1; \
+		else \
+			echo "[download] WARNING: npm did not report a tarball integrity field — skipping tarball check"; \
+		fi; \
+		tar xzf "$$TARBALL"; \
 		mv package storage/archives/claude-code-v$(VERSION); \
-		rm -f anthropic-ai-claude-code-$(VERSION).tgz; \
+		rm -f "$$TARBALL"; \
 		echo "Downloaded to storage/archives/claude-code-v$(VERSION)/"; \
 	fi
 
@@ -183,6 +205,7 @@ patch-claude-code: ## Apply the standard profile: make patch-claude-code [VERSIO
 	@SRC=$(INPUT); [ ! -f "$$SRC" ] && SRC=$(CJS_EXTRACTED); \
 	if [ ! -f "$$SRC" ]; then echo "ERROR: Could not obtain cli.js for v$(VERSION)."; exit 1; fi; \
 	echo "Using: $$SRC"; \
+	$(call verify_bundle_sha,$$SRC) || exit 1; \
 	node tools/anchor-doctor.mjs "$$SRC" $(if $(PROFILE),--profile $(PROFILE),) || true; \
 	$(NODE) $(PATCH_TOOL) "$$SRC" $(OUTPUT) $(addprefix --patch ,$(subst $(comma), ,$(PATCH))) $(if $(PROFILE),--profile $(PROFILE),) $(if $(VERSION),--version $(VERSION),)
 	@SHA256=$$(sha256sum $(OUTPUT) | awk '{print $$1}'); \
@@ -279,6 +302,7 @@ repatch: ## Rebuild patched CLI (auto-downloads if needed): make repatch [VERSIO
 	@SRC=storage/archives/claude-code-v$(VERSION)/cli.js; [ ! -f "$$SRC" ] && SRC=$(CJS_EXTRACTED); \
 	if [ ! -f "$$SRC" ]; then echo "ERROR: Could not obtain cli.js for v$(VERSION)."; exit 1; fi; \
 	echo "Using: $$SRC"; \
+	$(call verify_bundle_sha,$$SRC) || exit 1; \
 	rm -f $(OUTPUT); \
 	$(NODE) $(PATCH_TOOL) "$$SRC" $(OUTPUT) $(addprefix --patch ,$(subst $(comma), ,$(PATCH)))
 
@@ -341,6 +365,7 @@ patch-claude-code-native: ## Patch native binary: extract + patch + repack
 	$(MAKE) extract-from-binary VERSION=$(VERSION)
 	@SRC=$(CJS_EXTRACTED); \
 	if [ ! -f "$$SRC" ]; then echo "ERROR: $(CJS_EXTRACTED) not found after extract step."; exit 1; fi; \
+	$(call verify_bundle_sha,$$SRC) || exit 1; \
 	echo "Patching: $$SRC → $(NATIVE_PATCHED_JS)"; \
 	$(NODE) $(PATCH_TOOL) "$$SRC" $(NATIVE_PATCHED_JS) $(addprefix --patch ,$(subst $(comma), ,$(PATCH)))
 	@test -f $(NATIVE_PATCHED_JS) || (echo "Error: patch step did not produce $(NATIVE_PATCHED_JS)" && exit 1)

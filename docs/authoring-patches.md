@@ -9,6 +9,13 @@ For the field-by-field manifest reference see
 [anchors.md](./anchors.md) and [finding-anchors.md](./finding-anchors.md). For
 the lifecycle hooks see [lifecycle-hooks.md](./lifecycle-hooks.md).
 
+> **Writing your first patch?** You only need the first three sections —
+> **The patch contract**, **Add a new patch**, and **Patch kinds** (run
+> `make new-patch NAME=…` to scaffold one). Skip everything below
+> *Overlay loader* (overlays, fallback diffs, shadow mode, REPL, coverage,
+> third-party modules) until you actually need it. This mirrors the layered
+> on-ramp in the [README](../README.md#which-entry-point-should-i-use).
+
 ---
 
 ## The patch contract

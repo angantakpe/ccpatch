@@ -27,7 +27,7 @@ import { resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { parseModules } from '../tools/bun-decompiler/decompile.mjs';
-import { growBunSeaBinary } from './bun-sea-graph.mjs';
+import { growBunSeaBinary, parseElfBunGraph } from './bun-sea-graph.mjs';
 
 const log  = (msg) => console.log(`[repack] ${msg}`);
 const warn = (msg) => console.warn(`[repack:warn] ${msg}`);
@@ -54,6 +54,11 @@ Arguments:
   original-binary   Path to the original Bun SEA binary (e.g. storage/archives/.../claude.exe)
   patched-js        Path to the patched JavaScript file produced by the patch pipeline
   output-binary     Destination path for the repacked native binary
+
+Options:
+  --require-smoke   Fail closed (non-zero exit) when the post-repack smoke check cannot be
+                    executed (cross-arch / CI sandbox), instead of skipping with a warning.
+                    Use this when building releases so a corrupt binary cannot ship unverified.
 
 Example:
   node bin/repack-bundle.mjs \\
@@ -140,7 +145,43 @@ function findJsRegion(buffer) {
  *
  * Returns the normalised text string ready for Buffer conversion and embedding.
  */
+// Marker strings injected by the native-repack-incompatible shim patches. README documents
+// that esm_compat and bun_shim MUST be disabled before native repack (they rewrite/augment the
+// CJS bundle for Node.js and produce output Bun cannot embed). We enforce that here by detecting
+// the exact markers those patches inject, failing EARLY with remediation rather than producing a
+// broken binary. Markers are read from core/esm_compat.mjs (verify.present `globalThis.__hm_ink`)
+// and core/bun_shim.mjs (verify.present `__ccpBunShim`).
+const SHIM_MARKERS = [
+  { marker: '__ccpBunShim', patch: 'bun_shim' },
+  { marker: 'globalThis.__hm_ink', patch: 'esm_compat' },
+];
+
+/**
+ * Throw if the patched JS still carries esm_compat / bun_shim shim markers. These patches make
+ * the bundle un-embeddable in a Bun SEA binary; enforcing the prereq here (instead of only
+ * documenting it in the README) prevents emitting a binary that launches as bare `bun`.
+ *
+ * Exported so the check can be unit-tested independently of the full repack.
+ */
+export function assertNoShimMarkers(text) {
+  const found = SHIM_MARKERS.filter(({ marker }) => text.includes(marker));
+  if (found.length > 0) {
+    const which = found.map(f => f.patch).join(' and ');
+    throw new Error(
+      `The patched JS contains shim marker(s) [${found.map(f => f.marker).join(', ')}] injected by ` +
+      `the ${which} patch(es). These patches rewrite/augment the CJS bundle for Node.js and produce ` +
+      `output that CANNOT be embedded back into a Bun SEA binary — repacking it would yield a binary ` +
+      `that launches as bare \`bun\`. Disable esm_compat and bun_shim in ccpatch.yml (or pass PATCH= ` +
+      `with a list that excludes them) before running the native repack pipeline.`
+    );
+  }
+}
+
 function normalisePatchedJs(text) {
+  // Enforce the native-repack prereq: esm_compat / bun_shim must be disabled (README). Detect
+  // their injected markers and fail early, before any of the structural validation below.
+  assertNoShimMarkers(text);
+
   // Detect Node.js ESM-transformed form produced by esm_compat / bun_shim.
   // The transformed file may start with a leading newline before the `import` statement.
   if (/^\s*import\s+[\w{]/.test(text)) {
@@ -236,6 +277,98 @@ export function assertRegionEndIsNul(binary, region) {
 }
 
 /**
+ * STRUCTURAL post-condition, independent of executing the binary.
+ *
+ * After splicing, re-decode the OUTPUT buffer with the same parsers the pipeline trusts and
+ * assert the embedded entrypoint still resolves where we expect it. This catches a corrupt
+ * splice even when the runtime smoke check cannot run (cross-arch / CI sandbox).
+ *
+ * Two layers:
+ *   1. parseModules (the marker parser, used by findJsRegion/extract): the cli.js entrypoint
+ *      module must still be locatable, and its content block must start at the expected offset.
+ *   2. parseElfBunGraph (the verified Bun StandaloneModuleGraph decoder, ELF only): re-parsing
+ *      must succeed — its internal consistency assertions (payload_len == byte_count + Offsets +
+ *      trailer; .bun section == [u64 header]+payload; modules_len a whole number of records; the
+ *      trailer magic present) all run inside parseElfBunGraph and throw on mismatch. We then
+ *      assert the entry-point record is cli.js and its content block ends at the expected offset.
+ *
+ * @param {Buffer} output            the spliced/grown output binary
+ * @param {number} expectedJsStart   file offset the entry module's content is expected to start at
+ *                                    (region.start; preserved by both the in-place and grow paths)
+ * @param {boolean} isElf            whether the binary is ELF (gates the graph-decoder layer)
+ * @param {{log?:Function,warn?:Function}} [io]
+ * Throws with a descriptive message on any inconsistency.
+ */
+export function assertStructuralPostCondition(output, expectedJsStart, isElf, io = {}) {
+  const log  = io.log  || (() => {});
+  const warn = io.warn || (() => {});
+
+  // Layer 1: marker parser must still find the cli.js entrypoint at the expected start offset.
+  let cli;
+  try {
+    const { modules } = parseModules(output);
+    cli =
+      modules.find(m => m.kind === 'js' && /(^|\/)cli\.js$/.test(m.path) && m.path.includes('entrypoint')) ||
+      modules.find(m => m.kind === 'js' && /(^|\/)cli\.js$/.test(m.path));
+  } catch (e) {
+    throw new Error(
+      `Structural post-condition FAILED: re-parsing the output with the marker parser threw ` +
+      `(${e.message}). The splice corrupted the embedded module markers.`
+    );
+  }
+  if (!cli) {
+    throw new Error(
+      `Structural post-condition FAILED: the cli.js entrypoint module is no longer locatable in the ` +
+      `repacked output. The splice corrupted the embedded module graph.`
+    );
+  }
+  if (cli.contentStart !== expectedJsStart) {
+    throw new Error(
+      `Structural post-condition FAILED: cli.js content now starts at offset ${cli.contentStart}, ` +
+      `expected ${expectedJsStart}. The entrypoint module shifted — the Bun trailer offsets would ` +
+      `no longer line up and the binary would launch as bare \`bun\`.`
+    );
+  }
+  log(`Structural check: marker parser re-resolved ${cli.path} at offset ${cli.contentStart}.`);
+
+  // Layer 2: the verified Bun graph decoder must re-parse cleanly (ELF only). All payload_len /
+  // byte_count / StringPointer / trailer-magic sanity checks live inside parseElfBunGraph and
+  // throw on mismatch, so a successful parse proves the graph is internally consistent.
+  if (!isElf) {
+    warn('Structural check: graph-decoder layer skipped (non-ELF binary; decoder is ELF-only).');
+    return;
+  }
+  let g;
+  try {
+    g = parseElfBunGraph(output);
+  } catch (e) {
+    throw new Error(
+      `Structural post-condition FAILED: re-decoding the output Bun module graph threw (${e.message}). ` +
+      `The repacked .bun graph is internally inconsistent — refusing to trust this binary.`
+    );
+  }
+  const entry = g.records[g.offsets.entryPointId];
+  if (!entry || !/\/cli\.js$/.test(entry.name)) {
+    throw new Error(
+      `Structural post-condition FAILED: the Bun graph entry_point_id (${g.offsets.entryPointId}) ` +
+      `does not resolve to cli.js (got ${entry?.name ?? 'no record'}). The entrypoint dispatch is broken.`
+    );
+  }
+  const entryContentEnd = g.blobBase + entry.ptr.contents.off + entry.ptr.contents.len;
+  if (entryContentEnd !== cli.contentEnd) {
+    throw new Error(
+      `Structural post-condition FAILED: the Bun graph's entry content end (${entryContentEnd}) ` +
+      `disagrees with the marker parser (${cli.contentEnd}). The two decoders see different module ` +
+      `boundaries — the graph offsets are inconsistent with the byte layout.`
+    );
+  }
+  log(
+    `Structural check: Bun graph re-decoded cleanly (entry "${entry.name}", ` +
+    `byte_count ${g.offsets.byteCount.toLocaleString()}, ${g.records.length} module records, trailer magic OK).`
+  );
+}
+
+/**
  * Best-effort detection of the Bun version a compiled binary was built with.
  *
  * Bun embeds a version string somewhere in the binary; common forms observed are
@@ -244,18 +377,26 @@ export function assertRegionEndIsNul(binary, region) {
  * (e.g. "1.3.20") or null if nothing plausible is found.
  */
 export function detectBunVersion(binary) {
-  // Search a bounded window of likely matches; the binary is large, so cap the scan.
-  const haystack = binary;
-  const patterns = [
-    /Bun\/(\d+\.\d+\.\d+)/,
-    /bun-v(\d+\.\d+\.\d+)/,
+  // Locate the version banner WITHOUT materialising the whole (~50-100 MB) binary as a JS
+  // string. We Buffer.indexOf() each banner literal — a bounded native byte scan — and only
+  // decode a small window (just past the literal) to capture the trailing semver. Each banner
+  // form has its semver immediately after a fixed prefix, so a ~32-byte window is ample.
+  const banners = [
+    { needle: Buffer.from('Bun/'),   re: /^(\d+\.\d+\.\d+)/ },
+    { needle: Buffer.from('bun-v'),  re: /^(\d+\.\d+\.\d+)/ },
   ];
-  // Scan in chunks decoded as latin1 to find version banners without allocating the whole
-  // file as one giant string repeatedly.
-  const text = haystack.toString('latin1');
-  for (const re of patterns) {
-    const m = re.exec(text);
-    if (m) return m[1];
+  const WINDOW = 32;  // bytes to decode after the literal — enough for "123.456.789…"
+  for (const { needle, re } of banners) {
+    let from = 0;
+    let idx;
+    while ((idx = binary.indexOf(needle, from)) !== -1) {
+      const start = idx + needle.length;
+      const window = binary.toString('latin1', start, Math.min(start + WINDOW, binary.length));
+      const m = re.exec(window);
+      if (m) return m[1];
+      // No semver right after this hit (e.g. an unrelated "Bun/" substring); keep scanning.
+      from = idx + needle.length;
+    }
   }
   return null;
 }
@@ -264,7 +405,12 @@ export function detectBunVersion(binary) {
 // Main
 // ---------------------------------------------------------------------------
 
-function repack(originalBinaryPath, patchedJsPath, outputBinaryPath) {
+function repack(originalBinaryPath, patchedJsPath, outputBinaryPath, options = {}) {
+  // requireSmoke: FAIL CLOSED when the post-repack smoke check cannot be executed (cross-arch /
+  // CI sandbox), instead of silently skipping. Releases are built exactly in such environments,
+  // so a corrupt binary would otherwise ship with no signal. Default (false) keeps the
+  // skip-with-warning behaviour for local dev.
+  const requireSmoke = options.requireSmoke === true;
   // Validate inputs.
   if (!existsSync(originalBinaryPath)) {
     die(`Original binary not found: ${originalBinaryPath}`);
@@ -433,6 +579,16 @@ function repack(originalBinaryPath, patchedJsPath, outputBinaryPath) {
     isGrow = true;
   }
 
+  // Structural post-condition (execution-independent): re-parse the output buffer with the same
+  // decoders the pipeline trusts and assert the entrypoint still resolves at region.start and the
+  // graph is internally consistent. This catches a corrupt splice BEFORE we write and even when
+  // the runtime smoke check cannot run (cross-arch / CI). Fail loudly on any mismatch.
+  try {
+    assertStructuralPostCondition(output, region.start, isElf, { log, warn });
+  } catch (e) {
+    die(e.message);
+  }
+
   // Write atomically: write to a sibling .tmp, set execute bits on it, then rename into
   // place. renameSync is atomic on the same filesystem, so a crash / full disk mid-write
   // leaves any prior good binary at outputBinaryPath untouched rather than truncated. On any
@@ -458,11 +614,24 @@ function repack(originalBinaryPath, patchedJsPath, outputBinaryPath) {
   //   - any spawn failure (wrong arch, sandbox can't exec, ENOEXEC) is treated as SKIPPED with
   //     a warning, NOT a hard failure — CI sandboxes frequently can't run a freshly-built
   //     foreign binary, and we must not fail the build solely because the smoke run can't execute.
+  //     EXCEPT when requireSmoke is set (see below).
   // Only a binary that runs AND prints the bare Bun runtime banner is treated as a real failure.
+  //
+  // requireSmoke (--require-smoke): FAIL CLOSED when the smoke check cannot be executed at all.
+  // Releases are built in exactly the cross-arch / CI environments where the skip path would
+  // otherwise hide a corrupt binary, so callers building releases should set this. The structural
+  // post-condition above already ran (execution-independent), but the runtime check is the only
+  // proof the offsets dispatch correctly, so requireSmoke insists it actually runs.
   if (process.env.CCPATCH_REPACK_SMOKE !== '0') {
     // Grow-repack rewrote load-bearing offsets, so when the binary can actually run we hold it
     // to the STRONGER bar: it must print the embedded Claude version, not merely avoid bare-bun.
-    runSmokeCheck(outputBinaryPath, { requireClaude: isGrow });
+    runSmokeCheck(outputBinaryPath, { requireClaude: isGrow, requireSmoke });
+  } else if (requireSmoke) {
+    die(
+      'Post-repack smoke check is REQUIRED (--require-smoke) but was disabled via ' +
+      'CCPATCH_REPACK_SMOKE=0. Refusing to ship an unverified binary. Unset CCPATCH_REPACK_SMOKE ' +
+      'or drop --require-smoke.'
+    );
   } else {
     log('Post-repack smoke check skipped (CCPATCH_REPACK_SMOKE=0).');
   }
@@ -481,7 +650,21 @@ function repack(originalBinaryPath, patchedJsPath, outputBinaryPath) {
  * Deliberately does not assert a specific Claude version string — the embedded entrypoint may
  * print its own version which we don't know here. The goal is to catch the bare-`bun` fallback.
  */
-function runSmokeCheck(binaryPath, { requireClaude = false } = {}) {
+function runSmokeCheck(binaryPath, { requireClaude = false, requireSmoke = false } = {}) {
+  // When requireSmoke is set, an inability to run the binary is a hard failure (fail closed):
+  // releases must not ship without the only execution-level proof the SEA dispatch works.
+  const cannotExec = (reason) => {
+    if (requireSmoke) {
+      die(
+        `Post-repack smoke check is REQUIRED (--require-smoke) but the binary could not be executed: ` +
+        `${reason}. This is the environment where releases are built, so a corrupt binary would ship ` +
+        `unverified. Failing closed. Run the repack on a host that can execute the target binary, or ` +
+        `drop --require-smoke for local dev.`
+      );
+    }
+    warn(`Post-repack smoke check skipped: ${reason} — environment cannot execute the repacked binary.`);
+  };
+
   let res;
   try {
     res = spawnSync(binaryPath, ['--version'], {
@@ -490,11 +673,11 @@ function runSmokeCheck(binaryPath, { requireClaude = false } = {}) {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
   } catch (e) {
-    warn(`Post-repack smoke check skipped: could not spawn repacked binary (${e.message}).`);
+    cannotExec(`could not spawn repacked binary (${e.message})`);
     return;
   }
   if (res.error) {
-    warn(`Post-repack smoke check skipped: ${res.error.code || res.error.message} — environment cannot execute the repacked binary.`);
+    cannotExec(`${res.error.code || res.error.message}`);
     return;
   }
   const out = `${res.stdout || ''}${res.stderr || ''}`;
@@ -530,14 +713,16 @@ function runSmokeCheck(binaryPath, { requireClaude = false } = {}) {
 // imported as a module (e.g. by tests/repack.test.mjs). This lets the pure helpers above
 // be unit-tested without triggering usage()/repack() at import time.
 if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
-  const args = process.argv.slice(2).filter(a => a !== '--');
+  const rawArgs = process.argv.slice(2).filter(a => a !== '--');
+  const requireSmoke = rawArgs.includes('--require-smoke');
+  const args = rawArgs.filter(a => a !== '--require-smoke');
   if (args.length < 3 || args.includes('--help') || args.includes('-h')) {
     usage();
   }
 
   const [originalBinaryPath, patchedJsPath, outputBinaryPath] = args.map(a => resolve(a));
 
-  repack(originalBinaryPath, patchedJsPath, outputBinaryPath);
+  repack(originalBinaryPath, patchedJsPath, outputBinaryPath, { requireSmoke });
 }
 
 export { repack };

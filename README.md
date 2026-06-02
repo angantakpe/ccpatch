@@ -50,9 +50,13 @@ There are three layers, and they wrap each other: **`make` targets → `bin/patc
 | Drift / health check | `make doctor` | Read-only anchor-health check against the installed bundle (wraps `bin/patch-cli.mjs doctor`). |
 | Coverage | `make patch-coverage` | Apply + smoke-run + cross-reference apply-time results with runtime hits (wraps `bin/patch-cli.mjs coverage`). |
 | Revert a patched bundle | `node bin/patch-cli.mjs revert <bundle>` | No `make` wrapper — restores each patched region from the recorded pre-patch sha. |
+| Author a new patch | `make new-patch NAME=my_feature` | Scaffolds a manifest-valid patch stub (wraps `bin/scaffold-patch.mjs`). Add `KIND=prefix\|free\|postfix\|transpiler\|splice\|flag` and `CATEGORY=extension\|core`. The scaffolder prints the exact single-patch dry-run command to iterate with. |
+| Interactive TUI | `node bin/patch-tui.mjs` | Menu-driven front-end over the same subcommands (apply, doctor, diff, …) — handy for browsing/toggling patches without memorizing flags. Run with `--help` for details. |
 | Everything else | `node bin/patch-cli.mjs <subcommand>` | `explain`, `capabilities`, `diff`, `heal`, `fallback-capture`, … — subcommands without a dedicated `make` target. |
 
 Rule of thumb: prefer `make` for day-to-day work; drop to `bin/patch-cli.mjs` when you need a subcommand or argument the target doesn't pass through; touch the runner modules only when authoring or debugging patches.
+
+> **npm scripts mirror the `make` targets.** `package.json` exposes `npm run test:patches`, etc., which run the same checks as the corresponding `make` target (note the naming drift: the npm script is `test:patches` while the make target is `test-patches`). Use whichever fits your workflow.
 
 ---
 

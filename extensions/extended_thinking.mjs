@@ -43,7 +43,7 @@ try {
     if (words.length > 15) return true;
 
     // Code signals → complex
-    if (/\`|\bfunction\b|\bconst\b|\blet\b|\bvar\b|=>|\\{\\s*\\n|Error:|TypeError:|undefined is not|cannot read/i.test(text)) return true;
+    if (/\`|\\bfunction\\b|\\bconst\\b|\\blet\\b|\\bvar\\b|=>|\\{\\s*\\n|Error:|TypeError:|undefined is not|cannot read/i.test(text)) return true;
 
     // Task verbs → complex
     if (/\\b(debug|fix|implement|refactor|analyz|write|create|build|design|test|review|migrate|configure|install|optim|improve|update|add|remove|delete|deploy|explain|describe|help me|show me how|how (do|can|should|to)|why (does|is|are|did)|what (is|are|does|should)|plan|architect|structur|approach|generate|convert|translat|extract|pars|integrat|scaffold|bootstrap|set ?up|set up|figure out|walk me|step.by.step)\\b/i.test(text)) return true;
@@ -118,7 +118,7 @@ try {
 `;
     const __shebang__ = '#!/usr/bin/env node';
       const __cjsIife__ = '(function(exports, require, module, __filename, __dirname)';
-      if (code.includes(__shebang__)) {
+      if (code.startsWith(__shebang__)) {
         return code.replace(__shebang__, __shebang__ + hook);
       } else if (code.includes(__cjsIife__)) {
         return code.replace(__cjsIife__, hook + __cjsIife__);

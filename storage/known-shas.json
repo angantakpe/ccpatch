@@ -1,0 +1,48 @@
+{
+  "_comment": "Supply-chain integrity registry for ccpatch. Maps Claude Code version -> known-good sha256 of the EXTRACTED cli.js bundle (the file that actually gets patched: storage/archives/claude-code-v<ver>/cli.v<ver>.cjs, or an --input override). Used by scripts/verify-bundle-sha.mjs as a verify-before-patch gate. Known version + mismatch => FAIL CLOSED. Unknown version => TOFU warning + proceed. To pin a new version, run the verifier; it prints the exact JSON line to paste here. Override with CCPATCH_SKIP_SHA_CHECK=1.",
+  "_format": {
+    "<version>": {
+      "cliSha256": "sha256 hex of the extracted/patched-input cli.js",
+      "sizeBytes": "optional integer file size (advisory only)",
+      "tarballIntegrity": "optional npm registry sha512 integrity string (subresource-integrity form) for the @anthropic-ai/claude-code wrapper tarball",
+      "source": "where the bundle came from (npm cli.cjs | bun-native | extracted)"
+    }
+  },
+  "versions": {
+    "2.1.148": {
+      "cliSha256": "e810d9fbf8541c623a3b4cf8d987f7774f0e949a709e53a7d949eaf0a8e7a581",
+      "sizeBytes": 15164424,
+      "source": "npm (cli.v2.1.148.cjs)"
+    },
+    "2.1.150": {
+      "cliSha256": "46848f48de3ab84379e3d6587731871024fe265a524286e71010be54bfe1da44",
+      "sizeBytes": 15307733,
+      "source": "npm (cli.v2.1.150.cjs)"
+    },
+    "2.1.156": {
+      "cliSha256": "0b193e39ec59a829701a98f6326abaacb9e525e0cad2482009ba4aaaafc882c2",
+      "sizeBytes": 15525729,
+      "source": "npm (cli.v2.1.156.cjs)"
+    },
+    "2.1.157": {
+      "cliSha256": "f84890bf10c3390ff4d2b552011ce0649e61b34b8aa5347f63645bd2733a3bba",
+      "sizeBytes": 15514178,
+      "source": "npm (cli.v2.1.157.cjs)"
+    },
+    "2.1.158": {
+      "cliSha256": "404bfd490bb9a8d455b42c799b617e64f78186f4f67503cc2ab6117e6d6b2a26",
+      "sizeBytes": 15514876,
+      "source": "npm (cli.v2.1.158.cjs)"
+    },
+    "2.1.159": {
+      "cliSha256": "ab4d5d02e55dd96ce806c6cb35f3a5ad70e96055ed9cda60bc68a3d8de7d3373",
+      "sizeBytes": 15516711,
+      "source": "npm (cli.v2.1.159.cjs)"
+    },
+    "2.1.160": {
+      "cliSha256": "b99c1e9b6f15f92573e0876adc87e925bf0ecd8e17964c061fa32c02ed4f6c0e",
+      "sizeBytes": 15894934,
+      "source": "bun-native (extracted from claude.exe linux-x64)"
+    }
+  }
+}

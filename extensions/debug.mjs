@@ -58,7 +58,7 @@ globalThis.__ccpOnFetch?.('debug', ({ url, options, response, isApi, events }) =
 `;
       const __shebang__ = '#!/usr/bin/env node';
       const __cjsIife__ = '(function(exports, require, module, __filename, __dirname)';
-      if (code.includes(__shebang__)) {
+      if (code.startsWith(__shebang__)) {
         return code.replace(__shebang__, __shebang__ + debugHook);
       } else if (code.includes(__cjsIife__)) {
         return code.replace(__cjsIife__, debugHook + __cjsIife__);

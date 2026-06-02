@@ -91,16 +91,28 @@ export function renderTextSummary({ ok, durationMs, report, outputPath, drySugge
   lines.push(`Build ${ok ? 'OK' : 'FAILED'} in ${durationMs} ms`);
 
   if (timings.length > 0) {
+    // Sort DESCENDING by transform ms so the slowest patches surface first as
+    // regressions. Show up to the top 5 (was 3) so a cluster of slow patches is
+    // visible, not just the single worst, while keeping the box tidy.
     timings.sort((a, b) => (b.ms || 0) - (a.ms || 0));
-    const top = timings.slice(0, 3);
+    const TOP_N = 5;
+    const top = timings.slice(0, TOP_N);
     // These are PER-PATCH transform times only (the apply() of each patch),
     // NOT wall-clock. Historically this said "Slowest patches" which implied
     // patches dominated the build — but the bulk of wall time is harness work
     // (doctor pre-pass, diff, verify, bundle write). Make that explicit below.
-    lines.push('Slowest patch transforms (apply() only):');
+    const extra = timings.length - top.length;
+    lines.push(
+      `Slowest patch transforms (apply() only)` +
+      (extra > 0 ? `, top ${top.length} of ${timings.length}:` : ':')
+    );
     const w = Math.max(...top.map(t => (t.name || '').length), 8);
+    // The runner already warns on >5000ms patches; flag those inline here too so
+    // a slow-patch regression is obvious in the summary box.
     for (const t of top) {
-      lines.push(`  ${String(t.name).padEnd(w)}  ${String(t.ms ?? '?').padStart(5)} ms`);
+      const ms = Number(t.ms);
+      const slow = Number.isFinite(ms) && ms > 5000 ? '  ⚠ slow' : '';
+      lines.push(`  ${String(t.name).padEnd(w)}  ${String(t.ms ?? '?').padStart(5)} ms${slow}`);
     }
 
     // Harness overhead = total wall-clock minus the sum of per-patch transform

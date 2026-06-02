@@ -1,6 +1,18 @@
 const CJS_TAIL = '})(module.exports, require, module, __filename, __dirname);';
 const CJS_HEAD = '(function(exports, require, module, __filename, __dirname)';
 
+// Where the prepended ESM header is safe to splice in: after a leading shebang
+// line if one exists, otherwise at byte 0. npm-packaged cli.js bundles begin
+// with `#!/usr/bin/env node`; bundles extracted from the Bun binary do NOT —
+// their first line is the CJS IIFE opener (CJS_HEAD). Assuming line 1 is always
+// a shebang injects `import` statements *inside* the IIFE body, which is illegal
+// at module scope and crashes the patched bundle with "Unexpected token '{'".
+function headerInsertOffset(code) {
+  if (!code.startsWith('#!')) return 0;
+  const nl = code.indexOf('\n');
+  return nl === -1 ? code.length : nl + 1;
+}
+
 export function applyEsmCompatibilityShim(code, logger = console) {
   const cjsTailIdx = code.lastIndexOf(CJS_TAIL);
   const isCjsIife = code.includes(CJS_HEAD) && cjsTailIdx !== -1;
@@ -34,7 +46,7 @@ export function applyEsmCompatibilityShim(code, logger = console) {
       ``,
     ].join('\n');
     const esmTail = '})(__hm_module.exports, __hm_require, __hm_module, __hm_filename, __hm_dirname);';
-    const shebangEnd = code.indexOf('\n') + 1;
+    const shebangEnd = headerInsertOffset(code);
     logger.log('  [shim] ESM compatibility shim applied.');
     return code.slice(0, shebangEnd) + esmHeader + code.slice(shebangEnd, cjsTailIdx) + esmTail + code.slice(cjsTailIdx + CJS_TAIL.length);
   }
@@ -42,7 +54,7 @@ export function applyEsmCompatibilityShim(code, logger = console) {
   // Avoid top-level await here. Some bundles include CommonJS markers, and
   // adding TLA can trigger Node's ambiguous module-format error.
   const esmNativeShim = `{try{const __hmReq=typeof __hm_nativeRequire==='function'?__hm_nativeRequire:(typeof require==='function'?require:null);if(__hmReq){const __hmRI=__hmReq('react');const __hmII=__hmReq('ink');globalThis.__hm_react=(__hmRI&&__hmRI.default)||__hmRI;globalThis.__hm_ink=__hmII;}}catch{}}\n`;
-  const shebangEnd = code.indexOf('\n') + 1;
+  const shebangEnd = headerInsertOffset(code);
   logger.log('  [shim] Native-ESM bundle - injected require-based react+ink pre-load shim (no top-level await).');
   return code.slice(0, shebangEnd) + esmNativeShim + code.slice(shebangEnd);
 }

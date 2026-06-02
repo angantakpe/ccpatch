@@ -63,9 +63,18 @@ export default {
   }
 })();
 `;
-      // Shebang-only registration: on npm CJS bundles (no shebang) this is a
-      // no-op, matching the prior `.replace` behavior. spliceAfter avoids the
-      // String.replace `$&` hazard and keeps "missing anchor → skip" semantics.
-      return spliceAfter(code, SHEBANG, '\n' + cronCmd, { allowMissing: true });
+      // Register the /cron command before any bundle code runs. Prefer a real
+      // leading shebang (startsWith, NOT spliceAfter's indexOf — Bun-extracted
+      // bundles carry "#!/usr/bin/env node" as an interior string literal that
+      // indexOf would wrongly match, splicing into dead string content). When
+      // there's no leading shebang, anchor inside the CJS-IIFE body instead.
+      if (code.startsWith(SHEBANG)) {
+        return spliceAfter(code, SHEBANG, '\n' + cronCmd, { allowMissing: true });
+      }
+      const IIFE = '(function(exports, require, module, __filename, __dirname) {';
+      if (code.includes(IIFE)) {
+        return code.replace(IIFE, () => IIFE + '\n' + cronCmd);
+      }
+      return code;
     }
   };

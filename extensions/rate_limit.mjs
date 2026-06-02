@@ -166,7 +166,7 @@ if (typeof globalThis.__ccpOnFetchBefore === 'function') {
 
 `;
           const _CJS_IIFE = '(function(exports, require, module, __filename, __dirname) {';
-    if (code.includes('#!/usr/bin/env node')) {
+    if (code.startsWith('#!/usr/bin/env node')) {
       return code.replace('#!/usr/bin/env node', '#!/usr/bin/env node' + hook);
     } else if (code.includes(_CJS_IIFE)) {
       return code.replace(_CJS_IIFE, () => _CJS_IIFE + hook);

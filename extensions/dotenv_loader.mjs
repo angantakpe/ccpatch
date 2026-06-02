@@ -10,6 +10,12 @@ export default {
   //   - ANTHROPIC_BASE_URL                (would repoint API traffic to an MITM)
   //   - ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN (credential override)
   //   - CC_WEBHOOK_URL                    (would set an egress/exfil target)
+  //   - CC_PROJECT_ROOT                   (would redirect where conversations/
+  //                                        cache are written — path traversal)
+  //   - CLAUDE_CODE_OAUTH_TOKEN           (credential override)
+  //   - CC_SAVE_CONVERSATIONS, CC_CACHE_RESPONSES, CLAUDE_CACHE
+  //                                        (would silently enable disk capture
+  //                                        of conversation/response data)
   //   - any CC_*_TOKEN                    (bridge / integration tokens)
   // A blocked key found in .env is skipped and a warning is emitted.
   capabilities: ["env","fs"],
@@ -44,7 +50,7 @@ if (!globalThis.__ccpDotenvLoaded) {
       // SECURITY: security-critical keys must never be settable from a
       // repo-local .env (see file header). Exact-match denylist + a pattern
       // for any CC_*_TOKEN. Shell-set values are unaffected (handled below).
-      var __envDeny = { 'CC_BRIDGE_TOKEN': 1, 'CC_BRIDGE_ADDR': 1, 'ANTHROPIC_BASE_URL': 1, 'ANTHROPIC_API_KEY': 1, 'ANTHROPIC_AUTH_TOKEN': 1, 'CC_WEBHOOK_URL': 1 };
+      var __envDeny = { 'CC_BRIDGE_TOKEN': 1, 'CC_BRIDGE_ADDR': 1, 'ANTHROPIC_BASE_URL': 1, 'ANTHROPIC_API_KEY': 1, 'ANTHROPIC_AUTH_TOKEN': 1, 'CC_WEBHOOK_URL': 1, 'CC_PROJECT_ROOT': 1, 'CLAUDE_CODE_OAUTH_TOKEN': 1, 'CC_SAVE_CONVERSATIONS': 1, 'CC_CACHE_RESPONSES': 1, 'CLAUDE_CACHE': 1 };
       var __isBlocked = function(k) {
         if (__envDeny[k]) return true;
         if (/^CC_.*_TOKEN$/.test(k)) return true;

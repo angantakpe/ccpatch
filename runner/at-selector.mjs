@@ -30,12 +30,32 @@
 //   AFTER   — immediately after a string literal. target.literal, occurrence?.
 //             site.start === site.end === literal_offset + literal.length.
 
-import { findFunctionByLiteral } from './ast-anchor.mjs';
+import { findFunctionByLiteral, firstOffsetOf } from './ast-anchor.mjs';
 import { fuzzyMatch } from './anchors.mjs';
 import { findClosingBrace } from './brace-walker.mjs';
 import { getAst } from './ast-cache.mjs';
 
 export const AT_KINDS = Object.freeze(['HEAD', 'RETURN', 'INVOKE', 'BEFORE', 'AFTER']);
+
+// Per-character classifiers via charCodeAt range comparisons (cf. the numeric
+// charCodeAt keying in verify-batch.mjs). These run in tight backward/forward
+// scan loops over the 16 MB bundle, so avoiding a RegExp.test() call (and the
+// single-char string index `code[j]`) per byte is a measurable win. Behavior is
+// identical to the regexes they replace.
+//   isIdentChar   ↔ /[A-Za-z0-9_$]/   (callee-name char, no dot)
+//   isIdentDotChar↔ /[A-Za-z0-9_$.]/  (member-chain char, includes dot)
+function isIdentChar(cc) {
+  return (
+    (cc >= 48 && cc <= 57) ||  // 0-9
+    (cc >= 65 && cc <= 90) ||  // A-Z
+    (cc >= 97 && cc <= 122) || // a-z
+    cc === 95 ||               // _
+    cc === 36                  // $
+  );
+}
+function isIdentDotChar(cc) {
+  return isIdentChar(cc) || cc === 46; // adds '.'
+}
 
 /**
  * Resolve a function spec to a function body range.
@@ -49,7 +69,10 @@ function resolveFunction(spec, code) {
     // code where names are short and unique enough; callers preferring a
     // stable string literal should use { literal: ... } form.
     const needle = `function ${spec}(`;
-    const idx = code.indexOf(needle);
+    // Memoized first-offset lookup (same per-code index findFunctionByLiteral
+    // uses). resolveInvoke can resolve the same `function NAME(` again; this
+    // avoids a second full-bundle scan. Identical result to code.indexOf(needle).
+    const idx = firstOffsetOf(code, needle);
     if (idx === -1) return null;
     // Find the opening brace of the body.
     let i = idx + needle.length;
@@ -286,13 +309,14 @@ function findCallsByName(code, callName, scanStart, scanEnd) {
  */
 function findCallsByLiteralArg(code, literal, scanStart, scanEnd) {
   const quoted = JSON.stringify(literal); // double-quoted + escaped
+  // Loop-invariant needles — built once, not per iteration.
+  const single = "'" + literal.replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'";
   const sites = [];
   const seen = new Set(); // dedupe by call start offset
   let from = scanStart;
   while (from < scanEnd) {
     let litIdx = code.indexOf(quoted, from);
     // Also try single-quoted form, taking whichever occurs first.
-    const single = "'" + literal.replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'";
     const singleIdx = code.indexOf(single, from);
     if (singleIdx !== -1 && (litIdx === -1 || singleIdx < litIdx)) {
       litIdx = singleIdx;
@@ -352,7 +376,7 @@ function enclosingCallAt(code, litIdx, scanStart, scanEnd) {
         const calleeEnd = j + 1;
         // Callee is an identifier or member chain (a.b.c). Computed access
         // (obj[x]) and call-returning-call (f()()) are out of scope here.
-        while (j >= scanStart && /[A-Za-z0-9_$.]/.test(code[j])) j--;
+        while (j >= scanStart && isIdentDotChar(code.charCodeAt(j))) j--;
         const calleeStart = j + 1;
         const callee = code.slice(calleeStart, calleeEnd);
         // No callee, or a leading dot (member tail with no base) → this is a
