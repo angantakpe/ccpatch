@@ -22,11 +22,19 @@
  *   by inspecting stashed raw tools for isMcp flags and live mcpClients.
  *   Useful as a health probe before attempting MCP tool dispatch.
  *
- * globalThis.__ccpInvokeTool(name, input, signal?)
+ * globalThis.__ccpInvokeTool(callerNonce, name, input, signal?)
  *   Dispatches a tool call through the live tool object. Calls
  *   __ccpBuildToolContext() internally for per-invocation context isolation.
+ *   Callers must: const nonce = globalThis.__ccpGetDispatchNonce(); await globalThis.__ccpInvokeTool(nonce, toolName, input, opts)
  *   Returns: Promise<{ content: Array<{type,text}>, isError?: boolean }>
  *   On any error: rejects with an Error whose message describes the failure.
+ *
+ * globalThis.__ccpGetDispatchNonce()
+ *   Returns the load-time nonce that __ccpInvokeTool requires as its first
+ *   argument. Callers must obtain this nonce at startup and pass it on every
+ *   invocation. This prevents unguarded global access from in-process code
+ *   (e.g. a compromised MCP server) that did not participate in the original
+ *   patch load.
  *
  * ── Anchor strategy (multi-anchor fallback chain) ─────────────────────────
  *
@@ -74,6 +82,8 @@ export default {
     present: '__ccpToolDispatchExposed_v2',
     // Sentinel is injected exactly once.
     count: { present: 1 },
+    // Nonce getter must be present after patch is applied.
+    also_present: ['__ccpGetDispatchNonce'],
   },
   apply: (code) => {
     if (code.includes('__ccpToolDispatchExposed_v2')) return code;
@@ -182,6 +192,13 @@ export default {
     const injection =
       'try{' +
         'var __ccpToolDispatchExposed_v2=!0;' +
+        // Load-time nonce — generated once when the patch runs. Any caller that
+        // did not acquire the nonce via __ccpGetDispatchNonce() at startup will
+        // be rejected, preventing unguarded in-process access (e.g. a
+        // compromised MCP server calling __ccpInvokeTool directly).
+        'var _ccpDispatchNonce=[0,0,0,0].map(function(){return Math.random().toString(36).slice(2);}).join("");' +
+        // Nonce getter — trusted callers call this once at startup and cache the result.
+        'globalThis.__ccpGetDispatchNonce=function(){return _ccpDispatchNonce;};' +
         // Stash formatted tools (API-ready array — minified output var from regex)
         `globalThis.__ccpFormattedTools=${outVar};` +
         // Stash raw tool objects (the `tools:` value passed to the formatter)
@@ -226,8 +243,10 @@ export default {
           'return globalThis.__ccpFormattedTools||[];' +
         '};' +
         // __ccpInvokeTool — dispatches through the live tool .call() method.
+        // Requires callerNonce as first argument (obtained via __ccpGetDispatchNonce()).
         // Uses __ccpBuildToolContext() for a fresh per-invocation context.
-        'globalThis.__ccpInvokeTool=async function(name,input,signal){' +
+        'globalThis.__ccpInvokeTool=async function(callerNonce,name,input,signal){' +
+          'if(callerNonce!==_ccpDispatchNonce)throw new Error("__ccpInvokeTool: invalid nonce. Call __ccpGetDispatchNonce() at startup.");' +
           'var tools=globalThis.__ccpRawTools;' +
           'if(!tools)throw new Error("[ccpInvokeTool] tool registry not stashed yet");' +
           'var tool=null;' +
@@ -257,16 +276,17 @@ export default {
         'if(typeof globalThis.__ccpProvide==="function"){' +
           'try{globalThis.__ccpProvide("toolDispatch",{' +
             'version:2,producer:"expose_tool_dispatch",' +
-            'shape:["getTools","invokeTool","buildToolContext","mcpHealth"],' +
+            'shape:["getTools","invokeTool","buildToolContext","mcpHealth","getDispatchNonce"],' +
             'value:{' +
               'getTools:globalThis.__ccpGetTools,' +
               'invokeTool:globalThis.__ccpInvokeTool,' +
               'buildToolContext:globalThis.__ccpBuildToolContext,' +
-              'mcpHealth:globalThis.__ccpMcpHealth' +
+              'mcpHealth:globalThis.__ccpMcpHealth,' +
+              'getDispatchNonce:globalThis.__ccpGetDispatchNonce' +
             '}' +
           '});}catch(_ccpTD_prov_){}' +
         '}' +
-        'console.log("[expose_tool_dispatch] ccpatch tool dispatch v2 exposed (__ccpGetTools/__ccpInvokeTool/__ccpBuildToolContext/__ccpMcpHealth)");' +
+        'console.log("[expose_tool_dispatch] ccpatch tool dispatch v2 exposed (__ccpGetTools/__ccpInvokeTool/__ccpBuildToolContext/__ccpMcpHealth/__ccpGetDispatchNonce)");' +
       '}catch(__ccpTD_err){' +
         'console.warn("[expose_tool_dispatch] stash failed:",String(__ccpTD_err));' +
       '}';
