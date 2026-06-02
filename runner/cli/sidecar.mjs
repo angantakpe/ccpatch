@@ -3,13 +3,11 @@
 // re-exports these so legacy callers keep resolving.
 
 import fs from 'node:fs';
-import { createHash } from 'node:crypto';
+import { sha256 } from '../reverse-diff.mjs';
 
 export const REVERT_SIDECAR_VERSION = 1;
 
-export function sha256(s) {
-  return createHash('sha256').update(s, 'utf8').digest('hex');
-}
+export { sha256 };
 
 export function sidecarPathFor(outputPath) {
   return outputPath + '.ccp-revert.json';
