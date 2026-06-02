@@ -7,7 +7,22 @@ include scripts/mk/cli.mk
 .PHONY: help refmap refmap-check smoke-bridge smoke-integration \
         smoke-integration-roundtrip \
         bridge-host bridge-host-stop bridge-tail bridge-submit \
-        verticals-check lint lint-dead lint-unused
+        verticals-check lint lint-dead lint-unused \
+        test\:patches lint\:dead lint\:unused
+
+# ── Naming-drift aliases ────────────────────────────────────────────────────
+# Kill the spelling drift between the two build systems: every operation that
+# exists in BOTH make and npm is reachable under BOTH spellings.
+#   make test-patches  ==  make test:patches   (npm: test:patches / test-patches)
+#   make lint-dead     ==  make lint:dead      (npm: lint:dead    / lint-dead)
+#   make lint-unused   ==  make lint:unused    (npm: lint:unused  / lint-unused)
+# GNU make accepts a literal colon in a target name when it is backslash-escaped.
+# The dash-spelled targets these forward to live in scripts/mk/cli.mk
+# (test-patches) and below in this file (lint-dead, lint-unused). package.json
+# carries the mirror dash-spelled npm scripts.
+test\:patches: test-patches ## Alias for test-patches (npm-style spelling)
+lint\:dead: lint-dead ## Alias for lint-dead (npm-style spelling)
+lint\:unused: lint-unused ## Alias for lint-unused (npm-style spelling)
 
 # ── Verticals: testing the headless bridge + agent tree ─────────────────────
 
