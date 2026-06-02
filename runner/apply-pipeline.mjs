@@ -27,11 +27,8 @@ import { injectCoverageHit } from './coverage.mjs';
 import { captureReverseDiff } from './reverse-diff.mjs';
 import { verifyBatch } from './verify-batch.mjs';
 import { phaseOf } from './apply-order.mjs';
-
-function toList(x) {
-  if (x === undefined || x === null) return [];
-  return Array.isArray(x) ? x : [x];
-}
+import { toList } from './verify-core.mjs';
+import { PROJECT_ROOT } from './paths.mjs';
 
 /**
  * True when a normalized verify block declares at least one NON-EMPTY present
@@ -221,8 +218,8 @@ export function applySinglePatch({
       // S5: surface only the FIRST storage failure of the run; the
       // candidate logging below still runs regardless of the write.
       try {
-        mkdirSync('storage/outputs', { recursive: true });
-        appendFileSync(join('storage/outputs', 'anchor-drift.jsonl'), alertLine + '\n', 'utf8');
+        mkdirSync(join(PROJECT_ROOT, 'storage', 'outputs'), { recursive: true });
+        appendFileSync(join(PROJECT_ROOT, 'storage', 'outputs', 'anchor-drift.jsonl'), alertLine + '\n', 'utf8');
       } catch (err) { warnStorageOnce('anchor-drift.jsonl', err); }
 
       if (candidates.length > 0) {

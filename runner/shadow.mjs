@@ -22,13 +22,9 @@
  */
 
 import * as acorn from 'acorn';
+import { toList } from './verify-core.mjs';
 
 const ACORN_OPTS = { ecmaVersion: 'latest', sourceType: 'module', allowReturnOutsideFunction: true, allowHashBang: true };
-
-function toList(v) {
-  if (v == null) return [];
-  return Array.isArray(v) ? v : [v];
-}
 
 function tryParse(code) {
   try {

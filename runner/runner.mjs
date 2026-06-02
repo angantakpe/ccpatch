@@ -5,7 +5,7 @@ import { compileKind } from './patch-kinds.mjs';
 import { diffSpansFromPatch, detectOverlapsInPhase } from './conflict.mjs';
 import { CoordinateFrame } from './coordinate-frame.mjs';
 import { fireHook } from './lifecycle.mjs';
-import { checkVerifyCore } from './verify-core.mjs';
+import { checkVerifyCore, toList } from './verify-core.mjs';
 import { getResolvedVariant } from './loader.mjs';
 import { compareVersions } from './version-resolver.mjs';
 import { PHASE_ORDER, phaseOf, orderPatches } from './apply-order.mjs';
@@ -31,11 +31,6 @@ export { makeStorageWarnOnce, writeConflictsArtifact, writeApplyArtifacts };
 // in the Item-2 pipeline refactor) so the runner.mjs public surface — and the
 // tests that import applyFallbackDiff / detectDrift from here — stay unchanged.
 export { applyFallbackDiff, detectDrift };
-
-function toList(x) {
-  if (x === undefined || x === null) return [];
-  return Array.isArray(x) ? x : [x];
-}
 
 /**
  * Run a verify block against post-apply code. Returns an array of failure

@@ -12,13 +12,9 @@
 // Pure: derives everything from its arguments. fuzzyMatch comes from anchors.mjs.
 
 import { fuzzyMatch } from './anchors.mjs';
+import { toList } from './verify-core.mjs';
 
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-function toList(x) {
-  if (x === undefined || x === null) return [];
-  return Array.isArray(x) ? x : [x];
-}
 
 /**
  * Build the shared anchor-drift forensics for one patch whose anchor did not
