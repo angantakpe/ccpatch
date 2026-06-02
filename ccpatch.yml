@@ -191,34 +191,25 @@ profiles:
 
   standard:
     # minimal + quality-of-life features.
-    - react_singleton
-    - esm_compat
-    - contracts
-    - overlay_loader
-    - fetch_interceptor
-    - bun_shim
-    - stdin_da1_leak
-    - message_normalizer
-    - project_root
-    - tool_result_error_content
-    - boot_banner
-    - subagent_hooks_stub
-    - input_bar_color
-    - model
-    - custom_commands
-    - slash_dispatch
-    - context_budget_warn
-    - recap_strip_hint
-    - unhide_features
-    - extended_thinking
-    - force_thinking
-    - tool_result_trim
-    - large_content_guard
-    - hook_noise_mute
-    - mcp_lazy
-    - dotenv_loader
-    - block_tools
+    extends: minimal
+    patches:
+      - model
+      - custom_commands
+      - slash_dispatch
+      - context_budget_warn
+      - recap_strip_hint
+      - unhide_features
+      - extended_thinking
+      - force_thinking
+      - tool_result_trim
+      - large_content_guard
+      - hook_noise_mute
+      - mcp_lazy
+      - dotenv_loader
+      - block_tools
+      - input_bar_color
 
+  # power lists everything explicitly -- no extends
   power:
     # Every patch currently listed under `patches:` above.
     - react_singleton
@@ -282,32 +273,23 @@ profiles:
   # model every time the RCE stack is built — do not pre-ack these here.
   daemon:
     # Headless / automation vertical — drive the running CLI from outside.
-    - react_singleton
-    - esm_compat
-    - contracts
-    - overlay_loader
-    - fetch_interceptor
-    - bun_shim
-    - stdin_da1_leak
-    - message_normalizer
-    - project_root
-    - tool_result_error_content
-    - boot_banner
-    - subagent_hooks_stub
-    - event_bus
-    - auth_token
-    - expose_api_client
-    - expose_submit_input
-    - expose_tool_dispatch
-    - expose_agent_tool
-    - capture_interactive_request
-    - durable_cron
-    - loop_dynamic
-    - webhook
-    - save_conversations
-    - assistant_stream_events
-    - headless_bridge
+    extends: minimal
+    patches:
+      - event_bus
+      - auth_token
+      - expose_api_client
+      - expose_submit_input
+      - expose_tool_dispatch
+      - expose_agent_tool
+      - capture_interactive_request
+      - durable_cron
+      - loop_dynamic
+      - webhook
+      - save_conversations
+      - assistant_stream_events
+      - headless_bridge
 
+  # does not extend daemon -- intentionally excludes esm_compat and bun_shim (Bun SEA incompatible)
   daemon_native:
     # Same as `daemon`, minus esm_compat + bun_shim. Use this for the
     # native-binary repack path (patch-claude-code-native) where those two
@@ -334,23 +316,14 @@ profiles:
 
   orchestrator:
     # Multi-agent orchestration vertical — observe and account for the agent tree.
-    - react_singleton
-    - esm_compat
-    - contracts
-    - overlay_loader
-    - fetch_interceptor
-    - bun_shim
-    - stdin_da1_leak
-    - message_normalizer
-    - project_root
-    - tool_result_error_content
-    - boot_banner
-    - subagent_hooks_stub
-    - event_bus
-    - expose_agent_tool
-    - prime_agent_tool_on_boot
-    - tools_log
-    - tool_result_trim
-    - cost_tracker
-    - save_conversations
-    - agent_tree
+    extends: minimal
+    patches:
+      - subagent_hooks_stub
+      - event_bus
+      - expose_agent_tool
+      - prime_agent_tool_on_boot
+      - tools_log
+      - tool_result_trim
+      - cost_tracker
+      - save_conversations
+      - agent_tree

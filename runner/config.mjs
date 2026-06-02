@@ -155,6 +155,14 @@ function escapeKey(s) {
 /**
  * Parse the optional `profiles:` map from ccpatch.yml.
  * Returns { name: string[] } or null if absent/unreadable.
+ *
+ * Supports two value formats per profile:
+ *   - Array (existing): patches: [a, b, c]  → returned as-is
+ *   - Object (new):     { extends: 'base', patches: [d, e] }
+ *       → merges base profile patches first, then deduplicates with current.
+ *       → 'extends' must refer to an already-processed profile (earlier in file).
+ *       → Missing base throws: Error("Profile 'X' extends 'Y' but 'Y' is not defined in profiles:")
+ *       → One level of extends only (no chains).
  */
 export function readProfiles(yamlPath) {
   if (!existsSync(yamlPath)) return null;
@@ -162,7 +170,24 @@ export function readProfiles(yamlPath) {
   if (!doc?.profiles || typeof doc.profiles !== 'object') return null;
   const out = {};
   for (const [name, val] of Object.entries(doc.profiles)) {
-    if (Array.isArray(val)) out[name] = val.filter(s => typeof s === 'string');
+    if (Array.isArray(val)) {
+      out[name] = val.filter(s => typeof s === 'string');
+    } else if (val && typeof val === 'object' && Array.isArray(val.patches)) {
+      const ownPatches = val.patches.filter(s => typeof s === 'string');
+      if (val.extends != null) {
+        const baseName = String(val.extends);
+        if (!(baseName in out)) {
+          throw new Error(`Profile '${name}' extends '${baseName}' but '${baseName}' is not defined in profiles:`);
+        }
+        const basePatches = out[baseName];
+        // Base first, then own; deduplicate preserving order.
+        const seen = new Set(basePatches);
+        const extras = ownPatches.filter(p => !seen.has(p));
+        out[name] = [...basePatches, ...extras];
+      } else {
+        out[name] = ownPatches;
+      }
+    }
   }
   return out;
 }
