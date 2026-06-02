@@ -19,6 +19,12 @@ import { readAcks, resolveEffectivePatches } from '../config.mjs';
 import { CAPABILITIES } from '../manifest.mjs';
 import { buildPreload } from '../preload-builder.mjs';
 import { emitOverlay } from '../overlay-builder.mjs';
+import {
+  parseRepackSkip,
+  nativeGrowPathAvailable,
+  hostPlatformLabel,
+  formatPlatformDegradation,
+} from './native-profile.mjs';
 
 /**
  * The default (no-subcommand) build invocation: apply patches and write the
@@ -380,6 +386,69 @@ export async function runBuild(ctx) {
     }
   }
 
+  // ── WS6 Item 8: surface native grow-path platform degradation ────────────
+  // Two sources, consumed best-effort:
+  //   (a) WS1's structured stdout line. When the build path (or the Makefile
+  //       repack step that wraps it) has a [repack:skip] line in hand, it is
+  //       passed to us via CCPATCH_REPACK_SKIP (env) or runnerReport.repackSkip.
+  //       We parse it tolerantly (parseRepackSkip) and report EXACTLY which
+  //       patches were dropped and why.
+  //   (b) A predictive warning for `--profile=native` builds on a host whose
+  //       grow-path is unavailable (anything but linux-x64): the in-place repack
+  //       can only fit a length-preserving patch set, so a larger bundle will be
+  //       reduced or rejected downstream. We say so now rather than letting it
+  //       surface (or stay silent) at repack time.
+  // In paranoid mode (Item 5) any concrete [repack:skip] degradation is a HARD
+  // build FAILURE rather than a warning.
+  let platformSkip = null;
+  {
+    const paranoid = patchOptions.paranoid === true;
+    // WS1 interface: the post-repack smoke check is REQUIRED by default; passing
+    // --allow-unverified opts out (fail-OPEN). We forward that opt-out to the
+    // repack step ONLY when the user explicitly asked for it AND paranoid mode is
+    // off. Default and paranoid both fail-closed (smoke check enforced). We do
+    // not spawn the repacker here (the Makefile does), so we surface the decision
+    // as a documented hint the repack step reads, and log it for traceability.
+    const allowUnverified = patchOptions.allowUnverified === true && !paranoid;
+    if (options.profile === 'native') {
+      if (patchOptions.allowUnverified && paranoid) {
+        logger.warn(
+          '  [native] --allow-unverified ignored under --paranoid: post-repack smoke ' +
+          'check stays REQUIRED (fail-closed).'
+        );
+      }
+      // Hint for the repack step: '1' → forward --allow-unverified; '0' → don't.
+      process.env.CCPATCH_REPACK_ALLOW_UNVERIFIED = allowUnverified ? '1' : '0';
+    }
+    const skipText =
+      process.env.CCPATCH_REPACK_SKIP ||
+      (typeof runnerReport.repackSkip === 'string' ? runnerReport.repackSkip : null) ||
+      (runnerReport.repackSkip && typeof runnerReport.repackSkip === 'object'
+        ? `[repack:skip] ${JSON.stringify(runnerReport.repackSkip)}`
+        : null);
+    const skip = skipText ? parseRepackSkip(skipText) : null;
+    platformSkip = skip;
+    if (skip) {
+      const msg = formatPlatformDegradation(skip);
+      if (paranoid) {
+        logger.error(`Error: [paranoid] ${msg}`);
+        logger.error(
+          '  Paranoid mode treats native grow-path degradation as a build failure. ' +
+          'Re-run without --paranoid to accept the reduced patch set, or build on a ' +
+          'linux-x64 host where the grow-repack path is available.'
+        );
+        return 1;
+      }
+      logger.warn(`  [native] ${msg}`);
+    } else if (options.profile === 'native' && !nativeGrowPathAvailable()) {
+      logger.warn(
+        `  [native] ${formatPlatformDegradation({ platform: hostPlatformLabel() })}. ` +
+        `If the patched bundle exceeds the original embedded region, the repack will ` +
+        `drop patches to fit (or fail) on this host. Build on linux-x64 for the full set.`
+      );
+    }
+  }
+
   // ── End-of-run summary / --json report ──────────────────────────────────
   const durationMs = Date.now() - buildStartedAt;
   // Merge our coarse CLI-level phase timers into the runner report so the
@@ -399,6 +468,8 @@ export async function runBuild(ctx) {
       durationMs,
       report: reportWithPhases,
       patchNames: patchesToApply,
+      paranoid: patchOptions.paranoid === true,
+      platformDegradation: platformSkip,
     });
     process.stdout.write(JSON.stringify(payload) + '\n');
   } else {

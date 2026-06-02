@@ -125,9 +125,25 @@ export function parseBuildArgs(args) {
     if (args[i] === '--allow-unacked') {
       patchOptions.allowUnacked = true;
     }
+    // WS6 Item 5: --paranoid / strict mode. At build time it forces fail-closed
+    // repack (never pass --allow-unverified to WS1's repacker, treat any
+    // [repack:skip] degradation as a build FAILURE) and documents the loud
+    // CCPATCH_PARANOID runtime toggle for the injected fetch_interceptor.
+    if (args[i] === '--paranoid') {
+      patchOptions.paranoid = true;
+    }
+    // --allow-unverified: explicit opt-out of WS1's now-required post-repack
+    // smoke check. Only threaded through to repack when the user passes it AND
+    // paranoid mode is off (paranoid forces fail-closed and ignores this).
+    if (args[i] === '--allow-unverified') {
+      patchOptions.allowUnverified = true;
+    }
   }
   if (!patchOptions.strict && process.env.CCPATCH_STRICT === '1') {
     patchOptions.strict = true;
+  }
+  if (!patchOptions.paranoid && process.env.CCPATCH_PARANOID === '1') {
+    patchOptions.paranoid = true;
   }
   if (!patchOptions.dev && process.env.CCPATCH_DEV === '1') {
     patchOptions.dev = true;
@@ -202,6 +218,25 @@ export async function runPatchCli(args, logger = console) {
   // sink without us having to touch each call site.
   logger = leveled;
   args = cleanedArgs;
+
+  // WS6 Item 5: --paranoid is a GLOBAL flag (applies to build, doctor, etc.).
+  // Lift it out of argv here — once, before any subcommand parser runs — and
+  // export it to the process env as CCPATCH_PARANOID=1. Two reasons env is the
+  // carrier rather than a threaded option:
+  //   1. doctor's flag parsing lives in cli/commands.mjs (which this workstream
+  //      does not own); reading the env keeps the toggle uniform across every
+  //      subcommand without editing each parser.
+  //   2. The injected fetch_interceptor hook runs inside the PATCHED CLI at
+  //      runtime, not in this patcher process. It reads CCPATCH_PARANOID from
+  //      its own env. Exporting it here means anything the build spawns (e.g.
+  //      WS1's repacker, or a smoke run of the bundle) inherits the loud toggle.
+  // The per-build parseBuildArgs ALSO records options.patchOptions.paranoid (so
+  // the build path can act on it directly + honor a pre-set env); this is the
+  // global strip so `ccpatch doctor <in> --paranoid` and friends see it too.
+  if (args.includes('--paranoid')) {
+    args = args.filter(a => a !== '--paranoid');
+    process.env.CCPATCH_PARANOID = '1';
+  }
 
   // Per-subcommand --help. `ccpatch <cmd> --help` (or `-h`) renders just that
   // subcommand's usage block; falls back to the global banner otherwise.
