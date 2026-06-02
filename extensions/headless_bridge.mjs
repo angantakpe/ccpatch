@@ -29,7 +29,7 @@ export default {
   category: 'feature',
   description: 'NDJSON bridge into the running CLI (submit/dispatch/subscribe/cancel).',
   capabilities: ['network', 'prompt', 'tools'],
-  dependsOn: ['event_bus', 'auth_token', 'expose_submit_input', 'expose_tool_dispatch'],
+  dependsOn: ['event_bus', 'auth_token', 'expose_submit_input', 'expose_tool_dispatch'], // require auth_token -- without it the socket is unauthenticated
   // Injected hook references the sentinel twice (idempotency guard + assignment),
   // so a single clean apply yields exactly 2 occurrences. count>2 ⇒ double-applied.
   verify: { present: '__ccpHeadlessBridge_v1', count: { present: 2 } },
