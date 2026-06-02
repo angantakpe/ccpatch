@@ -44,7 +44,9 @@
     "LICENSE",
     "NOTICE",
     "SECURITY.md",
-    "THREAT_MODEL.md"
+    "THREAT_MODEL.md",
+    "SUPPORTED_VERSIONS.md",
+    "CONTRIBUTING.md"
   ],
   "scripts": {
     "test:patches": "node --test tests/patch-verification.test.mjs",
@@ -76,10 +78,11 @@
     "acorn": "^8.14.0",
     "acorn-walk": "^8.3.4",
     "diff": "^9.0.0",
+    "js-yaml": "^4.1.1"
+  },
+  "optionalDependencies": {
     "ink": "^6.8.0",
-    "js-yaml": "^4.1.1",
-    "react": "^19.2.5",
-    "source-map": "^0.7.4"
+    "react": "^19.2.5"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

@@ -5,7 +5,7 @@
 ccpatch injects scripts into Claude Code's `cli.js` to extend and alter its behavior from within the process:
 
 - **Modify the tool list** before it is sent to the API — add, remove, or reshape tools
-- **Flip internal feature flags** (`loop_dynamic`, `durable_cron`, `extended_thinking`) that are boolean checks hardcoded in the bundle
+- **Flip internal feature flags** (`loop_dynamic`, `durable_cron`, `extended_thinking`) that are boolean checks hardcoded in the bundle — note that flipping a client-side flag only unlocks locally gated behavior; some flags gate capabilities that are also controlled server-side or by your account tier, so enabling the flag does not guarantee the feature works
 - **Intercept user input** at the submit level, before the harness processes it — add native slash commands
 - **Access internal conversation state** — the agent loop, turn history, and module-scope variables
 - **Expose internal APIs** — `expose_tool_dispatch`, `expose_api_client`, `expose_submit_input` let external scripts call into the running CLI process
@@ -202,7 +202,7 @@ By default only `core/` infrastructure and bug fixes are enabled. Extensions are
 - Patches that declare `network`, `exec`, or `env` capabilities are gated by an `ack:` block in `ccpatch.yml`. Builds fail until you acknowledge each capability per patch (e.g. `fetch_interceptor: [network]`).
 - Acking is a one-line attestation that you've read THREAT_MODEL.md for that patch. Pass `--allow-unacked` to bypass the gate (legacy warn-only mode).
 - See `ccpatch.yml`'s `ack:` block for the shipped defaults that cover the always-on core patches.
-- See [SUPPORTED_VERSIONS.md](./SUPPORTED_VERSIONS.md) for the upstream versions exercised in CI and known bundle hashes.
+- See [SUPPORTED_VERSIONS.md](./SUPPORTED_VERSIONS.md) for the upstream versions exercised in CI and known bundle hashes. Versions not listed there will trigger anchor-drift warnings on first run — this is expected and handled by the drift log / `doctor` flow, not a hard failure.
 - See [NOTICE](./NOTICE) for trademark and terms-of-service notes.
 
 When Anthropic ships a new Claude Code version, anchors may drift. The runner logs near-miss candidates to `storage/outputs/anchor-drift.jsonl` so the relevant patch can be re-anchored quickly. Most patches use stable string literals (e.g. feature-flag keys) rather than minified identifiers, which keeps drift surface small.
