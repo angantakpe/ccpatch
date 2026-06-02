@@ -76,11 +76,14 @@ export async function runDoctorCore(options, patches, logger) {
   let ok = 0, drift = 0, missing = 0, unverified = 0;
   const unverifiedNames = [];
   const driftEntries = [];
+  // #12: accumulate per-anchor results for --json output
+  const anchorResults = [];
   for (const name of names) {
     const patch = patches[name];
     if (!patch) {
       logger.log(`  MISSING      ${name} — patch not loaded`);
       missing++;
+      anchorResults.push({ name, status: 'missing', candidates: [] });
       continue;
     }
     // Declarative kinds (prefix/postfix/transpiler) synthesize apply() via
@@ -92,6 +95,7 @@ export async function runDoctorCore(options, patches, logger) {
     if (patch.deprecated) {
       const sinceStr = patch.deprecated.since ? ` (since ${patch.deprecated.since})` : '';
       logger.log(`  DEPRECATED   ${name} — ${patch.deprecated.reason}${sinceStr}`);
+      anchorResults.push({ name, status: 'deprecated', candidates: [] });
       continue;
     }
     if (res.status === 'ok') {
@@ -103,18 +107,22 @@ export async function runDoctorCore(options, patches, logger) {
         );
         unverified++;
         unverifiedNames.push(name);
+        anchorResults.push({ name, status: 'unverified', candidates: res.candidates ?? [] });
       } else {
         logger.log(`  OK           ${name}`);
         ok++;
+        anchorResults.push({ name, status: 'ok', candidates: res.candidates ?? [] });
       }
     } else if (res.status === 'drift') {
       logger.log(`  DRIFT        ${name} — ${res.detail}`);
       drift++;
       driftEntries.push({ name, patch, status: res.status, detail: res.detail });
+      anchorResults.push({ name, status: 'drift', candidates: res.candidates ?? [] });
     } else {
       logger.log(`  MISSING      ${name} — ${res.detail}`);
       missing++;
       driftEntries.push({ name, patch, status: res.status, detail: res.detail });
+      anchorResults.push({ name, status: 'missing', candidates: res.candidates ?? [] });
     }
   }
 
@@ -162,6 +170,17 @@ export async function runDoctorCore(options, patches, logger) {
   if (unverified > 0 && !options.strict) {
     logger.log(`  [warning] ${unverified} patch(es) have weak verify (only 'present'). Strengthen with verify.absent or verify.count.`);
   }
+
+  // #12: --json output — emit structured result on stdout after all logging is done
+  if (options.jsonOutput) {
+    const version = options.patchOptions?.version ?? process.env.CCPATCH_CLI_VERSION ?? null;
+    process.stdout.write(JSON.stringify(
+      { version, anchors: anchorResults.map(r => ({ name: r.name, status: r.status, candidates: r.candidates ?? [] })) },
+      null,
+      2
+    ) + '\n');
+  }
+
   if (missing > 0) return 1;
   if (unverified > 0 && options.strict) {
     logger.error(`  [strict] UNVERIFIED treated as failure: ${unverifiedNames.join(', ')}`);
