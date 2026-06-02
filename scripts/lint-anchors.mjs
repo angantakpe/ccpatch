@@ -257,6 +257,50 @@ export function findMinifiedShapeAnchor(source) {
   return 'minified-shape regex with no stable string/property literal to anchor on';
 }
 
+// Prefer anchor.allowRegex: true in the patch manifest over adding to this list.
+
+/**
+ * Check if a patch file's manifest has `anchor.allowRegex === true` set via
+ * static AST analysis. Returns true when the default export object literal
+ * contains an `anchor` property with a nested `allowRegex: true` boolean.
+ * This keeps the scan synchronous (no dynamic import needed).
+ *
+ * @param {string} src - the patch file source text
+ * @returns {boolean}
+ */
+export function patchManifestAllowsRegex(src) {
+  let ast;
+  try {
+    ast = parse(src, { ecmaVersion: 'latest', sourceType: 'module' });
+  } catch {
+    return false;
+  }
+  // Walk for: export default { ..., anchor: { ..., allowRegex: true }, ... }
+  let found = false;
+  walkSimple(ast, {
+    ExportDefaultDeclaration(node) {
+      const obj = node.declaration;
+      if (obj?.type !== 'ObjectExpression') return;
+      for (const prop of obj.properties) {
+        if (prop.type !== 'Property') continue;
+        const key = prop.key?.name ?? prop.key?.value;
+        if (key !== 'anchor') continue;
+        const val = prop.value;
+        if (val?.type !== 'ObjectExpression') continue;
+        for (const inner of val.properties) {
+          if (inner.type !== 'Property') continue;
+          const innerKey = inner.key?.name ?? inner.key?.value;
+          if (innerKey !== 'allowRegex') continue;
+          if (inner.value?.type === 'Literal' && inner.value.value === true) {
+            found = true;
+          }
+        }
+      }
+    },
+  });
+  return found;
+}
+
 /**
  * The explicit, monotonically-SHRINKING allowlist of raw minified-shape regex
  * anchors. Keyed by patch file (relative to repo root) → Set of exact regex
@@ -368,6 +412,9 @@ export function scanMinifiedShapeAnchors(root, dirs = ['core', 'extensions']) {
       if (!f.endsWith('.mjs')) continue;
       const rel = `${dir}/${f}`;
       const src = readFileSync(path.join(abs, f), 'utf8');
+      // Per-patch opt-in: anchor.allowRegex: true in the manifest exempts the
+      // entire file from the minified-shape gate (same effect as ALLOWED_REGEX_ANCHORS).
+      if (patchManifestAllowsRegex(src)) continue;
       for (const pat of extractPatterns(src)) {
         const reason = findMinifiedShapeAnchor(pat);
         if (reason && !isAllowedRegexAnchor(rel, pat)) {

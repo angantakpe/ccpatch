@@ -50,13 +50,17 @@ if (!process.stdout.isTTY) {
 let inkMod, reactMod;
 try {
   [inkMod, reactMod] = await Promise.all([import('ink'), import('react')]);
-} catch {
-  process.stderr.write(
-    'ccpatch TUI: ink and react are optional dependencies and are not installed.\n' +
-      'Run `npm install ink react` (or `bun add ink react`) in the ccpatch directory,\n' +
-      'then retry.\n'
-  );
-  process.exit(1);
+} catch (e) {
+  if (e.code === 'ERR_MODULE_NOT_FOUND' || e.code === 'MODULE_NOT_FOUND') {
+    process.stderr.write(
+      'ccpatch TUI requires optional dependencies.\n' +
+      'Run: npm install  (without --omit=optional)\n' +
+      '  or: bun install\n\n' +
+      'Alternatively use the CLI: node bin/patch-cli.mjs --help\n'
+    );
+    process.exit(1);
+  }
+  throw e;
 }
 
 const { render } = inkMod;

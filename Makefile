@@ -8,7 +8,7 @@ include scripts/mk/cli.mk
         smoke-integration-roundtrip \
         bridge-host bridge-host-stop bridge-tail bridge-submit \
         verticals-check lint lint-dead lint-unused \
-        test\:patches lint\:dead lint\:unused
+        test\:patches lint\:dead lint\:unused watch-drift
 
 # ── Naming-drift aliases ────────────────────────────────────────────────────
 # Kill the spelling drift between the two build systems: every operation that
@@ -88,6 +88,25 @@ lint-unused: ## Find unused exports / files / dependencies via knip
 	@node_modules/.bin/knip
 
 lint: lint-dead lint-unused ## Run all dead-code checks
+
+## Watch for upstream Claude Code version changes and re-run doctor automatically.
+## Polls every 60 seconds. Press Ctrl+C to stop.
+watch-drift:
+	@echo "Watching @anthropic-ai/claude-code for version changes (Ctrl+C to stop)..."
+	@PREV="$$(cat storage/tmp/latest_version_@anthropic-ai@claude-code.txt 2>/dev/null || echo '')"; \
+	while true; do \
+		NEW="$$(npm view @anthropic-ai/claude-code version 2>/dev/null)"; \
+		if [ -z "$$NEW" ]; then \
+			echo "$$(date '+%H:%M:%S') Could not resolve version (npm unreachable) -- retrying in 60s"; \
+		elif [ "$$NEW" = "$$PREV" ]; then \
+			echo "$$(date '+%H:%M:%S') Version unchanged ($$NEW)"; \
+		else \
+			echo "$$(date '+%H:%M:%S') New version detected: $$PREV --> $$NEW -- running doctor..."; \
+			$(MAKE) doctor VERSION=$$NEW || true; \
+			PREV="$$NEW"; \
+		fi; \
+		sleep 60; \
+	done
 
 help: ## Show this help
 	@echo "Usage: make <target> [VERSION=x.y.z]"
