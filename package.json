@@ -53,6 +53,7 @@
     "test:boot": "node --test tests/boot-smoke.test.mjs",
     "test:integration": "node tests/integration_roundtrip.mjs",
     "test:all": "node --test tests/*.test.mjs",
+    "test:watch": "node --watch --test tests/*.test.mjs",
     "lint:dead": "node scripts/lint-dead.mjs",
     "lint:unused": "knip",
     "lint:unused:fix": "knip --fix",
@@ -60,19 +61,9 @@
     "lint:types": "node scripts/gen-types.mjs && tsc --noEmit --strict types/patch.d.ts",
     "lint:declarative": "node scripts/check-declarative.mjs",
     "lint:anchors": "node scripts/lint-anchors.mjs",
-    "lint": "npm run lint:dead && npm run lint:unused && npm run lint:types && npm run lint:declarative && npm run lint:anchors",
+    "lint": "concurrently --group --kill-others-on-fail 'npm:lint:dead' 'npm:lint:unused' 'npm:lint:types' 'npm:lint:declarative' 'npm:lint:anchors'",
     "gen:types": "node scripts/gen-types.mjs",
-    "tui": "node bin/patch-tui.mjs",
-    "test-patches": "npm run test:patches",
-    "test-boot": "npm run test:boot",
-    "test-integration": "npm run test:integration",
-    "test-all": "npm run test:all",
-    "lint-dead": "npm run lint:dead",
-    "lint-unused": "npm run lint:unused",
-    "lint-types": "npm run lint:types",
-    "lint-declarative": "npm run lint:declarative",
-    "lint-anchors": "npm run lint:anchors",
-    "gen-types": "npm run gen:types"
+    "tui": "node bin/patch-tui.mjs"
   },
   "dependencies": {
     "acorn": "^8.14.0",
@@ -86,6 +77,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "concurrently": "^9.0.0",
     "knip": "^5.39.0",
     "typescript": "^5.7.0"
   }
