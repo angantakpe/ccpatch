@@ -270,10 +270,20 @@ export function applySinglePatch({
     const deltaBefore = frame.deltaBefore(preCode);
     let diffSpans = null;        // null => not yet computed (non-strict, lazy)
     let diffSpanCount = changed ? 1 : 0; // cheap count for the coverage manifest
+    // Issue #6: compute structuredPatch once and cache it on the trace so the
+    // lazy non-strict materialization path in runner.mjs can reuse the same
+    // object instead of calling structuredPatch a second time on the same
+    // (preCode, effectiveCode) pair. In strict mode the result is consumed
+    // immediately for diffSpans; in non-strict mode it is stored as _sp and
+    // consumed by the lazy path only when the phase actually has ≥2 patches.
+    let _sp = null;
     if (changed && globalStrict) {
-      const sp = structuredPatch(name, name, preCode, effectiveCode, 'pre', 'post', { context: 0 });
-      diffSpans = frame.shiftToOriginal(diffSpansFromPatch(preCode, sp), deltaBefore);
+      _sp = structuredPatch(name, name, preCode, effectiveCode, 'pre', 'post', { context: 0 });
+      diffSpans = frame.shiftToOriginal(diffSpansFromPatch(preCode, _sp), deltaBefore);
       diffSpanCount = diffSpans.length;
+    } else if (changed) {
+      // Non-strict: pre-compute and cache so the lazy path never recomputes.
+      _sp = structuredPatch(name, name, preCode, effectiveCode, 'pre', 'post', { context: 0 });
     }
     // at-sites resolved on beforeCode (== preCode frame) → shift to original.
     const atSitesShifted = frame.shiftSites(atSites, deltaBefore);
@@ -288,6 +298,7 @@ export function applySinglePatch({
       // spans only when the phase has ≥2 patches.
       _preCode: changed ? preCode : null,
       _effectiveCode: changed ? effectiveCode : null,
+      _sp,              // Issue #6: cached structuredPatch result — reused by lazy path
       _deltaBefore: deltaBefore,
       allowOverlapWith: Array.isArray(normalized.allowOverlapWith) ? normalized.allowOverlapWith : [],
     };
@@ -438,4 +449,39 @@ export function makeVerifyFlusher({
       }
     }
   };
+}
+
+// TODO: use batchApplyEdits in applyNamedPatches for non-overlapping patches within a phase
+
+/**
+ * Apply multiple non-overlapping edits to code in a single right-to-left pass.
+ * edits: Array<{ start: number, end: number, replacement: string }>
+ * Edits must be non-overlapping. Apply right-to-left so earlier offsets stay valid.
+ */
+export function batchApplyEdits(code, edits) {
+  const sorted = [...edits].sort((a, b) => b.start - a.start)
+  let result = code
+  for (const { start, end, replacement } of sorted) {
+    result = result.slice(0, start) + replacement + result.slice(end)
+  }
+  return result
+}
+
+/**
+ * Attempt to extract a patch's transform as a set of edits rather than a full string replacement.
+ * Returns null for complex transforms (kind=free/transpiler) -- caller falls back to apply().
+ * Returns [{ start, end, replacement }] for prefix/postfix/splice kinds.
+ */
+export function tryExtractEdits(patchResult, preCode, postCode) {
+  // Simple heuristic: if preCode and postCode differ at exactly one contiguous region, extract it
+  if (preCode === postCode) return [] // no-op
+  let lo = 0
+  while (lo < preCode.length && lo < postCode.length && preCode[lo] === postCode[lo]) lo++
+  let hi_pre = preCode.length - 1
+  let hi_post = postCode.length - 1
+  while (hi_pre >= lo && hi_post >= lo && preCode[hi_pre] === postCode[hi_post]) {
+    hi_pre--; hi_post--
+  }
+  // single contiguous edit region
+  return [{ start: lo, end: hi_pre + 1, replacement: postCode.slice(lo, hi_post + 1) }]
 }

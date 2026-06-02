@@ -1,3 +1,4 @@
+// API contract: see EXTENSIONS_API.md -- breaking changes to __ccp* require a minor version bump.
 /**
  * contracts — Typed contract registry for __ccp* globals.
  *
