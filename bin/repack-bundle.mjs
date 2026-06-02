@@ -85,6 +85,9 @@ Options:
   --require-smoke     DEPRECATED no-op alias kept for backward compatibility. The smoke check is
                       REQUIRED by default now; this flag has no effect.
 
+  Env: CCPATCH_REPACK_ALLOW_UNVERIFIED=1 is honored as an equivalent to --allow-unverified
+       (for the Makefile/build glue that cannot thread the flag through).
+
   By default (fail closed): the post-repack smoke check is REQUIRED. If it cannot be executed,
   or the embedded Bun version's major.minor prefix is not in the validated set, the build FAILS
   with a non-zero exit. Pass --allow-unverified to downgrade those to warnings.
@@ -830,7 +833,14 @@ if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
   const rawArgs = process.argv.slice(2).filter(a => a !== '--');
   // Fail closed by default: --allow-unverified opts out. --require-smoke is now a redundant
   // no-op alias (the smoke check is required by default) kept for backward compat.
-  const allowUnverified = rawArgs.includes('--allow-unverified');
+  // Env fallback: the Makefile recipe (scripts/mk/cli.mk) spawns this directly without
+  // threading CLI flags, and the high-level build path (runner/cli/cmd-build.mjs) surfaces
+  // the user's opt-out as CCPATCH_REPACK_ALLOW_UNVERIFIED. Honor =1 as an equivalent opt-out
+  // so the hint connects regardless of glue. Paranoid mode sets it to '0', which only
+  // reaffirms the fail-closed default.
+  const allowUnverified =
+    rawArgs.includes('--allow-unverified') ||
+    process.env.CCPATCH_REPACK_ALLOW_UNVERIFIED === '1';
   const KNOWN_FLAGS = new Set(['--allow-unverified', '--require-smoke']);
   const args = rawArgs.filter(a => !KNOWN_FLAGS.has(a));
   if (args.length < 3 || args.includes('--help') || args.includes('-h')) {

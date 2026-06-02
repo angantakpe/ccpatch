@@ -1,6 +1,6 @@
 # Dependencies
 node_modules/
-bun.lock
+# bun.lock is the single committed source of truth (see scripts/mk + CI frozen-lockfile guard).
 yarn.lock
 pnpm-lock.yaml
 

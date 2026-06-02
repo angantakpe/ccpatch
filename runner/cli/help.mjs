@@ -152,7 +152,7 @@ export const HELP = Object.freeze({
  */
 export const USAGE =
   'Usage:\n' +
-  '  node patch-cli.mjs <input.js> <output.js> [--patch <name>] [--profile <name>] [--preload <preload.mjs>] [--strict] [--dry-run] [--write-on-clean] [--allow-capabilities <list>] [--allow-unacked] [--dev]\n' +
+  '  node patch-cli.mjs <input.js> <output.js> [--patch <name>] [--profile <name>] [--preload <preload.mjs>] [--strict] [--paranoid] [--allow-unverified] [--dry-run] [--write-on-clean] [--allow-capabilities <list>] [--allow-unacked] [--dev]\n' +
   '  node patch-cli.mjs watch <input.js> <output.js> [--patch <name>] [--profile <name>] [--debounce <ms>]\n' +
   '  node patch-cli.mjs doctor <input.js> [--profile <name>] [--strict] [--suggest]\n' +
   '  node patch-cli.mjs heal [--write] [--drift <path>] [--anchors <path>]\n' +
@@ -174,6 +174,12 @@ export const USAGE =
   '  node patch-cli.mjs --list\n' +
   '\n' +
   'Global options: --log-level=silent|error|warn|info|debug   --quiet   --json   --help\n' +
+  '  --paranoid          Strict mode: surface normally-swallowed fetch-subscriber errors loudly\n' +
+  '                      (sets CCPATCH_PARANOID=1) and force fail-closed native repack (any\n' +
+  '                      grow-path degradation becomes a hard build failure).\n' +
+  '  --allow-unverified  Opt OUT of the fail-closed native repack default (local dev only):\n' +
+  '                      a missing post-repack smoke check or Bun-version drift warns instead\n' +
+  '                      of failing. Ignored under --paranoid.\n' +
   'Profiles (from ccpatch.yml): minimal | standard | power | native\n' +
   '\n' +
   'revert/diff: reads the <patched>.ccp-revert.json sidecar produced at apply\n' +
