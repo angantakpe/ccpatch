@@ -422,7 +422,7 @@ try {
 
     const shebangAnchor = '#!/usr/bin/env node';
     const cjsIifeAnchor = '(function(exports, require, module, __filename, __dirname) {';
-    if (code.includes(shebangAnchor)) {
+    if (code.startsWith(shebangAnchor)) {
       code = code.replace(shebangAnchor, shebangAnchor + '\n' + bootstrapCode);
     } else if (code.includes(cjsIifeAnchor)) {
       code = code.replace(cjsIifeAnchor, () => cjsIifeAnchor + bootstrapCode);

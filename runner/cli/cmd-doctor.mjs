@@ -10,6 +10,20 @@ import { resolveProfile } from '../manifest.mjs';
 import { probeAnchor } from '../anchors.mjs';
 import { compileKind } from '../patch-kinds.mjs';
 import { buildDriftRecord } from '../drift-record.mjs';
+import { PROJECT_ROOT } from '../paths.mjs';
+
+/**
+ * Best-effort source path for a patch by name. Loaded patch objects don't carry
+ * their filePath, so probe the two well-known trees. Used only to make the
+ * UNVERIFIED nudge point at a concrete file; falls back to a bare name.
+ */
+function patchFileHint(name) {
+  for (const sub of ['extensions', 'core']) {
+    const p = path.join(PROJECT_ROOT, sub, `${name}.mjs`);
+    if (fs.existsSync(p)) return path.relative(PROJECT_ROOT, p);
+  }
+  return `<core|extensions>/${name}.mjs`;
+}
 
 /**
  * `ccpatch doctor` command entry (table run). Wraps the probe core so the
@@ -75,7 +89,11 @@ export async function runDoctorCore(options, patches, logger) {
     }
     if (res.status === 'ok') {
       if (res.weak) {
-        logger.log(`  UNVERIFIED   ${name} — verify only has 'present' (no absent/count); cannot detect wrong-location apply`);
+        logger.log(
+          `  UNVERIFIED   ${name} — verify only has 'present' (no absent/count); cannot detect wrong-location apply\n` +
+          `                 fix ${patchFileHint(name)}: change verify to ` +
+          `{ present: '<marker>', count: { present: 1 } } (assert it landed exactly once)`
+        );
         unverified++;
         unverifiedNames.push(name);
       } else {

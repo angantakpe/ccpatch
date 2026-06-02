@@ -21,7 +21,7 @@ export default {
     if (code.includes('__ccpInteractiveRequestCaptured_v1')) return code;
     const SHEBANG = '#!/usr/bin/env node';
     const CJS_IIFE = '(function(exports, require, module, __filename, __dirname) {';
-    const useShebang = code.includes(SHEBANG);
+    const useShebang = code.startsWith(SHEBANG);
     const useCjsIife = !useShebang && code.includes(CJS_IIFE);
     if (!useShebang && !useCjsIife) {
       console.warn('  [!] capture_interactive_request: no shebang or CJS-IIFE anchor — skipping');

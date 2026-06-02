@@ -57,5 +57,11 @@ npm-debug.log*
 # Worktrees created by Claude Code agents
 .claude/worktrees/
 
+# Scheduler runtime lock (pid/session — never committed)
+.claude/scheduled_tasks.lock
+
+# Scheduler persisted task store (machine-local task definitions)
+.claude/scheduled_tasks.json
+
 # Diagnostic JSONL logs — kept across `make clean` but not committed.
 storage/diagnostics/*.jsonl

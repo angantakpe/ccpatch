@@ -9,6 +9,13 @@ For the field-by-field manifest reference see
 [anchors.md](./anchors.md) and [finding-anchors.md](./finding-anchors.md). For
 the lifecycle hooks see [lifecycle-hooks.md](./lifecycle-hooks.md).
 
+> **Writing your first patch?** You only need the first three sections —
+> **The patch contract**, **Add a new patch**, and **Patch kinds** (run
+> `make new-patch NAME=…` to scaffold one). Skip everything below
+> *Overlay loader* (overlays, fallback diffs, shadow mode, REPL, coverage,
+> third-party modules) until you actually need it. This mirrors the layered
+> on-ramp in the [README](../README.md#which-entry-point-should-i-use).
+
 ---
 
 ## The patch contract
@@ -47,6 +54,40 @@ schema (the source of truth is `runner/manifest-schema.mjs`).
 ---
 
 ## Add a new patch
+
+### 0. Scaffold the file (recommended)
+
+The fastest start is the scaffolder (`bin/scaffold-patch.mjs`), which emits a
+canonical, manifest-valid patch file — `// @ts-check` + the `@type {Patch}`
+JSDoc, a sentinel-backed `verify`, and a clearly-marked `TODO` anchor — and
+appends a fixture stub to `tests/fixtures/registry.mjs` so the patch is wired
+into the verification suite from the start:
+
+```
+make new-patch NAME=my_feature                         # default kind=prefix, extensions/
+make new-patch NAME=hide_banner CATEGORY=core KIND=free
+make new-patch NAME=unlock_thing KIND=flag             # forceFeatureFlag helper stub
+```
+
+Or call the script directly for the full flag set:
+
+```
+node bin/scaffold-patch.mjs my_logger --kind=postfix
+node bin/scaffold-patch.mjs --help
+```
+
+`KIND` is one of the four declarative kinds — `prefix` (default), `postfix`,
+`transpiler`, `free` (see [Patch kinds](#patch-kinds--prefix--postfix--transpiler)
+below) — plus two `apply()`-helper kinds: `splice` (a boot-time IIFE via
+`spliceBoot`) and `flag` (force a `tengu_*` feature flag via `forceFeatureFlag`).
+`CATEGORY` selects the target tree: `extension` (default) → `extensions/`, `core`
+→ `core/`.
+
+Every template passes `validateManifest()` and the loader's verify gate
+immediately, so a fresh patch loads before you've even found its anchor — it just
+no-ops until you replace the `TODO_STABLE_LITERAL` placeholder. The scaffolder
+does **not** edit `ccpatch.yml`; registering the patch is the manual one-liner in
+step 4. Then continue with the steps below to find your anchor and write a test.
 
 ### 1. Find your anchor
 
@@ -88,7 +129,8 @@ JavaScript and keeps the diff in PRs reviewable.
 
 ### 3. Write the patch file
 
-Minimal skeleton:
+If you scaffolded in step 0, the file already has this shape — search for
+`TODO` and fill in the anchor and body. Minimal skeleton for reference:
 
 ```js
 // extensions/my_patch.mjs

@@ -22,6 +22,10 @@ export default {
 
   description: 'Inject globalThis.Bun shim so bundle runs under Node.js without Bun installed',
   capabilities: ["env","network"],
+  // Co-locates at the boot point (before the CJS-IIFE) with other boot hooks on
+  // shebang-less Bun-extracted bundles. Benign stacking — the shim still runs
+  // before the IIFE body's first Bun.* call. Not a clobber.
+  allowOverlapWith: ['fetch_interceptor'],
   verify: {
     present: '__ccpBunShim',
     // Shim source contains '__ccpBunShim' exactly 3 times: function name,
@@ -29,13 +33,19 @@ export default {
     count: { present: 3 },
   },
   apply: (code) => {
-    // Anchor: the shebang line is always the first line of the CJS bundle.
-    // We inject the shim immediately after it, before any bundle code executes.
-    // NOTE: use includes() not startsWith() — earlier patches (e.g. fetch_interceptor)
-    // may have prepended code before the CJS-IIFE, so startsWith() would miss it.
+    // Anchor: inject the shim before any bundle code executes — after a real
+    // leading shebang if one exists, otherwise immediately before the CJS-IIFE.
+    // NOTE: match the shebang with startsWith(), NOT includes(). Bundles extracted
+    // from the Bun binary have no leading shebang, but DO contain the literal
+    // "#!/usr/bin/env node" as an interior string (Anthropic's own hook-installer
+    // code). includes() matches that interior literal and splices the Bun polyfill
+    // into the middle of the bundle as dead string content, so globalThis.Bun is
+    // never defined → "ReferenceError: Bun is not defined" at the first Bun.* call.
+    // The no-shebang case is handled correctly below by replacing the CJS-IIFE head
+    // wherever it sits (even if earlier patches prepended code before it).
     const SHEBANG = '#!/usr/bin/env node';
     const CJS_IIFE = '(function(exports, require, module, __filename, __dirname)';
-    const hasShebang = code.includes(SHEBANG);
+    const hasShebang = code.startsWith(SHEBANG);
     const hasCjsIife = code.includes(CJS_IIFE);
     if (!hasShebang && !hasCjsIife) {
       console.warn('  [!] bun_shim: neither shebang nor CJS-IIFE anchor found — skipping');

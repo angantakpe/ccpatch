@@ -82,10 +82,48 @@ const __ccpWebhookAllowed = (raw) => {
   } catch (_) { return false; }
 };
 
+// DNS-resolving SSRF guard: the literal-IP check above only catches targets
+// that are *already* dotted-quads/IPv6 in the URL. A hostname like
+// internal.evil.example that resolves to 169.254.169.254 (or any RFC-1918 /
+// loopback / link-local address) would otherwise slip through. So resolve the
+// host (all addresses) and run EACH resolved IP through the same blocklist;
+// reject if ANY answer points at an internal/metadata address. The dev
+// localhost exception is preserved (callers short-circuit on it before here).
+// Returns true if SAFE to send, false if blocked. Best-effort: a resolution
+// failure is treated as not-blocked here (fetch will fail loudly on its own).
+const __ccpWebhookDnsAllowed = async (raw) => {
+  try {
+    const u = new URL(raw);
+    const isDevLocalhost = (u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '[::1]' || u.hostname === '::1');
+    if (isDevLocalhost) return true;
+    const __req = (typeof globalThis.__hm_require === 'function')
+      ? globalThis.__hm_require
+      : (typeof require === 'function' ? require : null);
+    if (!__req) return true; // can't resolve — leave it to the literal guard
+    const dns = __req('node:dns');
+    const lookup = dns.promises && dns.promises.lookup;
+    if (!lookup) return true;
+    const results = await lookup(u.hostname, { all: true });
+    for (const r of (results || [])) {
+      if (r && r.address && __ccpWebhookIsBlockedHost(r.address)) return false;
+    }
+    return true;
+  } catch (_) {
+    // Treat resolution errors as non-blocking; the actual fetch will surface them.
+    return true;
+  }
+};
+
 globalThis.__sendWebhook__ = async (event, data) => {
   if (!WEBHOOK_URL) return;
   if (!__ccpWebhookAllowed(WEBHOOK_URL)) {
     console.error('[ccpatch] webhook: refusing to POST to ' + WEBHOOK_URL + ' — only https: (or http://localhost for dev) is allowed');
+    return;
+  }
+  // Resolve the hostname and re-check every answer against the SSRF blocklist
+  // so a DNS-only internal/metadata target can't slip past the literal guard.
+  if (!(await __ccpWebhookDnsAllowed(WEBHOOK_URL))) {
+    console.error('[ccpatch] webhook: refusing to POST to ' + WEBHOOK_URL + ' — host resolves to a blocked internal/metadata address (SSRF guard)');
     return;
   }
   try {
@@ -117,7 +155,7 @@ process.on('exit', (code) => {
 `;
       const _SHEBANG_ = '#!/usr/bin/env node';
     const _CJS_IIFE_ = '(function(exports, require, module, __filename, __dirname)';
-    if (code.includes(_SHEBANG_)) return code.replace(_SHEBANG_, _SHEBANG_ + '\n' + hook);
+    if (code.startsWith(_SHEBANG_)) return code.replace(_SHEBANG_, _SHEBANG_ + '\n' + hook);
     if (code.includes(_CJS_IIFE_)) return code.replace(_CJS_IIFE_, () => hook + _CJS_IIFE_);
     console.warn('  [!] webhook: anchor not found — skipping');
     return code;

@@ -22,18 +22,31 @@ export default {
     // Shape: <F>=<Y>.current<3?`${<b>} (disable recaps in /config)`:<b>;
     // We replace the whole ternary RHS with just the plain text variable.
     const anchorRe = /([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\.current<3\?`\$\{([A-Za-z_$][\w$]*)\} \(disable recaps in \/config\)`:\3;/;
-    const m = code.match(anchorRe);
+    // Perf: the literal hint text is unique, so locate it with a cheap indexOf
+    // and run the backtracking regex only on a bounded window around it — rather
+    // than scanning the whole ~15MB bundle twice (match + replace), which trips
+    // the runner's >1000ms slow-patch warning. The ternary head sits <40 chars
+    // before the literal; 200 chars of lead-in is ample slack.
+    const LIT = '(disable recaps in /config)';
+    const litIdx = code.indexOf(LIT);
+    if (litIdx === -1) {
+      console.warn('  [!] recap_strip_hint: hint anchor not found — recap hint stays');
+      return code;
+    }
+    const winStart = Math.max(0, litIdx - 200);
+    const window = code.slice(winStart, litIdx + LIT.length + 10);
+    const m = window.match(anchorRe);
     if (!m) {
       console.warn('  [!] recap_strip_hint: hint anchor not found — recap hint stays');
       return code;
     }
     // m[1] = F  m[2] = Y  m[3] = b
-    const replacement = `${m[1]}=${m[3]};`;
-    const patched = code.replace(anchorRe, replacement);
-    if (patched === code) {
+    const newWindow = window.replace(anchorRe, `${m[1]}=${m[3]};`);
+    if (newWindow === window) {
       console.warn('  [!] recap_strip_hint: replacement had no effect');
       return code;
     }
+    const patched = code.slice(0, winStart) + newWindow + code.slice(winStart + window.length);
     console.log(`  [recap_strip_hint] removed recap hint (F=${m[1]}, Y=${m[2]}, b=${m[3]})`);
     return patched;
   },

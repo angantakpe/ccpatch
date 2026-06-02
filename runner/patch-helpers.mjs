@@ -33,10 +33,17 @@ const CJS_IIFE = '(function(exports, require, module, __filename, __dirname)';
 
 /**
  * Inject `snippet` at the earliest viable boot point in the bundle.
- *   - If a shebang is present, splice right after the newline that follows it.
+ *   - If the bundle STARTS WITH a shebang, splice right after the newline that
+ *     follows it.
  *   - Otherwise, if the CJS IIFE wrapper header is present, splice immediately
  *     before it (so the snippet runs in the outer scope, not the wrapper).
  *   - Otherwise throw — there is no safe boot anchor in this bundle.
+ *
+ * The shebang is matched with startsWith(), NOT includes(): bundles extracted
+ * from the Bun binary have no leading shebang but DO contain "#!/usr/bin/env
+ * node" as an interior string literal (Anthropic's own hook-installer code), so
+ * includes() would splice the snippet into the middle of the bundle as dead
+ * string content instead of at the boot point.
  *
  * Idempotent only when `snippet` carries its own guard. The caller is
  * responsible for guarding against double-injection.
@@ -49,10 +56,9 @@ export function spliceBoot(code, snippet) {
   if (typeof code !== 'string' || typeof snippet !== 'string') {
     throw new TypeError('spliceBoot: code and snippet must be strings');
   }
-  if (code.includes(SHEBANG)) {
-    const idx = code.indexOf(SHEBANG);
-    const afterNl = code.indexOf('\n', idx);
-    const at = afterNl === -1 ? idx + SHEBANG.length : afterNl + 1;
+  if (code.startsWith(SHEBANG)) {
+    const afterNl = code.indexOf('\n');
+    const at = afterNl === -1 ? SHEBANG.length : afterNl + 1;
     return code.slice(0, at) + snippet + code.slice(at);
   }
   if (code.includes(CJS_IIFE)) {

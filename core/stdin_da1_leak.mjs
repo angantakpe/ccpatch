@@ -31,13 +31,14 @@ export default {
   apply: (code) => {
     if (code.includes('__ccpFixStdinDA1Installed')) return code;
 
-    // Try shebang first (older Bun-extracted bundles).
-    // Use includes() — earlier patches (e.g. fetch_interceptor) may have prepended
-    // code, so startsWith() would miss the shebang if it's no longer at position 0.
+    // Try a real leading shebang first. Match with startsWith(), NOT includes():
+    // bundles extracted from the Bun binary have no leading shebang but DO contain
+    // "#!/usr/bin/env node" as an interior string literal, so includes() would
+    // splice the filter into dead string content. The CJS-IIFE regex below is the
+    // correct anchor for those bundles (and tolerates code prepended before it).
     const SHEBANG = '#!/usr/bin/env node';
-    if (code.includes(SHEBANG)) {
-      const shebangIdx = code.indexOf(SHEBANG);
-      const afterShebang = code.indexOf('\n', shebangIdx) + 1;
+    if (code.startsWith(SHEBANG)) {
+      const afterShebang = code.indexOf('\n') + 1;
       console.log('  [stdin_da1_leak] stdin DA1 filter installed (shebang anchor)');
       return code.slice(0, afterShebang) + block + '\n' + code.slice(afterShebang);
     }

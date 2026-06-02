@@ -23,7 +23,7 @@ if (!globalThis.__ccpSubagent) {
 
     const shebang = '#!/usr/bin/env node';
     const cjsIife = '(function(exports, require, module, __filename, __dirname) {';
-    if (code.includes(shebang)) {
+    if (code.startsWith(shebang)) {
       return code.replace(shebang, shebang + hook);
     } else if (code.includes(cjsIife)) {
       return code.replace(cjsIife, () => cjsIife + hook);

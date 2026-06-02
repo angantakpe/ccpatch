@@ -88,6 +88,20 @@ function offsetsFor(code, needle) {
 }
 
 /**
+ * Memoized equivalent of `code.indexOf(needle)`: returns the first offset of
+ * `needle` in `code`, or -1 if absent. Routes through the same per-code
+ * offset index that findFunctionByLiteral uses, so repeated lookups for the
+ * same (code, needle) — e.g. at-selector's named-function resolveFunction and
+ * resolveInvoke both resolving the same `function NAME(` — never rescan the
+ * full bundle. indexOfAll caps recorded hits but always captures hit[0] first,
+ * so hits[0] is exactly code.indexOf(needle).
+ */
+export function firstOffsetOf(code, needle) {
+  const hits = offsetsFor(code, needle);
+  return hits.length > 0 ? hits[0] : -1;
+}
+
+/**
  * Find the `function ` keyword (start offset) of the INNERMOST function whose
  * body encloses `litIdx`.
  *
@@ -120,16 +134,29 @@ function enclosingFunctionStarts(code, litIdx) {
   const CAP = 1 << 20; // 1 MiB — generous ceiling for one enclosing function.
   let window = INITIAL;
 
+  // Each iteration we only scan the NEWLY-exposed band [windowStart, prevStart)
+  // for `function ` keyword STARTS (the prior band's keywords were already
+  // collected and rejected as non-enclosing). `prevStart` is the lowest keyword
+  // start already considered; on the first pass it is litIdx (the original code
+  // sliced [windowStart, litIdx), so a keyword had to fully fit before litIdx —
+  // i.e. start <= litIdx - 9). This keeps the total scan linear in the final
+  // window size instead of re-scanning the whole enlarged window from scratch
+  // each miss.
+  //
+  // We search `code` directly (not a slice) so a `function ` keyword that
+  // straddles the band's upper boundary is matched against the real bytes that
+  // follow, then bound by `start < prevStart` — avoiding the slice-truncation
+  // gap a `code.slice(windowStart, prevStart)` would create at prevStart-8.
+  let prevStart = litIdx;
   for (;;) {
     const windowStart = Math.max(0, litIdx - window);
-    const back = code.slice(windowStart, litIdx);
-    // Collect every `function ` keyword offset in this slice, then test
-    // nearest-to-literal first so the INNERMOST enclosing function wins.
+    // Collect every `function ` keyword start in [windowStart, prevStart), then
+    // test nearest-to-literal first so the INNERMOST enclosing function wins.
     const candidates = [];
-    let rel = back.indexOf('function ');
-    while (rel !== -1) {
-      candidates.push(windowStart + rel);
-      rel = back.indexOf('function ', rel + 1);
+    let pos = code.indexOf('function ', windowStart);
+    while (pos !== -1 && pos < prevStart) {
+      candidates.push(pos);
+      pos = code.indexOf('function ', pos + 1);
     }
     for (let k = candidates.length - 1; k >= 0; k--) {
       const fnStart = candidates[k];
@@ -143,6 +170,7 @@ function enclosingFunctionStarts(code, litIdx) {
     // No enclosing function in this window. Stop once we've scanned back to the
     // start of the file (whole prefix covered) or hit the cap; otherwise grow.
     if (windowStart === 0 || window >= CAP) return null;
+    prevStart = windowStart;
     window *= 2;
   }
 }

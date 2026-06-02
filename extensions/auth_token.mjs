@@ -53,8 +53,20 @@ export default {
     try { current = fs.readFileSync(file, 'utf8').split(/\\r?\\n/)[0].trim(); }
     catch (_) { current = ''; }
   };
+  // The bridge token is root-equivalent BY DESIGN: anyone who presents it can
+  // submit prompts / dispatch tools in this process. A short token is brute-
+  // forceable, so warn (once per resolved value, to avoid SIGHUP-reload spam)
+  // when the resolved secret is non-empty but shorter than 16 chars.
+  let __warnedWeak = null;
+  const __warnWeakToken = () => {
+    if (current && current.length < 16 && __warnedWeak !== current) {
+      __warnedWeak = current;
+      console.warn('[ccpatch] auth_token: bridge token is only ' + current.length + ' chars — it is ROOT-EQUIVALENT; use >= 16 random chars (e.g. openssl rand -hex 16)');
+    }
+  };
   load();
-  try { process.on('SIGHUP', load); } catch (_) {}
+  __warnWeakToken();
+  try { process.on('SIGHUP', () => { load(); __warnWeakToken(); }); } catch (_) {}
   globalThis.__ccpAuth = {
     has() { return current.length > 0; },
     verify(presented) {

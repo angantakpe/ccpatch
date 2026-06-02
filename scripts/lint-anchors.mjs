@@ -38,6 +38,15 @@
  * `([A-Za-z_$][\w$]*)` — nor stable feature-flag string literals, JS reserved
  * words, or member-accessed/standard API names (`.map(`, `rgb(`, etc.).
  *
+ * ─── Third reach: the minified-shape gate (literal/AST is the DEFAULT) ─────────
+ * reportMinified()/scanMinifiedShapeAnchors() enforce that literal/AST anchoring
+ * is the default for inline regex. Any regex that pins MINIFIED SHAPE — boolean
+ * flags `!0`/`!1`, bare `\w+` quantifiers, `[A-Za-z_$][\w$]*` name slots — but
+ * carries NO stable string/property literal to pivot on FAILS the gate, unless
+ * its exact source is listed in ALLOWED_REGEX_ANCHORS. That allowlist is the
+ * single, explicit, monotonically-shrinking home for raw minified-shape regex;
+ * a brand-new such anchor fails CI until it is re-anchored on a stable literal.
+ *
  * Usage:
  *   node scripts/lint-anchors.mjs
  */
@@ -152,8 +161,146 @@ export function findBrittlePins(source) {
   return out;
 }
 
-/** Extract every RegExp literal / RegExp(string) pattern source from `src`. */
-function extractPatterns(src) {
+// ─── Minified-shape anchor gate ───────────────────────────────────────────────
+//
+// The CANONICAL anchoring strategy (docs/anchors.md §1) pivots on a stable
+// string literal the minifier cannot rename — a feature-flag key, error
+// message, or property-name skeleton. An inline regex that instead pins the
+// MINIFIED SHAPE of a function (boolean flags `!0`/`!1`, bare `\w+` name slots,
+// `[A-Za-z_$][\w$]*` capture groups) WITHOUT carrying any such stable token is
+// matching minifier output directly: one upstream reshuffle silently breaks it,
+// and there is nothing for findFunctionByLiteral() to pivot on.
+//
+// This gate makes literal/AST anchoring the ENFORCED default for inline regex:
+// every minified-shape-only anchor must either (a) carry a stable literal /
+// property name, or (b) be listed in ALLOWED_REGEX_ANCHORS below. The allowlist
+// is the single, explicit home for raw minified-shape regex and may only SHRINK
+// — never add to it. Migrate an entry out by re-anchoring on the stable literal
+// the bundle keeps (resolveAnchorLiteral + findFunctionByLiteral), then delete
+// its line here.
+//
+// Heuristic for "carries a stable literal": the pattern source contains either a
+// quoted string literal of >= 3 word chars, or a >= 4-char identifier/property
+// word that is NOT a structural JS keyword (so `apiKey:`/`subagent_type:`/
+// `isHidden`/`projectRoot` count, but `function`/`return`/`async` do not). Such
+// words survive minification because they are object keys or API names.
+
+// Structural JS keywords that appear as literal text in a function-shape regex
+// but are NOT minifier-stable identifiers — they must not count as a "stable
+// literal" that exempts a pattern from the gate.
+const STRUCTURAL_WORDS = new Set([
+  'function', 'return', 'async', 'await', 'this', 'null', 'true', 'false',
+  'void', 'new', 'let', 'var', 'const', 'for', 'typeof', 'delete', 'instanceof',
+  'in', 'of', 'do', 'if', 'else', 'while', 'switch', 'case', 'break', 'continue',
+  'try', 'catch', 'throw', 'finally', 'class', 'extends', 'super', 'yield',
+  // Universally-present runtime/Array/Promise surface — present in EVERY bundle
+  // regardless of the patch's target, so it does not localise an anchor.
+  'length', 'process', 'Promise', 'all', 'map', 'Object', 'Array', 'String',
+  'globalThis', 'window', 'require', 'module', 'exports', 'prototype',
+]);
+
+// Tokens whose presence marks a regex as describing MINIFIED SHAPE rather than
+// stable source text: boolean flags, bare `\w` quantifiers, name-slot classes.
+const MINIFIED_SHAPE_RE = /!0|!1|\\w[*+]|\[A-Za-z_\$\]/;
+
+/**
+ * Extract the literal (non-meta) text a regex source pins on, dropping
+ * character-class contents and escaped metacharacters so capture-group /
+ * name-slot syntax (`[A-Za-z_$]`, `\w`, `\(`) never masquerades as a stable
+ * token. Returns `{ quoted, words }`:
+ *   quoted — true if a quoted string literal of >= 3 word chars is present
+ *   words  — >= 4-char identifier/property words that are not structural keywords
+ *
+ * @param {string} src
+ * @returns {{ quoted: boolean, words: string[] }}
+ */
+export function stableTokens(src) {
+  // Walk the source, emitting only literal text: skip escaped metachars (\X) and
+  // the *contents* of character classes [ ... ].
+  let out = '';
+  for (let i = 0; i < src.length; ) {
+    const c = src[i];
+    if (c === '\\') { out += ' '; i += 2; continue; }
+    if (c === '[') {
+      i++;
+      while (i < src.length) {
+        if (src[i] === '\\') { i += 2; continue; }
+        if (src[i] === ']') { i++; break; }
+        i++;
+      }
+      out += ' ';
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  const quoted = /"[^"]{3,}"|'[^']{3,}'/.test(src);
+  const words = (out.match(/[A-Za-z][A-Za-z0-9_$]{3,}/g) ?? [])
+    .filter((w) => !STRUCTURAL_WORDS.has(w));
+  return { quoted, words };
+}
+
+/**
+ * Classify a single regex pattern source. Returns a reason string when the
+ * pattern is a minified-shape anchor with no stable literal to pivot on, else
+ * null (resilient — carries a stable token, or is not a function-shape anchor).
+ *
+ * @param {string} source
+ * @returns {string|null}
+ */
+export function findMinifiedShapeAnchor(source) {
+  if (typeof source !== 'string' || source.length === 0) return null;
+  if (!MINIFIED_SHAPE_RE.test(source)) return null; // not a minified-shape regex
+  const { quoted, words } = stableTokens(source);
+  if (quoted) return null;          // anchored on a quoted string literal
+  if (words.length > 0) return null; // anchored on a stable identifier/property word
+  return 'minified-shape regex with no stable string/property literal to anchor on';
+}
+
+/**
+ * The explicit, monotonically-SHRINKING allowlist of raw minified-shape regex
+ * anchors. Keyed by patch file (relative to repo root) → Set of exact regex
+ * pattern sources. Every pattern here matches minifier output directly and has
+ * no stable literal; it is grandfathered ONLY because a stable sibling anchor in
+ * the same file scopes it (or it is a post-apply self-check, not a locator).
+ *
+ * ⚠️  This set may only SHRINK. Do NOT add entries. A new minified-shape anchor
+ *    must instead re-anchor on a stable literal (see docs/anchors.md §1). Remove
+ *    an entry once its pattern carries a stable token or is deleted.
+ */
+export const ALLOWED_REGEX_ANCHORS = {
+  // onAfterApply() self-check window — NOT a locator. The primary anchor in this
+  // file (`guardRe`) is stable-string-anchored on "progress"/"attachment".
+  'core/message_normalizer.mjs': new Set([
+    'function [A-Za-z_$][\\w$]*\\(H\\)\\{$',
+  ]),
+  // Secondary matches scoped by the file's stable property-skeleton anchor
+  // (`async call({prompt:…,subagent_type:…,description:…})`).
+  'extensions/expose_agent_tool.mjs': new Set([
+    'function ([A-Za-z_$][\\w$]*)\\(\\)\\{return\\[([A-Za-z_$][\\w$]*),([A-Za-z_$][\\w$]*),',
+    'let ([A-Za-z_$][\\w$]*)=([A-Za-z_$][\\w$]*)\\(\\);for\\(let ([A-Za-z_$][\\w$]*)=0;\\3<([A-Za-z_$][\\w$]*)\\.length;\\3\\+\\+\\)\\{',
+    'let ([A-Za-z_$][\\w$]*)=([A-Za-z_$][\\w$]*)\\(\\);for\\(let ([A-Za-z_$][\\w$]*)=0;\\3<C\\.length;\\3\\+\\+\\)\\{',
+  ]),
+  // Secondary closer match, scoped to follow the stable factory-param skeleton
+  // (`async function …({apiKey:…,maxRetries:…,model:…,fetchOverride:…,source:…})`).
+  'extensions/expose_api_client.mjs': new Set([
+    'return new ([A-Za-z_$][\\w$]*)\\(([A-Za-z_$][\\w$]*)\\)\\}async function ([A-Za-z_$][\\w$]*)\\(',
+  ]),
+};
+
+/** Is `source` an allowlisted raw minified-shape anchor for `relFile`? */
+function isAllowedRegexAnchor(relFile, source) {
+  return ALLOWED_REGEX_ANCHORS[relFile]?.has(source) ?? false;
+}
+
+/**
+ * Extract every RegExp literal / RegExp(string) pattern source from `src`.
+ * Parses with Acorn so comments and division never masquerade as regex.
+ * Exported for reuse by scripts/anchor-report.mjs.
+ * @param {string} src
+ * @returns {string[]}
+ */
+export function extractPatterns(src) {
   const pats = [];
   let ast;
   try {
@@ -203,6 +350,64 @@ export function scanPatchFiles(root, dirs = ['core', 'extensions']) {
 }
 
 /**
+ * Scan patch files for raw minified-shape anchors not covered by the allowlist.
+ * An offender is any regex flagged by findMinifiedShapeAnchor() whose source is
+ * not present in ALLOWED_REGEX_ANCHORS for that file.
+ *
+ * @param {string} root - repo root (dir containing core/ and extensions/)
+ * @param {string[]} [dirs] - subdirs to scan
+ * @returns {{ file: string, source: string, reason: string }[]}
+ */
+export function scanMinifiedShapeAnchors(root, dirs = ['core', 'extensions']) {
+  const offenders = [];
+  for (const dir of dirs) {
+    const abs = path.join(root, dir);
+    let entries;
+    try { entries = readdirSync(abs); } catch { continue; }
+    for (const f of entries) {
+      if (!f.endsWith('.mjs')) continue;
+      const rel = `${dir}/${f}`;
+      const src = readFileSync(path.join(abs, f), 'utf8');
+      for (const pat of extractPatterns(src)) {
+        const reason = findMinifiedShapeAnchor(pat);
+        if (reason && !isAllowedRegexAnchor(rel, pat)) {
+          offenders.push({ file: rel, source: pat, reason });
+        }
+      }
+    }
+  }
+  return offenders;
+}
+
+/**
+ * Report raw minified-shape anchors that are neither stable-literal-anchored nor
+ * allowlisted. Returns the exit-code contribution (0 clean, 1 offending).
+ * This is the gate that makes literal/AST anchoring the enforced default.
+ */
+export function reportMinified(root) {
+  const offenders = scanMinifiedShapeAnchors(root);
+  if (offenders.length === 0) {
+    console.log('lint-anchors: minified-shape scan clean (every inline anchor carries a stable literal or is allowlisted)');
+    return 0;
+  }
+  console.error(
+    `lint-anchors: ${offenders.length} raw minified-shape anchor${offenders.length === 1 ? '' : 's'} ` +
+    `not anchored on a stable literal and not in ALLOWED_REGEX_ANCHORS\n`
+  );
+  for (const o of offenders) {
+    console.error(`  - ${o.file}: ${o.reason}`);
+    console.error(`      /${o.source.length > 70 ? o.source.slice(0, 70) + '…' : o.source}/`);
+  }
+  console.error(
+    `\n  Re-anchor on the stable string the bundle keeps across versions and resolve` +
+    `\n  the rotated function via findFunctionByLiteral() / resolveAnchorLiteral()` +
+    `\n  (docs/anchors.md §1). The ALLOWED_REGEX_ANCHORS allowlist in` +
+    `\n  scripts/lint-anchors.mjs is shrinking-only — do not add new entries.`
+  );
+  return 1;
+}
+
+/**
  * Report brittle inline anchors found by scanPatchFiles. Returns the exit code
  * contribution (0 clean, 1 brittle). Mirrors report()'s style.
  */
@@ -235,5 +440,6 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const root = path.resolve(here, '..');
   const registryCode = report(anchors);
   const inlineCode = reportInline(root);
-  process.exit(registryCode || inlineCode);
+  const minifiedCode = reportMinified(root);
+  process.exit(registryCode || inlineCode || minifiedCode);
 }

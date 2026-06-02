@@ -5,6 +5,7 @@ include scripts/mk/vars.mk
 include scripts/mk/cli.mk
 
 .PHONY: help refmap refmap-check smoke-bridge smoke-integration \
+        smoke-integration-roundtrip \
         bridge-host bridge-host-stop bridge-tail bridge-submit \
         verticals-check lint lint-dead lint-unused
 
@@ -13,7 +14,11 @@ include scripts/mk/cli.mk
 # Default socket / token for the interactive `bridge-host` + tier-3 smoke.
 # Override on the command line: make bridge-host CC_BRIDGE_ADDR=tcp://127.0.0.1:7878
 CC_BRIDGE_ADDR  ?= unix:/tmp/ccpatch.sock
-CC_BRIDGE_TOKEN ?= devtoken
+# The bridge token is root-equivalent: anyone presenting it can submit prompts
+# and dispatch tools in the running CLI. Generate a random ephemeral token per
+# invocation rather than shipping a guessable literal. Falls back to a clearly
+# marked stub only if openssl is unavailable (warned about in the dev targets).
+CC_BRIDGE_TOKEN ?= $(shell openssl rand -hex 16 2>/dev/null || echo "INSECURE-STUB-set-CC_BRIDGE_TOKEN")
 
 smoke-bridge: ## Tier 1 — NDJSON protocol smoke against a stubbed host (no patched CLI)
 	@node tests/smoke_bridge.mjs
@@ -21,6 +26,7 @@ smoke-bridge: ## Tier 1 — NDJSON protocol smoke against a stubbed host (no pat
 bridge-host: ## Tier 2 — boot a stub bridge host so you can prod it with ccpatch-bridge / nc
 	@echo "[bridge-host] CC_BRIDGE_ADDR=$(CC_BRIDGE_ADDR)"
 	@echo "[bridge-host] CC_BRIDGE_TOKEN=$(CC_BRIDGE_TOKEN)"
+	@case "$(CC_BRIDGE_TOKEN)" in INSECURE-STUB*) echo "[bridge-host] WARNING: openssl missing — using an INSECURE stub token. Set CC_BRIDGE_TOKEN to a real secret (e.g. openssl rand -hex 16)." ;; esac
 	@CC_BRIDGE_ADDR=$(CC_BRIDGE_ADDR) CC_BRIDGE_TOKEN=$(CC_BRIDGE_TOKEN) node tests/bridge_host.mjs
 
 bridge-host-stop: ## Tier 2 — kill any stray bridge-host and unlink the unix socket
@@ -51,6 +57,9 @@ patch-daemon: ## Tier 3 prep — patch cli with the daemon profile (event_bus + 
 
 smoke-integration: ## Tier 3 — drive a real patched CLI over the bridge (uses CCPATCH_INTEGRATION_CLI if set, else latest releases/)
 	@node tests/smoke_integration.mjs
+
+smoke-integration-roundtrip: ## Tier 3 — boot a daemon bundle, drive a full agent-loop + tool-dispatch round-trip with a stubbed API (skips cleanly if no daemon bundle)
+	@node tests/integration_roundtrip.mjs
 
 verticals-check: lint smoke-bridge ## Tier 1 — full vertical CI gate (lint + protocol smoke)
 	@echo "[verticals-check] OK"

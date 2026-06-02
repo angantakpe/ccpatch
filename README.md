@@ -20,7 +20,7 @@ ccpatch is not a fork. It ships **no Anthropic code**. It transforms a copy of t
 - **Anchor → transform → verify.** Each patch declares a stable string anchor (or AST anchor via windowed Acorn parse), a transform function over the bundle text, and a `verify.present` / `verify.absent` assertion that runs immediately after apply. Anchor misses are logged with fuzzy candidates so drift is diagnosable, not silent.
 - **Shims-as-patches.** Substantial logic lives in real `.mjs` files under `core/` and `extensions/`. Patches inject a small wrapper at the anchor that calls into the shim, so contributors edit normal JavaScript instead of escaped patch strings.
 - **Phase-based runner.** Patches declare `phase: pre | main | post` and optional `dependsOn`. The runner topo-sorts within each phase and enforces that dependencies live in the same or an earlier phase.
-- **Native binary repack.** For versions shipped as a Bun-compiled binary, ccpatch extracts the embedded JS, patches it, and splices the patched JS back into the binary at the original byte offset (direct buffer rewrite — no `node-lief`, no offset fixups). The embedded JS region must stay the **same byte length** as the original, because Bun's trailer stores absolute file offsets this repacker does not rewrite. When the patched JS is *smaller*, it is padded with insignificant whitespace to the exact original size. When it is *larger* — which can happen because patches add code — repack **fails loudly** rather than corrupt the binary; that version then has to be built from the plain-JS path (or with a reduced patch set) until trailer-offset rewriting is implemented.
+- **Native binary repack.** For versions shipped as a Bun-compiled binary, ccpatch extracts the embedded JS, patches it, and splices the patched JS back into the binary at the original byte offset (direct buffer rewrite — no `node-lief`). When the patched JS is *smaller* than the original region it is padded with insignificant whitespace; when it is the *same* size it is spliced as-is. When it is *larger* — which can happen because patches add code — ccpatch decodes Bun's `StandaloneModuleGraph` and rewrites every blob-relative offset (the `payload_len` header, `byte_count`, module-record `StringPointer`s, and the ELF section/segment offsets) by the growth delta, then gates the result on a smoke check that the repacked binary boots the embedded entrypoint (`bin/bun-sea-graph.mjs`). This grow path is implemented for ELF (linux-x64) Bun binaries; Mach-O / PE growth still **fails loudly** rather than risk corruption, and those targets fall back to the plain-JS path or a reduced patch set.
 
 ---
 
@@ -50,9 +50,13 @@ There are three layers, and they wrap each other: **`make` targets → `bin/patc
 | Drift / health check | `make doctor` | Read-only anchor-health check against the installed bundle (wraps `bin/patch-cli.mjs doctor`). |
 | Coverage | `make patch-coverage` | Apply + smoke-run + cross-reference apply-time results with runtime hits (wraps `bin/patch-cli.mjs coverage`). |
 | Revert a patched bundle | `node bin/patch-cli.mjs revert <bundle>` | No `make` wrapper — restores each patched region from the recorded pre-patch sha. |
+| Author a new patch | `make new-patch NAME=my_feature` | Scaffolds a manifest-valid patch stub (wraps `bin/scaffold-patch.mjs`). Add `KIND=prefix\|free\|postfix\|transpiler\|splice\|flag` and `CATEGORY=extension\|core`. The scaffolder prints the exact single-patch dry-run command to iterate with. |
+| Interactive TUI | `node bin/patch-tui.mjs` | Menu-driven front-end over the same subcommands (apply, doctor, diff, …) — handy for browsing/toggling patches without memorizing flags. Run with `--help` for details. |
 | Everything else | `node bin/patch-cli.mjs <subcommand>` | `explain`, `capabilities`, `diff`, `heal`, `fallback-capture`, … — subcommands without a dedicated `make` target. |
 
 Rule of thumb: prefer `make` for day-to-day work; drop to `bin/patch-cli.mjs` when you need a subcommand or argument the target doesn't pass through; touch the runner modules only when authoring or debugging patches.
+
+> **npm scripts mirror the `make` targets.** `package.json` exposes `npm run test:patches`, etc., which run the same checks as the corresponding `make` target (note the naming drift: the npm script is `test:patches` while the make target is `test-patches`). Use whichever fits your workflow.
 
 ---
 

@@ -236,7 +236,12 @@ function main(argv = process.argv) {
     return 1;
   }
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(filePath, TEMPLATES[opts.kind](opts.name), 'utf8');
+  // Prepend `// @ts-check` so the @type JSDoc on each template is actually
+  // enforced by the editor and by `make lint-dead` (tsc --checkJs), turning a
+  // mistyped manifest field into an author-time error instead of a build-time one.
+  const body = TEMPLATES[opts.kind](opts.name);
+  const content = body.startsWith('// @ts-check') ? body : `// @ts-check\n${body}`;
+  fs.writeFileSync(filePath, content, 'utf8');
   console.log(`Wrote ${filePath}`);
 
   const registryWrote = appendFixtureStub(opts.name);
@@ -244,8 +249,19 @@ function main(argv = process.argv) {
     console.log(`Appended fixture stub for "${opts.name}" to tests/fixtures/registry.mjs`);
   }
 
-  console.log(`Next: open it, fill in the TODOs, then run`);
-  console.log(`  node bin/patch-cli.mjs <bundle> --patch ${opts.name} --dry-run`);
+  console.log(`Next: open it, fill in the TODOs, then dry-run JUST this patch:`);
+  // Two positionals are required (<input> <output>); a single `--patch` in the
+  // output slot is rejected. We point the output at /tmp since --dry-run never
+  // writes it. A lone --patch X --dry-run relaxes the capability-ack gate, but
+  // --allow-unacked keeps it working even if you later drop --dry-run.
+  console.log(`  node bin/patch-cli.mjs <bundle> /tmp/${opts.name}-out.mjs --patch ${opts.name} --dry-run --allow-unacked`);
+  if (registryWrote) {
+    console.log(
+      `Note: the Layer 1/2 verification tests will SKIP "${opts.name}" until you replace its\n` +
+      `      null fixture in tests/fixtures/registry.mjs with a real anchor-bearing fragment\n` +
+      `      (so \`make test-patches\` does not silently pass it as skipped).`
+    );
+  }
   return 0;
 }
 

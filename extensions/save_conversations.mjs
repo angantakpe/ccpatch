@@ -14,18 +14,36 @@ export default {
 // [PATCH] Conversation Saver
 // ══════════════════════════════════════════════════════════════════════════
 (async () => {
-  const { appendFileSync, mkdirSync: _mkdirSync } = await import('fs');
-  const { join: _join } = await import('path');
-  
-  const CONVO_DIR = _join(process.env.CC_PROJECT_ROOT || process.cwd(), 'storage', 'conversations');
-  try { _mkdirSync(CONVO_DIR, { recursive: true }); } catch {}
-  
+  const { appendFileSync, mkdirSync: _mkdirSync, writeFileSync: _writeFileSync, existsSync: _existsSync } = await import('fs');
+  const { join: _join, resolve: _resolve, sep: _sep } = await import('path');
+
+  // Conversation transcripts are sensitive (full user/assistant text), so the
+  // dir+files are owner-only (0700 dir / 0600 files) — matching cache_responses.
+  // CC_PROJECT_ROOT is attacker-influenced (dotenv_loader now denies it from a
+  // repo-local .env, but a shell value or other caller could still point it
+  // elsewhere), so resolve the target and reject any path that escapes the
+  // expected project root via traversal.
+  const _projectRoot = _resolve(process.env.CC_PROJECT_ROOT || process.cwd());
+  const CONVO_DIR = _resolve(_projectRoot, 'storage', 'conversations');
+  // Defence in depth: the resolved transcript dir must stay strictly under
+  // <projectRoot>/ (a malicious CC_PROJECT_ROOT or unexpected join result that
+  // points elsewhere is rejected rather than silently writing off-tree).
+  const _rootPrefix = _projectRoot.endsWith(_sep) ? _projectRoot : _projectRoot + _sep;
+  if (!(CONVO_DIR + _sep).startsWith(_rootPrefix)) {
+    console.error('[ccpatch] save_conversations: refusing to write outside project root (path traversal via CC_PROJECT_ROOT?) — disabled');
+    return;
+  }
+  try { _mkdirSync(CONVO_DIR, { recursive: true, mode: 0o700 }); } catch {}
+
   const sessionId = Date.now().toString(36);
   const convoFile = _join(CONVO_DIR, \`session-\${sessionId}.jsonl\`);
-  
+  // Create the transcript file 0600 up front so appends never land in a
+  // world/group-readable file (appendFileSync's mode only applies on create).
+  try { if (!_existsSync(convoFile)) _writeFileSync(convoFile, '', { mode: 0o600 }); } catch {}
+
   globalThis.__saveMessage__ = (role, content) => {
     const entry = { ts: new Date().toISOString(), role, content: content?.slice?.(0, 5000) || content };
-    appendFileSync(convoFile, JSON.stringify(entry) + '\\n');
+    appendFileSync(convoFile, JSON.stringify(entry) + '\\n', { mode: 0o600 });
   };
   
   // Conversation logging enabled (silent - check ~/.cc/conversations/)
@@ -100,7 +118,7 @@ export default {
 })();
 `;
           const _CJS_IIFE = '(function(exports, require, module, __filename, __dirname) {';
-    if (code.includes('#!/usr/bin/env node')) {
+    if (code.startsWith('#!/usr/bin/env node')) {
       return code.replace('#!/usr/bin/env node', '#!/usr/bin/env node' + hook);
     } else if (code.includes(_CJS_IIFE)) {
       return code.replace(_CJS_IIFE, () => _CJS_IIFE + hook);

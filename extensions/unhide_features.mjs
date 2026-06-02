@@ -31,11 +31,13 @@ export default {
       });
       for (const name of seen) console.log('  [unhide_features] exposed: ' + name + '-gated');
 
-      // 2. H-2: Second pass - catch literal isHidden(){return!0} occurrences
+      // 2. H-2: Second pass - catch literal isHidden(){return!0} occurrences.
+      // Count via the replace callback so the bundle is scanned once, not twice
+      // (a separate match()+replace() doubled this pass's cost on the 15MB bundle).
       const hardcodedRe = /isHidden\(\)\{return!0\}/g;
-      const hardcodedCount = (code.match(hardcodedRe) || []).length;
+      let hardcodedCount = 0;
+      code = code.replace(hardcodedRe, () => { hardcodedCount++; return 'isHidden(){return!1}'; });
       if (hardcodedCount > 0) {
-        code = code.replace(hardcodedRe, 'isHidden(){return!1}');
         console.log('  [unhide_features] exposed: ' + hardcodedCount + ' hardcoded isHidden(){return!0}');
         patched += hardcodedCount;
       }
@@ -73,8 +75,10 @@ export default {
       // rotating `Z$`) is captured by a group so it survives minifier rotation.
       // This flag is not present in current bundles, so the regex no-ops cleanly
       // there — it activates only once the flag ships.
+      // Cheap literal pre-check: the flag ships in no current bundle, so skip the
+      // full-bundle regex scan entirely (indexOf short-circuits) in the common case.
       const streamRe = /([A-Za-z_$][\w$]*)\("tengu_streaming_tool_execution2",!1\)/;
-      const streamMatch = streamRe.exec(code);
+      const streamMatch = code.includes('"tengu_streaming_tool_execution2"') ? streamRe.exec(code) : null;
       if (streamMatch) {
         const helper = streamMatch[1];
         code = code.replace(streamRe, helper + '("tengu_streaming_tool_execution2",!0)');

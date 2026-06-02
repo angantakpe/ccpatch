@@ -107,10 +107,13 @@ export default {
 `;
     const _SHEBANG_ = '#!/usr/bin/env node';
     const _CJS_IIFE_ = '(function(exports, require, module, __filename, __dirname)';
-    if (code.includes(_SHEBANG_)) return code.replace(_SHEBANG_, _SHEBANG_ + '\n' + hook);
-    // Use includes() + replace() — fetch_interceptor may have prepended code before
-    // the CJS-IIFE, so startsWith() would miss it. Use function replacement to
-    // prevent any $-patterns in the hook from being expanded by replace().
+    // Match the shebang with startsWith(), NOT includes(): Bun-extracted bundles
+    // have no leading shebang but contain "#!/usr/bin/env node" as an interior
+    // string literal, so includes() would splice the hook into dead string content.
+    if (code.startsWith(_SHEBANG_)) return code.replace(_SHEBANG_, _SHEBANG_ + '\n' + hook);
+    // No leading shebang: anchor on the CJS-IIFE head (matches wherever it sits,
+    // even if earlier patches prepended code). Function replacement prevents any
+    // $-patterns in the hook from being expanded by replace().
     if (code.includes(_CJS_IIFE_)) return code.replace(_CJS_IIFE_, () => hook + _CJS_IIFE_);
     console.warn('  [!] tool_result_error_content: anchor not found — skipping');
     return code;

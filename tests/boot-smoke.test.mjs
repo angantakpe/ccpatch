@@ -68,6 +68,29 @@ function runPatched(binPath, args, timeoutMs = BOOT_TIMEOUT_MS) {
 
 const binPath = findPatchedBinary();
 
+/**
+ * Run the headless integration script as a child. It exits:
+ *   0 — agent loop + tool dispatch round-trip verified on a daemon bundle
+ *   1 — assertion failure (real breakage)
+ *   2 — environment skip (no daemon-profile bundle available)
+ * Returns { code, stdout, stderr, timedOut }.
+ */
+function runScript(scriptPath, timeoutMs) {
+  return new Promise((resolveFn) => {
+    const child = spawn(process.execPath, [scriptPath], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env },
+    });
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, timeoutMs);
+    child.stdout.on('data', d => { stdout += d.toString(); });
+    child.stderr.on('data', d => { stderr += d.toString(); });
+    child.on('close', code => { clearTimeout(timer); resolveFn({ code, stdout, stderr, timedOut }); });
+  });
+}
+
 test('boot — patched binary --version exits 0 and prints version', async (t) => {
   if (!binPath) {
     t.skip('no patched binary found in releases/ — run `make patch-claude-code` first');
@@ -110,4 +133,36 @@ test('boot — no uncaught-exception markers in stderr during init', async (t) =
       `stderr matched fatal pattern ${pat}\nstderr:\n${stderr.slice(0, 2000)}`,
     );
   }
+});
+
+// ── Headless agent-loop + tool-dispatch round-trip ──────────────────────────
+// `--version` exits before the agent loop, tool dispatch, API client, or bridge
+// ever initialize, so the boots above prove only that init doesn't throw. This
+// tier drives the REAL running CLI on a daemon-profile bundle with a stubbed
+// Anthropic API (no network, no credentials): it must boot, issue a query,
+// dispatch a tool, feed the result back, and exit clean — so "tests pass" means
+// "the patched CLI actually runs," not just "it prints its version."
+//
+// Delegated to tests/integration_roundtrip.mjs (also runnable via
+// `npm run test:integration` / `make smoke-integration-roundtrip`). It skips
+// (exit 2) when no daemon-profile bundle is present, which is the common case
+// for the fast suite — build one with `make patch-daemon` to exercise it.
+const INTEGRATION_TIMEOUT_MS = 150_000;
+const integrationScript = resolve(__dirname, 'integration_roundtrip.mjs');
+
+test('boot — agent loop + tool dispatch round-trip on daemon bundle (stubbed API)', async (t) => {
+  if (!existsSync(integrationScript)) {
+    t.skip('integration_roundtrip.mjs not found');
+    return;
+  }
+  const { code, stdout, stderr, timedOut } = await runScript(integrationScript, INTEGRATION_TIMEOUT_MS);
+
+  assert.equal(timedOut, false, `integration round-trip exceeded ${INTEGRATION_TIMEOUT_MS}ms\nstdout:\n${stdout.slice(0, 1000)}\nstderr:\n${stderr.slice(0, 2000)}`);
+  if (code === 2) {
+    // No daemon-profile bundle available — clean skip, like the --version tier.
+    t.skip((stderr.match(/INTEGRATION SKIP:[^\n]*/) || ['no daemon bundle'])[0]);
+    return;
+  }
+  assert.equal(code, 0, `integration round-trip failed (exit ${code})\nstdout:\n${stdout.slice(0, 1000)}\nstderr:\n${stderr.slice(0, 3000)}`);
+  assert.match(stdout, /ran the agent loop \+ dispatched a tool/, `unexpected success output:\n${stdout.slice(0, 1000)}`);
 });
