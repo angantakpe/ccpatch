@@ -11,7 +11,7 @@ import { createPatch } from 'diff';
 // ever differs: it just recomputes.
 let lastHashStr = null;
 let lastHashVal = null;
-function sha256(s) {
+export function sha256(s) {
   if (lastHashStr === s && lastHashVal !== null) return lastHashVal;
   const v = createHash('sha256').update(s, 'utf8').digest('hex');
   lastHashStr = s;
