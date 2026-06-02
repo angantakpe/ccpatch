@@ -384,7 +384,8 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
       // unhide_features) then yields many small REAL spans rather than one
       // ~3.5MB envelope that intersects almost anything — so non-strict overlaps
       // now match what strict mode would flag as FATAL.
-      const sp = structuredPatch(t.name, t.name, t._preCode, t._effectiveCode, 'pre', 'post', { context: 0 });
+      // Issue #6: reuse the _sp cached by applySinglePatch instead of recomputing.
+      const sp = t._sp ?? structuredPatch(t.name, t.name, t._preCode, t._effectiveCode, 'pre', 'post', { context: 0 });
       const raw = diffSpansFromPatch(t._preCode, sp);
       t.diffSpans = frame.shiftToOriginal(raw, t._deltaBefore);
     }
