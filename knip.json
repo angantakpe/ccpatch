@@ -9,6 +9,7 @@
     "scripts/codemod-declarative.mjs",
     "scripts/print-banner.mjs",
     "scripts/anchor-report.mjs",
+    "scripts/verify-bundle-sha.mjs",
     "runner/cli.mjs",
     "tools/ccpatch-bridge.mjs",
     "tools/anchor-doctor.mjs",

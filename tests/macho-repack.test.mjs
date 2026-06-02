@@ -53,7 +53,7 @@ function buildBlob(modules) {
   }
   const modulesOff = cursor;
   const recArray = Buffer.alloc(modules.length * RECORD_SIZE);
-  modules.forEach((m, i) => {
+  modules.forEach((_m, i) => {
     const base = i * RECORD_SIZE;
     // StringPointer name @0, contents @8, rest (sourcemap/bytecode/module_info/origin) zeroed.
     recArray.writeUInt32LE(meta[i].nameOff, base + 0);

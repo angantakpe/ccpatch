@@ -157,7 +157,7 @@ export async function runDoctorCore(options, patches, logger) {
   // WS6 Item 8: report whether the native single-executable (Bun SEA) repack can
   // achieve the FULL patch set on THIS host, or whether it is reduced/blocked by
   // the platform's grow-path availability. Previously documented only in README.
-  reportNativePlatform(options, names, logger);
+  reportNativePlatform(names, logger);
 
   if (unverified > 0 && !options.strict) {
     logger.log(`  [warning] ${unverified} patch(es) have weak verify (only 'present'). Strengthen with verify.absent or verify.count.`);
@@ -185,7 +185,7 @@ export async function runDoctorCore(options, patches, logger) {
  *
  * Informational only — never changes the doctor exit code.
  */
-function reportNativePlatform(options, names, logger) {
+function reportNativePlatform(names, logger) {
   const skipText = process.env.CCPATCH_REPACK_SKIP || null;
   const skip = skipText ? parseRepackSkip(skipText) : null;
   if (skip) {
