@@ -8,9 +8,12 @@ name: ci
 # files and all 5 lints running on no automated machine. This workflow closes
 # that gap:
 #
-#   lint-and-test  — every push/PR: `npm run lint` + `npm run test:all`.
-#                    Needs no patched bundle, so it's fast and never flakes on
-#                    upstream availability.
+#   lint-and-test  — every push/PR: `bun run lint` + `bun run test:all`, plus
+#                    the supply-chain gates: a frozen-lockfile integrity check
+#                    (`bun install --frozen-lockfile`) and a dependency audit
+#                    that fails on high/critical advisories. Needs no patched
+#                    bundle, so it's fast and never flakes on upstream
+#                    availability.
 #   native-pipeline — every push/PR: exercises the REAL shipping path
 #                    (extract -> patch -> repack into the native Bun binary),
 #                    then boots the repacked binary. npm tarballs ship a native
@@ -39,14 +42,51 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # bun.lock is the SINGLE SOURCE OF TRUTH for dependencies (Item 3).
+      # package-lock.json was removed; dependency installs go through bun against
+      # bun.lock, never npm. node remains available below only because the test
+      # suite runs `node --test`.
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
 
-      - name: Install dependencies
-        run: npm ci
+      # Lockfile integrity / sync guard (Item 3 + Item 6).
+      # `--frozen-lockfile` installs strictly from bun.lock and FAILS if the
+      # lockfile would have to change to satisfy package.json — i.e. bun.lock is
+      # out of sync with package.json, or has been tampered with. This single
+      # step doubles as both the install and the lockfile-integrity check.
+      - name: Install dependencies (frozen lockfile = integrity check)
+        run: bun install --frozen-lockfile
+
+      # Supply-chain: dependency audit (Item 6).
+      # Mechanically backs SECURITY.md's posture (the patcher makes no network
+      # calls, ships no telemetry, no native build deps) as far as CI can: a
+      # known-vulnerable dependency must not slip in. Fails the build on
+      # high/critical advisories. `bun audit` is preferred; if this bun build
+      # lacks the subcommand we fall back to `npm audit` against the same
+      # dependency tree, and if NEITHER is available we skip-with-note rather
+      # than false-fail.
+      - name: Dependency audit (fail on high/critical)
+        run: |
+          set -euo pipefail
+          if bun audit --help >/dev/null 2>&1; then
+            echo "Running: bun audit --audit-level=high"
+            bun audit --audit-level=high
+          elif command -v npm >/dev/null 2>&1; then
+            echo "bun audit unavailable; falling back to: npm audit --omit=dev --audit-level=high"
+            npm audit --omit=dev --audit-level=high
+          else
+            echo "::warning::no audit subcommand available (bun audit absent, npm missing); skipping dependency audit"
+          fi
+
+      # Provenance attestation for PUBLISHED artifacts is intentionally NOT here:
+      # it is handled in the publish workflow (WS5) via `npm publish --provenance`.
 
       # lint:types runs `gen-types` then `tsc`. Regenerating types/patch.d.ts in
       # CI is a no-op when the committed types are current; if they drift, the
@@ -57,10 +97,10 @@ jobs:
       # a minified shape without a stable literal and is not in the shrinking-only
       # ALLOWED_REGEX_ANCHORS allowlist. See docs/anchors.md §3.
       - name: Lint
-        run: npm run lint
+        run: bun run lint
 
       - name: Run full test suite
-        run: npm run test:all
+        run: bun run test:all
 
   native-pipeline:
     runs-on: ubuntu-latest
@@ -68,14 +108,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # bun.lock is the single source of truth; install via bun (see lint-and-test).
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Install dependencies (frozen lockfile)
+        run: bun install --frozen-lockfile
 
       # Pin to @latest stable. The native binary is shipped per-platform on npm
       # (@anthropic-ai/claude-code-linux-x64); `make patch-claude-code-native`
@@ -156,7 +201,7 @@ jobs:
 
       - name: Boot smoke test (JS bundle)
         if: steps.probe.outputs.available == 'true'
-        run: npm run test:boot
+        run: bun run test:boot
 
       # Deepen the smoke beyond `--version`: build a daemon-profile bundle (the
       # full headless stack — event_bus + bridge + expose_tool_dispatch +
@@ -178,4 +223,4 @@ jobs:
       - name: Integration round-trip (agent loop + tool dispatch, stubbed API)
         if: steps.probe.outputs.available == 'true'
         timeout-minutes: 4
-        run: npm run test:integration
+        run: bun run test:integration

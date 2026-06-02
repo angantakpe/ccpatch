@@ -1,4 +1,5 @@
 // runner/ast-anchor.mjs
+import { createHash } from 'node:crypto';
 import { findClosingBrace } from './brace-walker.mjs';
 import { getAst } from './ast-cache.mjs';
 
@@ -21,13 +22,50 @@ import { getAst } from './ast-cache.mjs';
  * `WeakMap<code, Map<literal, number[]>>`, but JS WeakMap keys MUST be objects
  * (or symbols) — a raw string primitive is rejected. Since findFunctionByLiteral
  * takes a raw string and its signature is locked, we use the practical
- * equivalent: a plain `Map<code, Map<literal, number[]>>` bounded by a small
- * LRU so distinct interleaved bundles coexist without evicting each other,
- * while still letting old bundle strings be GC'd once they age out of the LRU.
- * resetBundleIndex() clears the whole cache for test isolation.
+ * equivalent: a plain Map keyed by a short content DIGEST of the bundle, bounded
+ * by a small LRU so distinct interleaved bundles coexist without evicting each
+ * other. resetBundleIndex() clears the whole cache for test isolation.
+ *
+ * Why a digest key (not the raw `code` string):
+ *   Keying a Map directly on the full ~16 MB bundle string is subtle and costly.
+ *   It relies on V8 lazily caching each string's hash to avoid an O(n) rehash on
+ *   every Map probe, and — more importantly — it pins up to MAX_CACHED_BUNDLES
+ *   *entire* 16 MB bundle strings alive as Map keys (≈128 MB of retained source).
+ *   Replacing the key with a fixed-width sha1 hex digest keeps only the small
+ *   digest strings as keys; the bundle source itself can be GC'd as soon as the
+ *   caller drops it. sha1 (not a fast non-crypto hash) is deliberate: a key
+ *   collision here would return another bundle's literal→offset map and corrupt
+ *   the patch, so we want a real cryptographic digest's collision resistance.
+ *
+ * Digest cost / memoization tradeoff:
+ *   Hashing 16 MB is itself an O(n) scan, so naively digesting on every call
+ *   would erase the win (findFunctionByLiteral is called many times per bundle).
+ *   A WeakMap<code, digest> would be ideal but string keys are illegal there.
+ *   Instead we memoize the SINGLE most-recent (codeRef, digest) pair via an
+ *   identity (===) check: consecutive calls within the same bundle reuse the
+ *   cached digest and never rehash. The common access pattern is exactly that —
+ *   one bundle string processed by a burst of calls — so this one-slot identity
+ *   cache eliminates essentially all redundant hashing. Interleaving two bundles
+ *   would defeat the memo and rehash on each switch; that is rare and still
+ *   correct, just O(n) on the switch.
  */
 const MAX_CACHED_BUNDLES = 8;
-const bundleIndexCache = new Map(); // Map<code, Map<literal, number[]>>, insertion-ordered LRU
+const bundleIndexCache = new Map(); // Map<digest, Map<literal, number[]>>, insertion-ordered LRU
+
+// One-slot identity memo for the last hashed bundle, so repeated calls with the
+// SAME string object skip the O(n) rehash. Identity (===) only — a different
+// string object with identical content correctly rehashes (and yields the same
+// digest, hence the same cache entry).
+let lastCodeRef = null;
+let lastDigest = null;
+
+function digestOf(code) {
+  if (code === lastCodeRef) return lastDigest;
+  const digest = createHash('sha1').update(code).digest('hex');
+  lastCodeRef = code;
+  lastDigest = digest;
+  return digest;
+}
 
 /**
  * Reset the cached per-bundle index. Useful for test isolation; clears every
@@ -38,18 +76,23 @@ const bundleIndexCache = new Map(); // Map<code, Map<literal, number[]>>, insert
  */
 export function resetBundleIndex() {
   bundleIndexCache.clear();
+  // Drop the identity memo too, so a post-reset call recomputes cleanly.
+  lastCodeRef = null;
+  lastDigest = null;
 }
 
 /**
  * Fetch (or lazily create) the literal→offsets map for a given `code` string,
  * touching it as most-recently-used and evicting the oldest bundle when the
- * cache exceeds MAX_CACHED_BUNDLES.
+ * cache exceeds MAX_CACHED_BUNDLES. Keyed by the bundle's content digest (see
+ * the digestOf memo above) rather than the raw 16 MB string.
  */
 function indexForCode(code) {
-  let litMap = bundleIndexCache.get(code);
+  const key = digestOf(code);
+  let litMap = bundleIndexCache.get(key);
   if (litMap === undefined) {
     litMap = new Map();
-    bundleIndexCache.set(code, litMap);
+    bundleIndexCache.set(key, litMap);
     if (bundleIndexCache.size > MAX_CACHED_BUNDLES) {
       // Evict the least-recently-used (oldest insertion) bundle.
       const oldestKey = bundleIndexCache.keys().next().value;
@@ -57,8 +100,8 @@ function indexForCode(code) {
     }
   } else {
     // Mark as most-recently-used: re-insert to move to the end of the order.
-    bundleIndexCache.delete(code);
-    bundleIndexCache.set(code, litMap);
+    bundleIndexCache.delete(key);
+    bundleIndexCache.set(key, litMap);
   }
   return litMap;
 }

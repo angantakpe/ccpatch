@@ -37,7 +37,7 @@ function toList(x) {
  *                                `status`/`detail` (if provided) are included.
  * @param {string} [meta.status]  doctor status ('drift'|'missing'); omitted when absent
  * @param {string|null} [meta.detail]  doctor detail string; omitted when absent
- * @returns {{candidates: Array, verifyFailed: string[], probesCount: number, record: object}}
+ * @returns {{candidates: object[], verifyFailed: string[], probesCount: number, record: object}}
  */
 export function buildDriftRecord(code, probesIn = {}, meta = {}) {
   const declaredLiteral = probesIn.literal ?? null;

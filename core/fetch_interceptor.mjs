@@ -35,10 +35,25 @@ globalThis.__ccpOnFetchStream = (name, handler) => {
 // A4: route swallowed subscriber errors to a debug sink instead of /dev/null.
 // Stays silent unless CLAUDE_DEBUG=1 (the convention the 'debug' patch uses),
 // preserving the current quiet behaviour while making buggy subscribers visible.
+//
+// WS6 Item 5 (paranoid/strict mode): when the bundle was built/launched with
+// paranoid mode, swallowed subscriber errors become LOUD instead of silent.
+// This is injected code running inside the patched CLI (not the patcher), so the
+// toggle is read at RUNTIME from the environment: CCPATCH_PARANOID === '1'. The
+// ccpatch CLI's --paranoid build flag exports CCPATCH_PARANOID=1 into the build
+// process env, which is inherited by anything it spawns; operators can also set
+// CCPATCH_PARANOID=1 directly when launching the patched CLI to surface these
+// errors without a rebuild. In paranoid mode we ALWAYS write the error to stderr
+// (regardless of CLAUDE_DEBUG); the original blast-radius containment is kept
+// (the error is still caught — the CLI's network path is never disrupted), it is
+// merely no longer invisible.
 globalThis.__ccpBusWarn = globalThis.__ccpBusWarn || function __ccpBusWarn(name, phase, err) {
-  if (process.env.CLAUDE_DEBUG !== '1' && !globalThis.__ccpDebug) return;
+  var paranoid = false;
+  try { paranoid = (process.env.CCPATCH_PARANOID === '1'); } catch (_) {}
+  if (!paranoid && process.env.CLAUDE_DEBUG !== '1' && !globalThis.__ccpDebug) return;
   try {
-    console.error('[ccp:bus] subscriber ' + name + ' threw in ' + phase + ': ' + ((err && err.message) || err));
+    var prefix = paranoid ? '[ccp:bus][paranoid] ' : '[ccp:bus] ';
+    console.error(prefix + 'subscriber ' + name + ' threw in ' + phase + ': ' + ((err && err.message) || err));
   } catch (_) {}
 };
 

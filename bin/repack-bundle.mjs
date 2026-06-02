@@ -28,10 +28,31 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { parseModules } from '../tools/bun-decompiler/decompile.mjs';
 import { growBunSeaBinary, parseElfBunGraph } from './bun-sea-graph.mjs';
+import { growMachoSea } from './macho-sea-graph.mjs';
 
 const log  = (msg) => console.log(`[repack] ${msg}`);
 const warn = (msg) => console.warn(`[repack:warn] ${msg}`);
 const die  = (msg) => { console.error(`[repack:error] ${msg}`); process.exit(1); };
+
+/**
+ * Emit a STRUCTURED, machine-readable skip line to stdout when patches must be dropped
+ * because a target subtype has no grow path. WS6 (build CLI) parses this. Shape:
+ *
+ *   [repack:skip] {"reason":"native-grow-path-unavailable","platform":"<plat>","droppedPatches":[...],"detail":"..."}
+ *
+ * The leading token `[repack:skip] ` is the stable prefix; the remainder is a single-line
+ * JSON object. Keys: reason (stable enum string), platform (e.g. "darwin-arm64",
+ * "windows-x64", "macho-fat"), droppedPatches (array; may be empty when unknown), detail
+ * (human-readable string). Printed to STDOUT (not stderr) so it survives the die() that
+ * usually follows. Exported so WS6 / tests can assert on the exact shape.
+ */
+export function formatSkipLine({ reason, platform, droppedPatches = [], detail = '' }) {
+  const payload = JSON.stringify({ reason, platform, droppedPatches, detail });
+  return `[repack:skip] ${payload}`;
+}
+function emitSkipLine(info) {
+  console.log(formatSkipLine(info));
+}
 
 // Bun trailer format this repacker was validated against. The Bun SEA trailer that
 // follows the embedded JS is UNVERSIONED and UNDOCUMENTED: it is a struct of absolute
@@ -56,9 +77,20 @@ Arguments:
   output-binary     Destination path for the repacked native binary
 
 Options:
-  --require-smoke   Fail closed (non-zero exit) when the post-repack smoke check cannot be
-                    executed (cross-arch / CI sandbox), instead of skipping with a warning.
-                    Use this when building releases so a corrupt binary cannot ship unverified.
+  --allow-unverified  Opt OUT of the fail-closed default. When the post-repack smoke check
+                      cannot be executed (cross-arch / CI sandbox) it is SKIPPED with a warning
+                      instead of failing the build, and an embedded Bun version outside the
+                      validated set only warns instead of failing. Use only for local dev where
+                      you accept an unverified binary.
+  --require-smoke     DEPRECATED no-op alias kept for backward compatibility. The smoke check is
+                      REQUIRED by default now; this flag has no effect.
+
+  Env: CCPATCH_REPACK_ALLOW_UNVERIFIED=1 is honored as an equivalent to --allow-unverified
+       (for the Makefile/build glue that cannot thread the flag through).
+
+  By default (fail closed): the post-repack smoke check is REQUIRED. If it cannot be executed,
+  or the embedded Bun version's major.minor prefix is not in the validated set, the build FAILS
+  with a non-zero exit. Pass --allow-unverified to downgrade those to warnings.
 
 Example:
   node bin/repack-bundle.mjs \\
@@ -406,11 +438,13 @@ export function detectBunVersion(binary) {
 // ---------------------------------------------------------------------------
 
 function repack(originalBinaryPath, patchedJsPath, outputBinaryPath, options = {}) {
-  // requireSmoke: FAIL CLOSED when the post-repack smoke check cannot be executed (cross-arch /
-  // CI sandbox), instead of silently skipping. Releases are built exactly in such environments,
-  // so a corrupt binary would otherwise ship with no signal. Default (false) keeps the
-  // skip-with-warning behaviour for local dev.
-  const requireSmoke = options.requireSmoke === true;
+  // FAIL CLOSED BY DEFAULT. The post-repack smoke check is REQUIRED unless the caller opts out
+  // with --allow-unverified. Releases are built in cross-arch / CI sandboxes where the old
+  // skip-with-warning default would silently hide a corrupt binary, so requireSmoke now defaults
+  // to true. `--allow-unverified` (options.allowUnverified) restores the skip-with-warning
+  // behaviour for local dev. `--require-smoke` is accepted as a now-redundant no-op alias.
+  const allowUnverified = options.allowUnverified === true;
+  const requireSmoke = !allowUnverified;
   // Validate inputs.
   if (!existsSync(originalBinaryPath)) {
     die(`Original binary not found: ${originalBinaryPath}`);
@@ -447,24 +481,43 @@ function repack(originalBinaryPath, patchedJsPath, outputBinaryPath, options = {
   // future Bun layout changes the trailer, a length-equal repack can still silently produce a
   // binary that launches as bare `bun`. We can't detect a trailer format change directly, so
   // we warn loudly when the embedded Bun version is outside the known-good set as a proxy.
+  // FAIL CLOSED on Bun-version drift (was a best-effort warn). If the embedded Bun version's
+  // major.minor prefix is not in VALIDATED_BUN_VERSIONS, the SEA trailer layout this repacker
+  // assumes may have changed and a repack could silently produce a bare-`bun` binary. We therefore
+  // ABORT unless --allow-unverified is passed. An UNDETECTABLE version is treated the same way:
+  // we cannot confirm the layout, so by default we refuse rather than ship blind.
   const detectedBun = detectBunVersion(binary);
   if (detectedBun) {
     const known = VALIDATED_BUN_VERSIONS.some(v => detectedBun.startsWith(v + '.') || detectedBun === v || detectedBun.startsWith(v));
     if (known) {
       log(`Detected Bun version ${detectedBun} (within validated set ${VALIDATED_BUN_VERSIONS.join(', ')}).`);
-    } else {
+    } else if (allowUnverified) {
       warn(
         `Detected Bun version ${detectedBun}, which is OUTSIDE the validated set ` +
+        `[${VALIDATED_BUN_VERSIONS.join(', ')}]. --allow-unverified set; proceeding anyway. This repacker ` +
+        `assumes the Bun ${VALIDATED_BUN_VERSIONS.join('/')} SEA trailer layout. If the trailer format ` +
+        `changed, the repacked binary may silently launch as bare \`bun\`. Verify the output before shipping.`
+      );
+    } else {
+      die(
+        `Detected Bun version ${detectedBun}, which is OUTSIDE the validated set ` +
         `[${VALIDATED_BUN_VERSIONS.join(', ')}]. This repacker assumes the Bun ${VALIDATED_BUN_VERSIONS.join('/')} ` +
-        `SEA trailer layout. If the trailer format changed, the repacked binary may silently launch ` +
-        `as bare \`bun\`. Verify the output runs the embedded entrypoint before shipping.`
+        `SEA trailer layout; a layout change could make the repacked binary silently launch as bare \`bun\`. ` +
+        `Failing closed. Add the version's major.minor prefix to VALIDATED_BUN_VERSIONS after verifying the ` +
+        `trailer layout, or pass --allow-unverified to override (local dev only).`
       );
     }
-  } else {
+  } else if (allowUnverified) {
     warn(
       `Could not detect the embedded Bun version; cannot confirm the SEA trailer layout matches ` +
-      `the validated set [${VALIDATED_BUN_VERSIONS.join(', ')}]. Proceeding on the assumption that ` +
-      `the trailer is byte-compatible. Verify the repacked binary runs the embedded entrypoint.`
+      `the validated set [${VALIDATED_BUN_VERSIONS.join(', ')}]. --allow-unverified set; proceeding on the ` +
+      `assumption that the trailer is byte-compatible. Verify the repacked binary runs the embedded entrypoint.`
+    );
+  } else {
+    die(
+      `Could not detect the embedded Bun version; cannot confirm the SEA trailer layout matches the ` +
+      `validated set [${VALIDATED_BUN_VERSIONS.join(', ')}]. Failing closed rather than shipping an ` +
+      `unverified binary. Pass --allow-unverified to override (local dev only).`
     );
   }
 
@@ -525,6 +578,7 @@ function repack(originalBinaryPath, patchedJsPath, outputBinaryPath, options = {
   // reuses the same trimEnd().endsWith('})') logic normalisePatchedJs validated against.
   let output;
   let isGrow = false;
+  let machoSignatureStripped = false;
   if (patchedBuf.length <= originalRegionSize) {
     if (patchedBuf.length < originalRegionSize) {
       const padBytes = originalRegionSize - patchedBuf.length;
@@ -552,29 +606,85 @@ function repack(originalBinaryPath, patchedJsPath, outputBinaryPath, options = {
   } else {
     // Grow path — patched JS is larger than the original region.
     const delta = patchedBuf.length - originalRegionSize;
-    if (!isElf) {
+
+    if (isFatMachO) {
+      // Fat/universal Mach-O: we would have to thin to the matching arch slice, grow that, and
+      // rebuild the fat wrapper (re-aligning every slice). That is not implemented — fail loud
+      // and emit the structured skip line WS6 parses.
+      emitSkipLine({
+        reason: 'native-grow-path-unavailable',
+        platform: 'macho-fat',
+        droppedPatches: [],
+        detail: `Patched JS exceeds the original region by ${delta} bytes; grow-repack does not support ` +
+                `fat/universal Mach-O (thin to a single arch slice first).`,
+      });
       die(
         `Patched JS (${patchedBuf.length.toLocaleString()} bytes) exceeds the original JS region ` +
-        `(${originalRegionSize.toLocaleString()} bytes) by ${delta.toLocaleString()} bytes, and ` +
-        `grow-repack is currently implemented for ELF (linux-x64) binaries only. For this target, ` +
-        `reduce the patched content or build from the plain-JS path.`
+        `(${originalRegionSize.toLocaleString()} bytes) by ${delta.toLocaleString()} bytes, and grow-repack ` +
+        `does not support fat/universal Mach-O. Thin the binary to the matching arch slice first, or ` +
+        `reduce the patched content / build from the plain-JS path.`
       );
     }
+
+    if (!isElf && !isMachO) {
+      // Anything else (e.g. PE / Windows) has no grow path — fail loud with a structured skip line.
+      emitSkipLine({
+        reason: 'native-grow-path-unavailable',
+        platform: 'windows-or-unknown',
+        droppedPatches: [],
+        detail: `Patched JS exceeds the original region by ${delta} bytes; grow-repack is implemented for ` +
+                `ELF (linux) and thin Mach-O (darwin) only.`,
+      });
+      die(
+        `Patched JS (${patchedBuf.length.toLocaleString()} bytes) exceeds the original JS region ` +
+        `(${originalRegionSize.toLocaleString()} bytes) by ${delta.toLocaleString()} bytes, and grow-repack ` +
+        `is implemented for ELF (linux-x64) and thin Mach-O (darwin arm64/x64) only (PE/Windows is not ` +
+        `supported). Reduce the patched content or build from the plain-JS path.`
+      );
+    }
+
     log(`Patched JS exceeds the original region by ${delta.toLocaleString()} bytes — using Bun module-graph grow-repack.`);
-    try {
-      output = growBunSeaBinary(binary, region, patchedBuf, { log, warn });
-    } catch (e) {
-      die(
-        `Grow-repack failed: ${e.message}\n` +
-        `Refusing to emit a possibly-corrupt binary. Build this version from the plain-JS path ` +
-        `or with a reduced patch set.`
-      );
-    }
-    if (output.length !== binary.length + delta) {
-      die(
-        `Internal error: grown binary length (${output.length.toLocaleString()} bytes) does not ` +
-        `match expected (${(binary.length + delta).toLocaleString()} bytes). This is a bug in the grow-repacker.`
-      );
+    if (isElf) {
+      try {
+        output = growBunSeaBinary(binary, region, patchedBuf, { log, warn });
+      } catch (e) {
+        die(
+          `Grow-repack failed: ${e.message}\n` +
+          `Refusing to emit a possibly-corrupt binary. Build this version from the plain-JS path ` +
+          `or with a reduced patch set.`
+        );
+      }
+      if (output.length !== binary.length + delta) {
+        die(
+          `Internal error: grown binary length (${output.length.toLocaleString()} bytes) does not ` +
+          `match expected (${(binary.length + delta).toLocaleString()} bytes). This is a bug in the grow-repacker.`
+        );
+      }
+    } else {
+      // Thin Mach-O (darwin arm64/x64). growMachoSea rewrites the Bun graph + Mach-O load-command
+      // file offsets and STRIPS the now-invalidated code signature (re-signing is out of scope and
+      // must be done by the user with `codesign -s - <bin>` on a darwin host — see THREAT_MODEL).
+      let res;
+      try {
+        res = growMachoSea(binary, region, patchedBuf, { log, warn });
+      } catch (e) {
+        die(
+          `Mach-O grow-repack failed: ${e.message}\n` +
+          `Refusing to emit a possibly-corrupt binary. Build this version from the plain-JS path ` +
+          `or with a reduced patch set.`
+        );
+      }
+      output = res.output;
+      // The stripped signature changes the file length by an amount independent of delta, so we
+      // do NOT assert output.length === binary.length + delta here (that holds only when no
+      // signature was present). The structural post-condition below re-decodes the graph instead.
+      if (res.signatureStripped) {
+        machoSignatureStripped = true;
+        warn(
+          `Mach-O code signature was stripped (growth invalidates it). The output binary is UNSIGNED. ` +
+          `Re-sign it on a darwin host before distribution: codesign -s - --force ${outputBinaryPath}`
+        );
+      }
     }
     isGrow = true;
   }
@@ -606,6 +716,13 @@ function repack(originalBinaryPath, patchedJsPath, outputBinaryPath, options = {
   const outStats = statSync(outputBinaryPath);
   log(`Wrote ${(outStats.size / 1024 / 1024).toFixed(2)} MB to ${outputBinaryPath}`);
   log(`Execute permissions set (0o755)`);
+  if (machoSignatureStripped) {
+    warn(
+      `This Mach-O binary is UNSIGNED — its code signature was stripped because the grow-repack ` +
+      `invalidated it. Re-sign before distribution on a darwin host: ` +
+      `codesign -s - --force ${outputBinaryPath} (ad-hoc) or with a Developer ID identity.`
+    );
+  }
 
   // Optional post-repack smoke check: spawn the repacked binary with --version and confirm it
   // does NOT behave as bare `bun` (which would indicate the SEA dispatch broke). This is the
@@ -714,15 +831,25 @@ function runSmokeCheck(binaryPath, { requireClaude = false, requireSmoke = false
 // be unit-tested without triggering usage()/repack() at import time.
 if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
   const rawArgs = process.argv.slice(2).filter(a => a !== '--');
-  const requireSmoke = rawArgs.includes('--require-smoke');
-  const args = rawArgs.filter(a => a !== '--require-smoke');
+  // Fail closed by default: --allow-unverified opts out. --require-smoke is now a redundant
+  // no-op alias (the smoke check is required by default) kept for backward compat.
+  // Env fallback: the Makefile recipe (scripts/mk/cli.mk) spawns this directly without
+  // threading CLI flags, and the high-level build path (runner/cli/cmd-build.mjs) surfaces
+  // the user's opt-out as CCPATCH_REPACK_ALLOW_UNVERIFIED. Honor =1 as an equivalent opt-out
+  // so the hint connects regardless of glue. Paranoid mode sets it to '0', which only
+  // reaffirms the fail-closed default.
+  const allowUnverified =
+    rawArgs.includes('--allow-unverified') ||
+    process.env.CCPATCH_REPACK_ALLOW_UNVERIFIED === '1';
+  const KNOWN_FLAGS = new Set(['--allow-unverified', '--require-smoke']);
+  const args = rawArgs.filter(a => !KNOWN_FLAGS.has(a));
   if (args.length < 3 || args.includes('--help') || args.includes('-h')) {
     usage();
   }
 
   const [originalBinaryPath, patchedJsPath, outputBinaryPath] = args.map(a => resolve(a));
 
-  repack(originalBinaryPath, patchedJsPath, outputBinaryPath, { requireSmoke });
+  repack(originalBinaryPath, patchedJsPath, outputBinaryPath, { allowUnverified });
 }
 
 export { repack };

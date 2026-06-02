@@ -11,6 +11,13 @@ import { probeAnchor } from '../anchors.mjs';
 import { compileKind } from '../patch-kinds.mjs';
 import { buildDriftRecord } from '../drift-record.mjs';
 import { PROJECT_ROOT } from '../paths.mjs';
+import {
+  parseRepackSkip,
+  nativeGrowPathAvailable,
+  hostPlatformLabel,
+  formatPlatformDegradation,
+  NATIVE_INCOMPATIBLE_PATCHES,
+} from './native-profile.mjs';
 
 /**
  * Best-effort source path for a patch by name. Loaded patch objects don't carry
@@ -146,6 +153,12 @@ export async function runDoctorCore(options, patches, logger) {
     }
   }
   logger.log(`\n${ok} ok, ${drift} drifted, ${unverified} unverified, ${missing} missing`);
+
+  // WS6 Item 8: report whether the native single-executable (Bun SEA) repack can
+  // achieve the FULL patch set on THIS host, or whether it is reduced/blocked by
+  // the platform's grow-path availability. Previously documented only in README.
+  reportNativePlatform(names, logger);
+
   if (unverified > 0 && !options.strict) {
     logger.log(`  [warning] ${unverified} patch(es) have weak verify (only 'present'). Strengthen with verify.absent or verify.count.`);
   }
@@ -155,4 +168,52 @@ export async function runDoctorCore(options, patches, logger) {
     return 1;
   }
   return 0;
+}
+
+/**
+ * WS6 Item 8: report the host's native (Bun SEA) repack reachability.
+ *
+ * Behaviour:
+ *   - If a structured WS1 [repack:skip] line is available (env CCPATCH_REPACK_SKIP),
+ *     parse it tolerantly and report EXACTLY which patches were dropped and why.
+ *   - Otherwise, derive from the host platform: on linux-x64 the grow-repack path
+ *     is available so the FULL patch set is achievable; on every other host the
+ *     repack is length-preserving only, so a patch set larger than the original
+ *     embedded region will be reduced (or the repack will fail). We name the host
+ *     and the two patches the native profile already drops (esm_compat, bun_shim),
+ *     plus the count of currently-enabled patches, so the limit is concrete.
+ *
+ * Informational only — never changes the doctor exit code.
+ */
+function reportNativePlatform(names, logger) {
+  const skipText = process.env.CCPATCH_REPACK_SKIP || null;
+  const skip = skipText ? parseRepackSkip(skipText) : null;
+  if (skip) {
+    logger.log(`  [native] ${formatPlatformDegradation(skip)}`);
+    return;
+  }
+
+  const host = hostPlatformLabel();
+  if (nativeGrowPathAvailable()) {
+    logger.log(
+      `  [native] host ${host}: grow-repack available — the full patch set is ` +
+      `achievable for a Bun single-executable repack.`
+    );
+    return;
+  }
+
+  // Reduced-set host. esm_compat / bun_shim are ALWAYS dropped under
+  // --profile=native (mechanically incompatible with the SEA packer); on a
+  // non-grow host any size growth beyond the original region drops more.
+  const nativeDropped = NATIVE_INCOMPATIBLE_PATCHES.filter(n => names.includes(n));
+  const droppedNote = nativeDropped.length > 0
+    ? ` Under --profile=native, ${nativeDropped.length} patch(es) are always dropped here: ${nativeDropped.join(', ')}.`
+    : '';
+  logger.log(
+    `  [native] ${formatPlatformDegradation({ platform: host })}. ` +
+    `A length-preserving in-place repack is the only path on this host, so if the ` +
+    `patched bundle (${names.length} enabled patch(es)) exceeds the original embedded ` +
+    `region the repack will drop patches to fit or fail.${droppedNote} ` +
+    `Build on linux-x64 for the full set.`
+  );
 }

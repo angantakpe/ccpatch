@@ -47,12 +47,20 @@ if (!process.stdout.isTTY) {
   process.exit(2);
 }
 
-const [{ render }, React, { App }] = await Promise.all([
-  import('ink'),
-  import('react'),
-  import('../runner/tui/App.mjs'),
-]);
+let inkMod, reactMod;
+try {
+  [inkMod, reactMod] = await Promise.all([import('ink'), import('react')]);
+} catch {
+  process.stderr.write(
+    'ccpatch TUI: ink and react are optional dependencies and are not installed.\n' +
+      'Run `npm install ink react` (or `bun add ink react`) in the ccpatch directory,\n' +
+      'then retry.\n'
+  );
+  process.exit(1);
+}
 
-const h = React.default.createElement;
+const { render } = inkMod;
+const { App } = await import('../runner/tui/App.mjs');
+const h = reactMod.default.createElement;
 const { waitUntilExit } = render(h(App));
 await waitUntilExit();

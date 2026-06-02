@@ -38,6 +38,9 @@ subscriber, but it also means a misbehaving one fails invisibly — see
 [CONTRIBUTING.md](./CONTRIBUTING.md#debugging-a-networkfetch-subscriber) for how
 to surface those errors when authoring or auditing a subscriber patch.
 
+**Paranoid mode flips this swallowed surface to opt-in-loud — see
+[Paranoid / strict mode](#paranoid--strict-mode) below.**
+
 ### Extensions — fixes & QoL
 
 | Patch | Touches | Reads | Writes / Sends | Default |
@@ -235,6 +238,40 @@ enumerate the exact capabilities you intend to allow
 a newly-introduced high-risk patch fails closed instead of being silently
 waved through. Reserve `all` for interactive, one-off local use where a human
 has just read the capability table.
+
+### Paranoid / strict mode
+
+`--paranoid` (a global flag — works on `ccpatch <in> <out>`, `ccpatch doctor`,
+etc.) turns ccpatch's **silent-failure surfaces into opt-in-loud / fail-closed
+ones**. It is the inverse of the default posture, which favours never disrupting
+a working CLI over surfacing a problem.
+
+Effects:
+
+1. **Loud network/fetch subscriber errors (runtime).** The injected
+   `fetch_interceptor` normally swallows a throwing subscriber and routes it to a
+   debug sink that is silent unless `CLAUDE_DEBUG=1`. Paranoid mode makes that
+   sink **always write the error to stderr** (prefixed `[ccp:bus][paranoid]`).
+   The error is still *caught* — the CLI's network path is never disrupted — it
+   is merely no longer invisible.
+
+   *Mechanism:* `fetch_interceptor` runs inside the **patched CLI at runtime**,
+   not in the patcher process, so the toggle is read at runtime from
+   `process.env.CCPATCH_PARANOID === '1'`. When you pass `--paranoid` to the
+   ccpatch CLI, it exports `CCPATCH_PARANOID=1` into the build process
+   environment; anything the build spawns inherits it. You can also set
+   `CCPATCH_PARANOID=1` directly in the environment that launches the patched
+   CLI to surface these errors **without rebuilding**.
+
+2. **Fail-closed native repack (build time).** Paranoid mode never forwards
+   `--allow-unverified` to the native repacker (the post-repack smoke check stays
+   REQUIRED — a binary that can't be verified is rejected rather than shipped),
+   and it treats any `[repack:skip]` native grow-path degradation (patches
+   dropped because the host can't grow the embedded JS region) as a **build
+   failure** instead of a warning.
+
+Default behaviour (swallow + silent, accept reduced patch set with a warning) is
+unchanged when `--paranoid` is not set.
 
 ### Webhook egress (`CC_WEBHOOK_URL`)
 

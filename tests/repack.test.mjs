@@ -9,6 +9,7 @@ import {
   locateWrapperCloseEnd,
   assertRegionEndIsNul,
   detectBunVersion,
+  formatSkipLine,
 } from '../bin/repack-bundle.mjs';
 import { parseElfBunGraph, growBunSeaBinary } from '../bin/bun-sea-graph.mjs';
 import { readFileSync } from 'node:fs';
@@ -304,4 +305,106 @@ test('repack grow path: size-increasing splice boots as Claude, not bare bun', a
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// Item 4 — fail closed by default.
+//
+// The post-repack smoke check is REQUIRED by default; without an executable smoke run
+// (e.g. CCPATCH_REPACK_SMOKE=0, or an environment that cannot exec the binary) the CLI
+// must exit NON-ZERO unless --allow-unverified is passed. --require-smoke is now a
+// redundant no-op alias. These drive the real CLI so the arg-parsing + die() paths run.
+// They need the linux-x64 fixture to reach the smoke gate; skip cleanly otherwise.
+// ---------------------------------------------------------------------------
+describe('repack fail-closed default (Item 4)', () => {
+  function roundTripExtract(work) {
+    const extracted = join(work, 'cli.js');
+    const ex = spawnSync(process.execPath, [EXTRACT_CLI, FIXTURE, extracted], {
+      encoding: 'utf8', timeout: 120_000,
+    });
+    assert.equal(ex.status, 0, `extract failed\n${ex.stderr || ''}`);
+    return extracted;
+  }
+
+  it('FAILS CLOSED when the smoke check is disabled and --allow-unverified is NOT passed', (t) => {
+    if (!isLinuxX64) { t.skip(`fixtures are linux-x64; host is ${process.platform}-${process.arch}`); return; }
+    if (!existsSync(FIXTURE)) { t.skip(`fixture not available: ${FIXTURE}`); return; }
+    const work = mkdtempSync(join(tmpdir(), 'ccpatch-failclosed-'));
+    try {
+      const extracted = roundTripExtract(work);
+      const output = join(work, 'claude.repacked');
+      // CCPATCH_REPACK_SMOKE=0 disables the only execution-level proof. Default is fail-closed.
+      const rp = spawnSync(process.execPath, [REPACK_CLI, FIXTURE, extracted, output], {
+        encoding: 'utf8', timeout: 120_000, env: { ...process.env, CCPATCH_REPACK_SMOKE: '0' },
+      });
+      assert.notEqual(rp.status, 0, 'must fail closed (non-zero) when smoke is disabled by default');
+      assert.match(`${rp.stderr || ''}${rp.stdout || ''}`, /REQUIRED|fail/i,
+        'error should explain the fail-closed reason');
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+
+  it('--allow-unverified opts OUT: smoke disabled becomes a skip-with-warning (exit 0)', (t) => {
+    if (!isLinuxX64) { t.skip(`fixtures are linux-x64; host is ${process.platform}-${process.arch}`); return; }
+    if (!existsSync(FIXTURE)) { t.skip(`fixture not available: ${FIXTURE}`); return; }
+    const work = mkdtempSync(join(tmpdir(), 'ccpatch-allowunver-'));
+    try {
+      const extracted = roundTripExtract(work);
+      const output = join(work, 'claude.repacked');
+      const rp = spawnSync(process.execPath, [REPACK_CLI, FIXTURE, extracted, output, '--allow-unverified'], {
+        encoding: 'utf8', timeout: 120_000, env: { ...process.env, CCPATCH_REPACK_SMOKE: '0' },
+      });
+      assert.equal(rp.status, 0, `--allow-unverified should skip-with-warning, not fail\n${rp.stderr || ''}`);
+      assert.ok(existsSync(output), 'repack should still produce the binary under --allow-unverified');
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+
+  it('--require-smoke is accepted as a now-redundant no-op alias (still fail-closed)', (t) => {
+    if (!isLinuxX64) { t.skip(`fixtures are linux-x64; host is ${process.platform}-${process.arch}`); return; }
+    if (!existsSync(FIXTURE)) { t.skip(`fixture not available: ${FIXTURE}`); return; }
+    const work = mkdtempSync(join(tmpdir(), 'ccpatch-reqsmoke-'));
+    try {
+      const extracted = roundTripExtract(work);
+      const output = join(work, 'claude.repacked');
+      // --require-smoke must be accepted (not treated as a positional arg) and, being the default
+      // now, behaves identically to passing nothing: fail closed when smoke can't run.
+      const rp = spawnSync(process.execPath, [REPACK_CLI, FIXTURE, extracted, output, '--require-smoke'], {
+        encoding: 'utf8', timeout: 120_000, env: { ...process.env, CCPATCH_REPACK_SMOKE: '0' },
+      });
+      assert.notEqual(rp.status, 0, '--require-smoke (no-op) keeps the fail-closed default');
+      // Must NOT complain about a missing/extra argument — the flag was consumed, not positional.
+      assert.doesNotMatch(`${rp.stderr || ''}${rp.stdout || ''}`, /Usage:/, 'flag must be consumed, not treated as positional');
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('repack structured skip-line shape — formatSkipLine (WS6 contract)', () => {
+  it('emits the stable [repack:skip] prefix and a parseable single-line JSON object', () => {
+    const line = formatSkipLine({
+      reason: 'native-grow-path-unavailable',
+      platform: 'darwin-arm64',
+      droppedPatches: ['p1', 'p2'],
+      detail: 'demo',
+    });
+    assert.ok(line.startsWith('[repack:skip] '));
+    assert.ok(!line.includes('\n'), 'single line so WS6 can grep it');
+    const obj = JSON.parse(line.slice('[repack:skip] '.length));
+    assert.deepEqual(obj, {
+      reason: 'native-grow-path-unavailable',
+      platform: 'darwin-arm64',
+      droppedPatches: ['p1', 'p2'],
+      detail: 'demo',
+    });
+  });
+
+  it('defaults droppedPatches/detail to empty when omitted', () => {
+    const obj = JSON.parse(formatSkipLine({ reason: 'r', platform: 'p' }).slice('[repack:skip] '.length));
+    assert.deepEqual(obj.droppedPatches, []);
+    assert.equal(obj.detail, '');
+  });
 });
