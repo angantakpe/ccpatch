@@ -21,7 +21,7 @@
  *
  * Output schema documented in cluster A review (see file header).
  */
-export function buildJsonReport({ ok, durationMs, report, patchNames }) {
+export function buildJsonReport({ ok, durationMs, report, patchNames, paranoid, platformDegradation }) {
   const r = report || {};
   const timings = Array.isArray(r.timings) ? r.timings : [];
   const drifts = Array.isArray(r.drifts) ? r.drifts : [];
@@ -67,6 +67,19 @@ export function buildJsonReport({ ok, durationMs, report, patchNames }) {
   // see (apply orchestration, bundle write, sidecar write, etc.).
   if (r.phases && typeof r.phases === 'object') {
     out.phases = { ...r.phases };
+  }
+  // WS6: surface paranoid/strict mode and any native grow-path platform
+  // degradation in the machine-readable report. Both are optional — older
+  // callers that don't pass them leave the report shape unchanged.
+  if (paranoid) out.paranoid = true;
+  if (platformDegradation && typeof platformDegradation === 'object') {
+    out.platformDegradation = {
+      platform: platformDegradation.platform ?? null,
+      reason: platformDegradation.reason ?? null,
+      droppedPatches: Array.isArray(platformDegradation.droppedPatches)
+        ? platformDegradation.droppedPatches
+        : [],
+    };
   }
   return out;
 }
