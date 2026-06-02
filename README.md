@@ -31,11 +31,11 @@ Requires Node.js 20+ and either Bun or npm.
 **Quick path (no clone) — run it straight from npm:**
 
 ```
-npx @angantakpe/ccpatch doctor <path-to-cli.js>   # read-only anchor-health check
-npx @angantakpe/ccpatch <input.js> <output.js>    # apply patches to a bundle
+npx @codehornets/ccpatch doctor <path-to-cli.js>   # read-only anchor-health check
+npx @codehornets/ccpatch <input.js> <output.js>    # apply patches to a bundle
 ```
 
-`npx @angantakpe/ccpatch --help` lists every subcommand. The published package ships
+`npx @codehornets/ccpatch --help` lists every subcommand. The published package ships
 the `ccpatch` runner, `ccpatch.yml`, and the patch sources, so the one-shot
 `npx` invocation works without a checkout — handy for CI or a quick `doctor`
 run. Clone the repo (below) when you want the `make` wrappers,
