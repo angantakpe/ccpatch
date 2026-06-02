@@ -84,7 +84,7 @@ export function applyFallbackDiff(preCode, normalized, name, patchOptions, logge
  *
  * DX2: reads only `normalized.*` (the post-validation truth), never raw patch.*.
  *
- * @returns {{candidates: Array, verifyFailed: string[], probesCount: number, alertLine: string}}
+ * @returns {{candidates: object[], verifyFailed: string[], probesCount: number, alertLine: string}}
  */
 export function detectDrift(preCode, normalized, name, patchOptions) {
   // A5: forensics now live in the shared buildDriftRecord() helper. This wrapper
@@ -318,7 +318,7 @@ export function applySinglePatch({
  * @param {object} args.normalized        post-validation manifest (coverageMarker)
  * @param {string} args.preCode           code this patch saw before apply
  * @param {string} args.effectiveCode     hook-finalized applied code
- * @param {Array|null} args.atSites        resolved @At sites (for coverage anchor)
+ * @param {object[]|null} args.atSites     resolved At-selector sites (for coverage anchor)
  * @param {object} args.lifecycleCtx       per-patch lifecycle ctx (appliedCode set on coverage)
  * @param {object} args.patchOptions       carries .dryRun / .captureReverse
  * @param {object} args.logger
@@ -373,7 +373,7 @@ export function recordStage({
  * @param {object} args
  * @param {object} args.state    mutable shared handle: { pendingVerify, nextCode }
  * @param {string[]} args.failures
- * @param {Array} args.verifyIssuesReport
+ * @param {object[]} args.verifyIssuesReport
  * @param {object} args.frame    CoordinateFrame (records onVerifyFail heal deltas)
  * @param {(verify:object, code:string)=>string[]} args.checkVerify
  * @param {object} args.logger
