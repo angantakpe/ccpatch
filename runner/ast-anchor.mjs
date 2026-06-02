@@ -27,6 +27,14 @@ import { getAst } from './ast-cache.mjs';
  * hashing cost and zero retained bundle strings as Map keys.
  */
 
+/**
+ * CONCURRENCY CONTRACT: Single-slot identity cache keyed on string reference (===).
+ * Correct only when all apply() calls are sequential and each call passes the
+ * previous call's output string as its input (same reference chain). If called
+ * concurrently with different bundle strings the slot thrashes -- correctness is
+ * preserved (a miss recomputes) but performance degrades to O(n) per call.
+ * Do NOT share this module between concurrent workers.
+ */
 // identity-slot cache: sequential applies share the same string
 // reference so this hits 100% of the time in the common case.
 // Interleaved bundles thrash the slot and recompute -- acceptable,
@@ -49,6 +57,9 @@ export function resetBundleIndex() {
  */
 function indexForCode(code) {
   if (_lastBundleRef === code && _lastBundleIndex !== null) return _lastBundleIndex;
+  if (process.env.CCPATCH_ASSERT_SERIAL && _lastBundleRef !== null && _lastBundleRef !== code) {
+    process.stderr.write('[ccpatch] WARNING: ast-anchor cache thrash detected -- concurrent applies share a bundle index slot. Set CCPATCH_ASSERT_SERIAL= to silence.\n');
+  }
   const index = new Map();
   _lastBundleRef = code;
   _lastBundleIndex = index;
@@ -216,6 +227,11 @@ export function findFunctionByLiteral(code, literal) {
   }
   return null;
 }
+
+/**
+ * False: this module uses a single-slot cache that is not safe for concurrent callers.
+ */
+export const AST_ANCHOR_CONCURRENCY_SAFE = false;
 
 /**
  * Shared helper: locate the innermost function whose body encloses an anchor.

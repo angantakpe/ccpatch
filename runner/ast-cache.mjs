@@ -31,6 +31,38 @@
 //   parse; bounding it trades a rare re-parse for a hard memory ceiling.
 
 import * as acorn from 'acorn';
+import { createHash } from 'node:crypto';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = fileURLToPath(new URL('.', import.meta.url));
+const DISK_CACHE_DIR = join(__dirname, '..', '.cc', 'cache');
+
+function diskCacheKey(fnText) {
+  return 'ast-' + createHash('sha256').update(fnText).digest('hex').slice(0, 16);
+}
+
+function readDiskCache(fnText) {
+  if (process.env.CCPATCH_NO_DISK_CACHE) return null;
+  const path = join(DISK_CACHE_DIR, diskCacheKey(fnText) + '.json');
+  if (!existsSync(path)) return null;
+  try {
+    const entry = JSON.parse(readFileSync(path, 'utf8'));
+    // verify key matches to guard against hash collisions
+    if (entry.key !== diskCacheKey(fnText)) return null;
+    return entry.ast;
+  } catch { return null; }
+}
+
+function writeDiskCache(fnText, ast) {
+  if (process.env.CCPATCH_NO_DISK_CACHE) return;
+  try {
+    mkdirSync(DISK_CACHE_DIR, { recursive: true });
+    const path = join(DISK_CACHE_DIR, diskCacheKey(fnText) + '.json');
+    writeFileSync(path, JSON.stringify({ key: diskCacheKey(fnText), ast }));
+  } catch { /* disk cache is opportunistic -- ignore write errors */ }
+}
 
 const MAX_CACHED_ASTS = 256;
 // Map<wrappedText, AST>, insertion-ordered → oldest key is least-recently-used.
@@ -63,6 +95,17 @@ export function getAst(code, start, end, fnText) {
     return cached;
   }
 
+  // Check disk cache before invoking Acorn (cross-process reuse).
+  const diskHit = readDiskCache(wrapped);
+  if (diskHit !== null) {
+    astCache.set(wrapped, diskHit);
+    if (astCache.size > MAX_CACHED_ASTS) {
+      const oldestKey = astCache.keys().next().value;
+      astCache.delete(oldestKey);
+    }
+    return diskHit;
+  }
+
   const ast = acorn.parse(wrapped, {
     ecmaVersion: 'latest',
     allowAwaitOutsideFunction: true,
@@ -76,6 +119,7 @@ export function getAst(code, start, end, fnText) {
     const oldestKey = astCache.keys().next().value;
     astCache.delete(oldestKey);
   }
+  writeDiskCache(wrapped, ast);
   return ast;
 }
 
@@ -87,4 +131,15 @@ export function getAst(code, start, end, fnText) {
  */
 export function resetAstCache() {
   astCache = new Map();
+}
+
+/**
+ * Remove all disk-cached AST entries. Useful for test isolation or cache invalidation.
+ */
+export function resetDiskCache() {
+  if (process.env.CCPATCH_NO_DISK_CACHE) return;
+  try {
+    for (const f of readdirSync(DISK_CACHE_DIR).filter(f => f.startsWith('ast-')))
+      unlinkSync(join(DISK_CACHE_DIR, f));
+  } catch {}
 }
