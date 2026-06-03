@@ -28,6 +28,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { topoSort } from './runner.mjs';
 
 export function collectOverlayPatches(patches, patchNames) {
@@ -156,8 +157,19 @@ export function emitOverlay(patches, patchNames, outputDir, opts = {}) {
   const src = opts.dev ? buildDevOverlay(entries) : buildProdOverlay(entries);
   fs.writeFileSync(overlayPath, src, 'utf8');
 
+  // Emit SHA-256 integrity sidecar — non-fatal if it fails.
+  let sidecarPath = null;
+  try {
+    const hex = createHash('sha256').update(src, 'utf8').digest('hex');
+    sidecarPath = overlayPath + '.sha256';
+    fs.writeFileSync(sidecarPath, hex + '\n', 'utf8');
+  } catch (e) {
+    console.warn('[ccpatch] overlay integrity sidecar write failed:', e && e.message);
+    sidecarPath = null;
+  }
+
   if (!opts.dev) {
-    return { overlayPath, shimDir: null, shimPaths: [] };
+    return { overlayPath, sidecarPath, shimDir: null, shimPaths: [] };
   }
 
   const shimDir = path.join(outputDir, SHIM_DIR_NAME);
@@ -172,7 +184,7 @@ export function emitOverlay(patches, patchNames, outputDir, opts = {}) {
     fs.writeFileSync(shimPath, header + code.trim() + '\n', 'utf8');
     shimPaths.push(shimPath);
   }
-  return { overlayPath, shimDir, shimPaths };
+  return { overlayPath, sidecarPath, shimDir, shimPaths };
 }
 
 /**

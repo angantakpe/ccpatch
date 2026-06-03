@@ -18,6 +18,7 @@ import { pathToFileURL } from 'node:url';
 
 import { PROJECT_ROOT } from './paths.mjs';
 import { classifyRisk } from './manifest.mjs';
+import { readPatchCapabilities } from './capability-reader.mjs';
 
 export const MODULES_DIRNAME = 'modules';
 export const MODULE_MANIFEST = 'ccpatch-module.json';
@@ -338,29 +339,22 @@ export function enumerateModulePatches(projectRoot = PROJECT_ROOT) {
 }
 
 /**
- * Sandbox-import a patch file and read its declared capabilities. Returns
- * { name, capabilities, risk }. The import lives in this process so true
- * isolation is not provided — this is solely for capability disclosure at
- * install time, not for trust enforcement.
+ * Read a patch file's declared capabilities without executing the module in the
+ * main process. Uses capability-reader's vm sandbox (Option A) with a static
+ * regex fallback (Option B). Returns { name, capabilities, risk }.
+ *
+ * The previous implementation used dynamic import() which ran the module's
+ * top-level code before any ack gate fired. This replacement keeps capability
+ * inspection sandboxed so untrusted code cannot execute during `module install`.
  */
-export async function inspectModuleCapabilities(moduleDir) {
+export function inspectModuleCapabilities(moduleDir) {
   const manifest = readModuleManifest(moduleDir);
   const patchesDir = path.join(moduleDir, 'patches');
   const rows = [];
   for (const stem of manifest.patches) {
     const filePath = path.join(patchesDir, stem + '.mjs');
     if (!fs.existsSync(filePath)) continue;
-    // Cache-bust the URL so repeated imports during a single CLI invocation
-    // do not return a stale module record (helps tests that install, mutate,
-    // and re-install fixtures).
-    const url = pathToFileURL(filePath).href + `?ts=${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    let mod;
-    try {
-      mod = (await import(url)).default;
-    } catch (err) {
-      throw new Error(`Failed to import module patch ${manifest.name}/${stem}: ${err.message}`);
-    }
-    const caps = Array.isArray(mod?.capabilities) ? mod.capabilities : [];
+    const caps = readPatchCapabilities(filePath);
     rows.push({
       name: `${manifest.name}/${stem}`,
       stem,

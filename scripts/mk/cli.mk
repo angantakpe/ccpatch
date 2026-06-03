@@ -15,7 +15,7 @@ verify_bundle_sha = $(NODE) $(VERIFY_SHA_TOOL) "$(1)" --version "$(VERSION)" --r
 .PHONY: install reconstruct build smoke run run-p test download \
         extract-from-binary bun-decompile bun-run bun-verify bun-reconstruct \
         coverage bun-all all beautify beautify-fast patch \
-        patch-claude-code patch-list doctor print-patch anchor-catalog \
+        patch-claude-code patch-list doctor heal print-patch anchor-catalog \
         anchor-catalog-missing anchor-catalog-changed anchor-report repatch release run-extracted \
         start \
         patch-claude-code-native \
@@ -253,6 +253,15 @@ doctor: ## Check anchor health against installed cli.js (read-only): make doctor
 	@SRC=$(INPUT); [ ! -f "$$SRC" ] && SRC=$(CJS_EXTRACTED); \
 	if [ ! -f "$$SRC" ]; then echo "ERROR: Could not find cli.js (set INPUT= or run extract-from-binary VERSION=$(VERSION))"; exit 1; fi; \
 	$(NODE) $(PATCH_TOOL) doctor "$$SRC" $(if $(PROFILE),--profile $(PROFILE),)
+
+# Re-anchor drifted patches: reads storage/outputs/anchor-drift.jsonl, proposes (or
+# with --write applies) updated literal anchors in runner/anchors.mjs so that patches
+# which lost their anchor after a CC version bump are automatically re-grounded.
+heal: ## Re-anchor drifted patches from drift log (dry-run by default): make heal [WRITE=1] [DRIFT=path] [ANCHORS=path]
+	$(NODE) $(PATCH_TOOL) heal \
+		$(if $(WRITE),--write,) \
+		$(if $(DRIFT),--drift $(DRIFT),) \
+		$(if $(ANCHORS),--anchors $(ANCHORS),)
 
 print-patch: ## Print the active PATCH list (consumed by downstream callers)
 	@echo "$(PATCH)"

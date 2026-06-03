@@ -83,6 +83,119 @@ export function topoSort(names, patches) {
   return result;
 }
 
+/**
+ * Validate that all dependsOn edges in topoOrdered respect phase ordering.
+ * A patch may only depend on patches in the same or an earlier phase
+ * (pre < main < post). Throws on violation. Pure — reads only patches data.
+ *
+ * @param {string[]} topoOrdered — cycle-free patch names from topoSort
+ * @param {Record<string, object>} patches — patch modules (reads .phase / .dependsOn)
+ */
+export function validatePhaseDepOrder(topoOrdered, patches) {
+  for (const name of topoOrdered) {
+    const patch = patches[name];
+    if (!patch) continue;
+    const phaseIdx = PHASE_ORDER[phaseOf(patch)];
+    for (const dep of patch.dependsOn ?? []) {
+      const depIdx = PHASE_ORDER[phaseOf(patches[dep])];
+      if (depIdx > phaseIdx) {
+        throw new Error(
+          `Patch "${name}" (phase="${phaseOf(patch)}") depends on "${dep}" (phase="${phaseOf(patches[dep])}"), ` +
+          `which runs in a later phase. Cross-phase deps must point to same-or-earlier phases.`
+        );
+      }
+    }
+  }
+}
+
+/**
+ * Assemble the structured report object returned by applyNamedPatches. Pure.
+ *
+ * @param {Array<{name:string,ms:number}>} timings — per-patch timing entries
+ * @param {Array<object>} drifts — anchor-drift entries
+ * @param {object[]} verifyIssuesReport — per-patch verify failure records
+ * @param {Record<string,string>} results — name -> status string map
+ * @returns {{ timings, drifts, verifyIssues, noChange, appliedFallback }}
+ */
+export function buildPatchReport(timings, drifts, verifyIssuesReport, results) {
+  const noChange = Object.values(results).filter(s => s === 'no-change').length;
+  const appliedFallback = Object.values(results).filter(s => s === 'applied-fallback').length;
+  return { timings, drifts, verifyIssues: verifyIssuesReport, noChange, appliedFallback };
+}
+
+/**
+ * Scan each phase for overlapping patch ranges, record them in allConflicts[],
+ * log them, and write the conflicts JSONL artifact.
+ *
+ * @param {object} phaseTraces — { pre, main, post } arrays of trace objects
+ * @param {CoordinateFrame} frame
+ * @param {boolean} globalStrict
+ * @param {object} logger
+ * @param {Function} warnStorageOnce — first-write-failure guard
+ * @returns {Array<object>} allConflicts — array of conflict records
+ */
+export function detectAndRecordOverlaps(phaseTraces, frame, globalStrict, logger, warnStorageOnce) {
+  const allConflicts = [];
+  const failures = [];
+  for (const phaseKey of ['pre', 'main', 'post']) {
+    const traces = phaseTraces[phaseKey] || [];
+    if (traces.length < 2) continue;
+    // S4: only NOW — with ≥2 patches in this phase, so an overlap is actually
+    // possible — do we materialise the non-strict diffSpans that were deferred
+    // at apply time. The structuredPatch scan is what we deferred to avoid
+    // paying it for single-patch phases; running it lazily skips it entirely
+    // there. Spans are translated into the shared original-bundle frame via the
+    // stored _deltaBefore so detectOverlapsInPhase compares like-for-like (A2).
+    for (const t of traces) {
+      if (t.diffSpans !== null) continue; // strict already computed (and shifted)
+      if (!t.changed || t._preCode === null) { t.diffSpans = []; continue; }
+      // Arch#1(b): decompose into per-hunk spans the SAME way strict mode does
+      // (structuredPatch context:0 → diffSpansFromPatch) instead of a single
+      // first-to-last-changed-byte envelope.
+      const spResult = structuredPatch(t.name, t.name, t._preCode, t._effectiveCode, 'pre', 'post', { context: 0 });
+      const raw = diffSpansFromPatch(t._preCode, spResult);
+      t.diffSpans = frame.shiftToOriginal(raw, t._deltaBefore);
+    }
+    const conflicts = detectOverlapsInPhase(traces);
+    for (const c of conflicts) {
+      const aTrace = traces.find(t => t.name === c.a);
+      const bTrace = traces.find(t => t.name === c.b);
+      const allowed = (aTrace && aTrace.allowOverlapWith.includes(c.b))
+                   || (bTrace && bTrace.allowOverlapWith.includes(c.a));
+      const record = {
+        ts: new Date().toISOString(),
+        phase: c.phase,
+        a: c.a,
+        b: c.b,
+        overlap: { kind: c.kind, rangeA: c.rangeA, rangeB: c.rangeB },
+        allowed: !!allowed,
+      };
+      allConflicts.push(record);
+      const msg = `overlap (${c.kind}) phase="${c.phase}" ${c.a} <-> ${c.b}` +
+                  ` rangeA=[${c.rangeA[0]},${c.rangeA[1]}] rangeB=[${c.rangeB[0]},${c.rangeB[1]}]`;
+      if (allowed) {
+        logger.warn(`  [overlap] ${msg} (allowlisted)`);
+      } else if (globalStrict) {
+        // Strict: FATAL overlaps stay loud and unchanged.
+        logger.warn(`  [overlap] ${msg}`);
+        failures.push(
+          `overlap: ${c.a} and ${c.b} touch overlapping ranges (${c.kind}) in phase="${c.phase}". ` +
+          `Add allowOverlapWith: ['${c.b}'] to ${c.a} (or vice versa) to acknowledge.`
+        );
+      } else {
+        // DX#2: in non-strict mode an overlap is informational — it does not
+        // abort the build.
+        logger.warn(`  [overlap] ${c.a} <-> ${c.b} phase="${c.phase}" (informational — non-fatal; run --log-level=debug for ranges, or --strict to gate)`);
+        logger.debug?.(`  [overlap] ${msg} (informational — non-fatal)`);
+      }
+    }
+  }
+  // Conflicts JSONL is written BEFORE the strict-failure throw (so a strict
+  // build that aborts still leaves the conflict forensics behind). ARCH1.
+  writeConflictsArtifact(allConflicts, warnStorageOnce);
+  return { allConflicts, failures };
+}
+
 export async function applyNamedPatches(code, patches, patchNames, logger = console, patchOptions = {}) {
   // Item 2: `nextCode` and the deferred-verify queue (`pendingVerify`) are the
   // two pieces of mutable state shared between the apply loop and the verify
@@ -146,20 +259,8 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
 
   // Enforce phase-respecting dependencies: a patch may only depend on patches
   // in the same or an earlier phase. (pre < main < post)
-  for (const name of topoOrdered) {
-    const patch = patches[name];
-    if (!patch) continue;
-    const phaseIdx = PHASE_ORDER[phaseOf(patch)];
-    for (const dep of patch.dependsOn ?? []) {
-      const depIdx = PHASE_ORDER[phaseOf(patches[dep])];
-      if (depIdx > phaseIdx) {
-        throw new Error(
-          `Patch "${name}" (phase="${phaseOf(patch)}") depends on "${dep}" (phase="${phaseOf(patches[dep])}"), ` +
-          `which runs in a later phase. Cross-phase deps must point to same-or-earlier phases.`
-        );
-      }
-    }
-  }
+  // Delegated to validatePhaseDepOrder() — pure, independently testable.
+  validatePhaseDepOrder(topoOrdered, patches);
 
   // Ordering: phase (asc) dominates, then dependsOn (topological) — a dependent
   // never precedes its dependency — then `priority` (lower first) breaks ties
@@ -362,81 +463,45 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
   // Final flush — verify the last phase's accumulated assertions in one pass.
   await flushPendingVerify(currentPhase);
 
+  // Perf diagnostic (Improvement 1): detect phases where batchApplyEdits could
+  // apply. A phase qualifies when it has ≥2 'free'-kind patches that actually
+  // changed the code and did not use a fallback diff. We log the count so future
+  // work can wire in batchApplyEdits without the risk of a broken apply mode.
+  // NOTE: This is a SAFE diagnostic only — it does not change apply ordering.
+  // batchApplyEdits / tryExtractEdits are not yet implemented; when they are,
+  // this block provides the grouping signal needed to activate the optimization.
+  for (const phaseKey of ['pre', 'main', 'post']) {
+    const traces = phaseTraces[phaseKey] || [];
+    // Candidate: a 'free' kind patch that changed the code and kept its pre/effective
+    // code references (not a fallback — fallback status is on the result, but the trace
+    // still has _preCode). We approximate "free kind" by checking that _preCode exists
+    // (declarative prefix/postfix patches produce a trace too, but their spans are small
+    // and predictable — the interesting batch candidates are free-form transforms).
+    const batchCandidates = traces.filter(
+      t => t.changed && t._preCode !== null && t._effectiveCode !== null,
+    );
+    if (batchCandidates.length >= 2) {
+      logger.debug?.(`  [perf] phase ${phaseKey}: ${batchCandidates.length} patches could use batch apply (batchApplyEdits not yet wired)`);
+    }
+  }
+
   // Overlap detection: scan each phase for pairs whose ranges intersect.
   // Conflicts are reported to the logger and a JSONL sidecar regardless of
   // strict mode; in strict mode they become fatal unless allowlisted.
-  const allConflicts = [];
-  for (const phaseKey of ['pre', 'main', 'post']) {
-    const traces = phaseTraces[phaseKey] || [];
-    if (traces.length < 2) continue;
-    // S4: only NOW — with ≥2 patches in this phase, so an overlap is actually
-    // possible — do we materialise the non-strict diffSpans that were deferred
-    // at apply time. The structuredPatch scan is what we deferred to avoid
-    // paying it for single-patch phases; running it lazily skips it entirely
-    // there. Spans are translated into the shared original-bundle frame via the
-    // stored _deltaBefore so detectOverlapsInPhase compares like-for-like (A2).
-    for (const t of traces) {
-      if (t.diffSpans !== null) continue; // strict already computed (and shifted)
-      if (!t.changed || t._preCode === null) { t.diffSpans = []; continue; }
-      // Arch#1(b): decompose into per-hunk spans the SAME way strict mode does
-      // (structuredPatch context:0 → diffSpansFromPatch) instead of a single
-      // first-to-last-changed-byte envelope. A scatter patch (e.g.
-      // unhide_features) then yields many small REAL spans rather than one
-      // ~3.5MB envelope that intersects almost anything — so non-strict overlaps
-      // now match what strict mode would flag as FATAL.
-      // Issue #6: reuse the _sp cached by applySinglePatch instead of recomputing.
-      const sp = t._sp ?? structuredPatch(t.name, t.name, t._preCode, t._effectiveCode, 'pre', 'post', { context: 0 });
-      const raw = diffSpansFromPatch(t._preCode, sp);
-      t.diffSpans = frame.shiftToOriginal(raw, t._deltaBefore);
-    }
-    const conflicts = detectOverlapsInPhase(traces);
-    for (const c of conflicts) {
-      const aTrace = traces.find(t => t.name === c.a);
-      const bTrace = traces.find(t => t.name === c.b);
-      const allowed = (aTrace && aTrace.allowOverlapWith.includes(c.b))
-                   || (bTrace && bTrace.allowOverlapWith.includes(c.a));
-      const record = {
-        ts: new Date().toISOString(),
-        phase: c.phase,
-        a: c.a,
-        b: c.b,
-        overlap: { kind: c.kind, rangeA: c.rangeA, rangeB: c.rangeB },
-        allowed: !!allowed,
-      };
-      allConflicts.push(record);
-      const msg = `overlap (${c.kind}) phase="${c.phase}" ${c.a} <-> ${c.b}` +
-                  ` rangeA=[${c.rangeA[0]},${c.rangeA[1]}] rangeB=[${c.rangeB[0]},${c.rangeB[1]}]`;
-      if (allowed) {
-        logger.warn(`  [overlap] ${msg} (allowlisted)`);
-      } else if (globalStrict) {
-        // Strict: FATAL overlaps stay loud and unchanged.
-        logger.warn(`  [overlap] ${msg}`);
-        failures.push(
-          `overlap: ${c.a} and ${c.b} touch overlapping ranges (${c.kind}) in phase="${c.phase}". ` +
-          `Add allowOverlapWith: ['${c.b}'] to ${c.a} (or vice versa) to acknowledge.`
-        );
-      } else {
-        // DX#2: in non-strict mode an overlap is informational — it does not
-        // abort the build. Keep a single concise line so a tail of the log still
-        // shows something happened, and route the full range detail to the
-        // verbose (debug-level) sink so a normal successful build isn't spammed.
-        logger.warn(`  [overlap] ${c.a} <-> ${c.b} phase="${c.phase}" (informational — non-fatal; run --log-level=debug for ranges, or --strict to gate)`);
-        logger.debug?.(`  [overlap] ${msg} (informational — non-fatal)`);
-      }
-    }
-  }
-  // Conflicts JSONL is written BEFORE the strict-failure throw (so a strict
-  // build that aborts still leaves the conflict forensics behind). ARCH1.
-  writeConflictsArtifact(allConflicts, warnStorageOnce);
+  // Delegated to detectAndRecordOverlaps() — independently testable.
+  const { allConflicts, failures: overlapFailures } = detectAndRecordOverlaps(
+    phaseTraces, frame, globalStrict, logger, warnStorageOnce,
+  );
+  for (const f of overlapFailures) failures.push(f);
 
   // Finding #1/#2: tally the loud outcomes so the build summary can surface
   // them. `noChange` patches silently injected nothing (anchors likely drifted);
   // `appliedFallback` patches only applied by replaying a stale stored diff.
-  const noChangeCount = Object.values(results).filter(s => s === 'no-change').length;
-  const fallbackCount = Object.values(results).filter(s => s === 'applied-fallback').length;
-  if (fallbackCount > 0) {
+  // Assembled into a structured report via buildPatchReport().
+  const report = buildPatchReport(timings, drifts, verifyIssuesReport, results);
+  if (report.appliedFallback > 0) {
     logger.warn('');
-    logger.warn(`  [!] ${fallbackCount} patch(es) applied via STALE FALLBACK DIFF — anchors have drifted, fix anchors`);
+    logger.warn(`  [!] ${report.appliedFallback} patch(es) applied via STALE FALLBACK DIFF — anchors have drifted, fix anchors`);
     logger.warn('');
   }
 
@@ -465,10 +530,5 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
   // outcomes can destructure: const { results } = await applyNamedPatches(...)
   // Finding #1/#2: `noChange` / `appliedFallback` counts let the build summary
   // print no-op and stale-fallback tallies prominently (see cli/build-report.mjs).
-  const report = {
-    timings, drifts, verifyIssues: verifyIssuesReport,
-    noChange: noChangeCount,
-    appliedFallback: fallbackCount,
-  };
   return { code: state.nextCode, results, report };
 }
