@@ -137,6 +137,9 @@ export async function loadPatches(opts = {}) {
     // App.mjs/per-version-dir.test.mjs (see resolvedVariants doc above).
     resolvedVariants.set(mod, variant);
     mod.__resolvedVariant = variant;
+    // Attach the resolved absolute file path so downstream consumers (e.g.
+    // preload-builder) can locate sibling companion files without re-resolving.
+    mod.__filePath = filePath;
     patches[name] = mod;
   }
   return patches;

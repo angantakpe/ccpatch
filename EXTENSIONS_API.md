@@ -36,6 +36,50 @@ Key points for extension authors:
 
 - **Phase ordering matters.** `pre` patches run before `main` before `post`. Infrastructure globals (`__ccpRegistry`, fetch interceptor, etc.) are registered in the `pre` phase. Consumer extensions in `main` or `post` can rely on them being present.
 
+## Preload companion files
+
+Instead of embedding preload code as a string inside the patch manifest, you can place it in a sibling file named `<name>.preload.mjs`. The preload-builder will automatically detect and use it.
+
+**Before** (inline `preloadCode` string):
+
+```js
+// extensions/my_patch.mjs
+export default {
+  description: 'My patch',
+  preload: true,
+  preloadCode: `
+    const orig = globalThis.fetch;
+    globalThis.fetch = (url, init) => { console.log('fetch:', url); return orig(url, init); };
+  `,
+  apply(code) { return code; },
+  verify: { present: 'fetch', weak: true },
+};
+```
+
+**After** (companion file):
+
+```js
+// extensions/my_patch.mjs
+export default {
+  description: 'My patch',
+  preload: true,
+  // preloadCode omitted — preload-builder reads extensions/my_patch.preload.mjs
+  apply(code) { return code; },
+  verify: { present: 'fetch', weak: true },
+};
+```
+
+```js
+// extensions/my_patch.preload.mjs
+const orig = globalThis.fetch;
+globalThis.fetch = (url, init) => { console.log('fetch:', url); return orig(url, init); };
+```
+
+The companion file (`<name>.preload.mjs`) must live alongside `<name>.mjs`. The preload-builder resolves it at build time using `patch.__filePath` (set by the loader). If neither `preloadCode` nor the companion file is found, the patch is skipped with a warning.
+
+Note: when using the companion file convention, `validateManifest` will emit a warning (not an error) during normal runtime loads. In validation-only / CI strict mode (no logger context), omitting both `preloadCode` and the companion file is still a hard error at manifest validation time.
+
 ## Changelog
 
 - **v0.2.0** — Initial API documentation.
+- **v0.2.1** — Preload companion `.preload.mjs` file convention (#9).

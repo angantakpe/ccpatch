@@ -21,6 +21,8 @@
  *   - Must not rely on any minified bundle-internal identifier
  */
 
+import fs from 'node:fs';
+
 import { topoSort } from './runner.mjs';
 
 /**
@@ -28,9 +30,12 @@ import { topoSort } from './runner.mjs';
  *
  * @param {Record<string, object>} patches    - Loaded patch map (name → module)
  * @param {string[]}               patchNames - Enabled patch names to consider
+ * @param {object}                 [opts]     - Optional options
+ * @param {object}                 [opts.logger] - Logger with .warn() for diagnostics
  * @returns {string|null} Generated preload source, or null if no preload patches found
  */
-export function buildPreload(patches, patchNames) {
+export function buildPreload(patches, patchNames, opts = {}) {
+  const logger = opts.logger ?? null;
   const preloadCandidates = patchNames.filter(n => patches[n]?.preload);
   if (preloadCandidates.length === 0) return null;
 
@@ -47,15 +52,36 @@ export function buildPreload(patches, patchNames) {
     '',
   ];
 
+  let hasContent = false;
   for (const name of ordered) {
     const patch = patches[name];
     if (!patch?.preload) continue;
-    const code = typeof patch.preloadCode === 'function' ? patch.preloadCode() : patch.preloadCode;
-    if (!code || typeof code !== 'string') continue;
+
+    // Resolve preload code: explicit preloadCode string takes priority; then
+    // companion <name>.preload.mjs sibling file; else skip with a warning.
+    let code = typeof patch.preloadCode === 'function' ? patch.preloadCode() : patch.preloadCode;
+    if (!code || typeof code !== 'string') {
+      // Try companion file: <name>.preload.mjs alongside the patch's source file.
+      if (patch.__filePath) {
+        const companionPath = patch.__filePath.replace(/\.mjs$/, '.preload.mjs');
+        if (fs.existsSync(companionPath)) {
+          code = fs.readFileSync(companionPath, 'utf8');
+        }
+      }
+    }
+
+    if (!code || typeof code !== 'string') {
+      if (logger) {
+        logger.warn(`[preload] ${name}: preload:true but no preloadCode or companion .preload.mjs found — skipping`);
+      }
+      continue;
+    }
+
     parts.push(`// ── [preload] ${name}: ${patch.description} ──`);
     parts.push(code.trim());
     parts.push('');
+    hasContent = true;
   }
 
-  return parts.join('\n');
+  return hasContent ? parts.join('\n') : null;
 }

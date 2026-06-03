@@ -215,7 +215,16 @@ export function validateManifest(mod, filename, ctx = {}) {
 
   // preload consistency
   if (mod.preload === true && !mod.preloadCode) {
-    errors.push('preload:true requires a preloadCode string — e.g. preloadCode: \'globalThis.__x = 1;\'');
+    // When a logger is present (runtime load), downgrade to a warning — the
+    // preload-builder will look for a companion <name>.preload.mjs file.
+    // When there is no logger (validation-only / CI strict mode), keep the
+    // hard error so patches missing both preloadCode and companion file are
+    // caught early.
+    if (ctx.logger) {
+      ctx.logger.warn(`preload:true without preloadCode — a companion ${stem}.preload.mjs will be expected`);
+    } else {
+      errors.push('preload:true requires a preloadCode string — e.g. preloadCode: \'globalThis.__x = 1;\' (or provide a companion ' + stem + '.preload.mjs file)');
+    }
   }
   if (mod.preloadCode && mod.preload !== true) {
     errors.push('preloadCode is set but preload:true is missing — add preload: true to enable the --require variant');
