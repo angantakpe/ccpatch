@@ -39,12 +39,12 @@ export function makeStorageWarnOnce(logger) {
  * strict-mode failure throw (the original code wrote conflicts pre-throw and
  * coverage/results post-throw).
  */
-export function writeConflictsArtifact(allConflicts, warnStorageOnce) {
+export function writeConflictsArtifact(allConflicts, warnStorageOnce, storageRoot = PROJECT_ROOT) {
   if (allConflicts.length === 0) return;
   try {
-    mkdirSync(join(PROJECT_ROOT, 'storage', 'outputs'), { recursive: true });
+    mkdirSync(join(storageRoot, 'storage', 'outputs'), { recursive: true });
     const out = allConflicts.map(c => JSON.stringify(c)).join('\n') + '\n';
-    appendFileSync(join(PROJECT_ROOT, 'storage', 'outputs', 'patch-conflicts.jsonl'), out, 'utf8');
+    appendFileSync(join(storageRoot, 'storage', 'outputs', 'patch-conflicts.jsonl'), out, 'utf8');
   } catch (err) { warnStorageOnce?.('patch-conflicts.jsonl', err); }
 }
 
@@ -64,12 +64,12 @@ export function writeConflictsArtifact(allConflicts, warnStorageOnce) {
  * @param {(p:object)=>string} args.phaseOf  phase resolver
  * @param {object} args.logger
  */
-export function writeApplyArtifacts({ results, patches, phaseTraces, patchOptions, phaseOf, logger, warnStorageOnce }) {
+export function writeApplyArtifacts({ results, patches, phaseTraces, patchOptions, phaseOf, logger, warnStorageOnce, storageRoot = PROJECT_ROOT }) {
   // 1) Apply-time coverage manifest. Always emitted; versioned filename when
   // version is known so multiple builds don't clobber each other.
   // Cross-referenced by `ccpatch coverage` against runtime hits.
   try {
-    mkdirSync(join(PROJECT_ROOT, 'storage', 'outputs'), { recursive: true });
+    mkdirSync(join(storageRoot, 'storage', 'outputs'), { recursive: true });
     const coverageManifest = {
       ccVersion: patchOptions.version ?? null,
       appliedAt: new Date().toISOString(),
@@ -98,7 +98,7 @@ export function writeApplyArtifacts({ results, patches, phaseTraces, patchOption
       coverageManifest.patches[name] = entry;
     }
     const tag = patchOptions.version ? `v${patchOptions.version}` : 'unknown';
-    const covPath = join(PROJECT_ROOT, 'storage', 'outputs', `coverage-apply-${tag}.json`);
+    const covPath = join(storageRoot, 'storage', 'outputs', `coverage-apply-${tag}.json`);
     writeFileSync(covPath, JSON.stringify(coverageManifest, null, 2), 'utf8');
   } catch (err) {
     // S5: route through the run-scoped warn-once latch.
@@ -109,8 +109,8 @@ export function writeApplyArtifacts({ results, patches, phaseTraces, patchOption
   // resolved variant per patch (ARCH5: via getResolvedVariant, not __resolvedVariant).
   if (patchOptions.version) {
     try {
-      mkdirSync(join(PROJECT_ROOT, 'storage', 'outputs'), { recursive: true });
-      const outPath = join(PROJECT_ROOT, 'storage', 'outputs', `patch-results-v${patchOptions.version}.json`);
+      mkdirSync(join(storageRoot, 'storage', 'outputs'), { recursive: true });
+      const outPath = join(storageRoot, 'storage', 'outputs', `patch-results-v${patchOptions.version}.json`);
       const decorated = {};
       for (const name of Object.keys(results)) {
         const status = results[name];

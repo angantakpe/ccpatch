@@ -22,15 +22,6 @@ import {
   makeVerifyFlusher,
 } from './apply-pipeline.mjs';
 
-// Re-export the apply-artifact sidecar writers (extracted to apply-artifacts.mjs
-// in the task-4 refactor) so the runner.mjs public surface — and the tests that
-// import them from here — stay unchanged.
-export { makeStorageWarnOnce, writeConflictsArtifact, writeApplyArtifacts };
-
-// Re-export the apply-pipeline stage helpers (extracted to apply-pipeline.mjs
-// in the Item-2 pipeline refactor) so the runner.mjs public surface — and the
-// tests that import applyFallbackDiff / detectDrift from here — stay unchanged.
-export { applyFallbackDiff, detectDrift };
 
 /**
  * Run a verify block against post-apply code. Returns an array of failure
@@ -462,28 +453,6 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
 
   // Final flush — verify the last phase's accumulated assertions in one pass.
   await flushPendingVerify(currentPhase);
-
-  // Perf diagnostic (Improvement 1): detect phases where batchApplyEdits could
-  // apply. A phase qualifies when it has ≥2 'free'-kind patches that actually
-  // changed the code and did not use a fallback diff. We log the count so future
-  // work can wire in batchApplyEdits without the risk of a broken apply mode.
-  // NOTE: This is a SAFE diagnostic only — it does not change apply ordering.
-  // batchApplyEdits / tryExtractEdits are not yet implemented; when they are,
-  // this block provides the grouping signal needed to activate the optimization.
-  for (const phaseKey of ['pre', 'main', 'post']) {
-    const traces = phaseTraces[phaseKey] || [];
-    // Candidate: a 'free' kind patch that changed the code and kept its pre/effective
-    // code references (not a fallback — fallback status is on the result, but the trace
-    // still has _preCode). We approximate "free kind" by checking that _preCode exists
-    // (declarative prefix/postfix patches produce a trace too, but their spans are small
-    // and predictable — the interesting batch candidates are free-form transforms).
-    const batchCandidates = traces.filter(
-      t => t.changed && t._preCode !== null && t._effectiveCode !== null,
-    );
-    if (batchCandidates.length >= 2) {
-      logger.debug?.(`  [perf] phase ${phaseKey}: ${batchCandidates.length} patches could use batch apply (batchApplyEdits not yet wired)`);
-    }
-  }
 
   // Overlap detection: scan each phase for pairs whose ranges intersect.
   // Conflicts are reported to the logger and a JSONL sidecar regardless of

@@ -7,9 +7,11 @@ import { createPatch } from 'diff';
 import {
   applyFallbackDiff,
   detectDrift,
+} from '../runner/apply-pipeline.mjs';
+import {
   writeConflictsArtifact,
   writeApplyArtifacts,
-} from '../runner/runner.mjs';
+} from '../runner/apply-artifacts.mjs';
 
 function mkLogger() {
   const entries = { log: [], warn: [], error: [] };
@@ -116,9 +118,9 @@ describe('ARCH1 helper — writeConflictsArtifact / writeApplyArtifacts', () => 
 
   it('writeConflictsArtifact appends JSONL only when conflicts exist', () => {
     withTmpCwd((dir) => {
-      writeConflictsArtifact([]);
+      writeConflictsArtifact([], undefined, dir);
       assert.equal(fs.existsSync(path.join(dir, 'storage/outputs/patch-conflicts.jsonl')), false);
-      writeConflictsArtifact([{ a: 'x', b: 'y' }]);
+      writeConflictsArtifact([{ a: 'x', b: 'y' }], undefined, dir);
       const txt = fs.readFileSync(path.join(dir, 'storage/outputs/patch-conflicts.jsonl'), 'utf8');
       assert.ok(txt.includes('"a":"x"'));
     });
@@ -135,6 +137,7 @@ describe('ARCH1 helper — writeConflictsArtifact / writeApplyArtifacts', () => 
         patchOptions: { version: '2.1.148' },
         phaseOf: () => 'main',
         logger,
+        storageRoot: dir,
       });
       const cov = JSON.parse(fs.readFileSync(path.join(dir, 'storage/outputs/coverage-apply-v2.1.148.json'), 'utf8'));
       assert.equal(cov.ccVersion, '2.1.148');
@@ -158,6 +161,7 @@ describe('ARCH1 helper — writeConflictsArtifact / writeApplyArtifacts', () => 
         patchOptions: {},
         phaseOf: () => 'main',
         logger: mkLogger(),
+        storageRoot: dir,
       });
       assert.ok(fs.existsSync(path.join(dir, 'storage/outputs/coverage-apply-unknown.json')));
       const files = fs.readdirSync(path.join(dir, 'storage/outputs'));
