@@ -493,7 +493,7 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
   }
 
   // ARCH1: coverage-apply manifest + patch-results catalog, consolidated.
-  writeApplyArtifacts({ results, patches, phaseTraces, patchOptions, phaseOf, logger, warnStorageOnce, root: storageRoot });
+  writeApplyArtifacts({ results, patches, phaseTraces, patchOptions, phaseOf, logger, warnStorageOnce, storageRoot });
 
   // Return shape (LOCKED contract — see cli.mjs apply path which reads .code +
   // .report defensively): the patched bundle (`code`), the per-patch outcome

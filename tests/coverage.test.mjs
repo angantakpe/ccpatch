@@ -101,7 +101,7 @@ describe('apply-time coverage manifest', () => {
     // bestEffort: 'drifted' declares verify.present and no-ops, which finding #1
     // makes fatal by default; this test asserts the manifest still records it as
     // applied:false (no-change) under lenient mode rather than aborting the run.
-    await applyNamedPatches('seed', patches, ['good', 'noop', 'drifted'], silent, { version: '9.9.9', bestEffort: true });
+    await applyNamedPatches('seed', patches, ['good', 'noop', 'drifted'], silent, { version: '9.9.9', bestEffort: true, storageRoot: tmp });
     const file = path.join(tmp, 'storage/outputs/coverage-apply-v9.9.9.json');
     assert.ok(fs.existsSync(file), `expected manifest at ${file}`);
     const manifest = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -116,7 +116,7 @@ describe('apply-time coverage manifest', () => {
 
   it('falls back to coverage-apply-unknown.json when no version provided', withTmpCwd(async (tmp) => {
     const patches = { p: { description: 'p', apply: (c) => c + '!', verify: { present: '!', weak: true } } };
-    await applyNamedPatches('x', patches, ['p'], silent);
+    await applyNamedPatches('x', patches, ['p'], silent, { storageRoot: tmp });
     const file = path.join(tmp, 'storage/outputs/coverage-apply-unknown.json');
     assert.ok(fs.existsSync(file));
   }));
