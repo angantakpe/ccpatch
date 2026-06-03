@@ -25,8 +25,9 @@ const hook =
   `${SENTINEL} try { ` +
   `(function () { ` +
   `var __ccp_op = require('path').resolve(__dirname, 'ccpatch-overlay.mjs'); ` +
-  `var __ccp_sp = __ccp_op + '.sha256'; ` +
   `var __ccp_fs = require('fs'); ` +
+  `if (!__ccp_fs.existsSync(__ccp_op)) return; ` +
+  `var __ccp_sp = __ccp_op + '.sha256'; ` +
   `if (__ccp_fs.existsSync(__ccp_sp)) { ` +
   `var __ccp_expected = __ccp_fs.readFileSync(__ccp_sp, 'utf8').trim(); ` +
   `var __ccp_actual = require('crypto').createHash('sha256').update(__ccp_fs.readFileSync(__ccp_op)).digest('hex'); ` +
