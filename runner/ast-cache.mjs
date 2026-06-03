@@ -32,7 +32,8 @@
 
 import * as acorn from 'acorn';
 import { createHash } from 'node:crypto';
-import { readFileSync, writeFileSync, readdirSync, statSync, unlinkSync, mkdirSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync, unlinkSync, mkdirSync } from 'node:fs';
+import { promises as fsp } from 'node:fs';
 import { join } from 'node:path';
 import { PROJECT_ROOT } from './paths.mjs';
 
@@ -59,13 +60,17 @@ function readDiskCache(key) {
   }
 }
 
+let _writeCount = 0;
+
 function writeDiskCache(key, ast) {
   try {
     mkdirSync(DISK_CACHE_DIR, { recursive: true });
-    writeFileSync(join(DISK_CACHE_DIR, `ast-${key}.json`), JSON.stringify(ast));
+    fsp.writeFile(join(DISK_CACHE_DIR, `ast-${key}.json`), JSON.stringify(ast)).catch(() => {});
   } catch {
     return; // disk cache is opportunistic; write failure must never throw
   }
+  _writeCount++;
+  if (_writeCount % 16 !== 0) return;
   // Prune to MAX_DISK_ENTRIES, leaving a buffer of 16 so we don't re-prune every write.
   try {
     const entries = readdirSync(DISK_CACHE_DIR)
