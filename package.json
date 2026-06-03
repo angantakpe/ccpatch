@@ -48,11 +48,13 @@
     "SUPPORTED_VERSIONS.md",
     "CONTRIBUTING.md"
   ],
+  "workspaces": ["tools/reconstructor"],
   "scripts": {
     "test:patches": "node --test tests/patch-verification.test.mjs",
     "test:boot": "node --test tests/boot-smoke.test.mjs",
     "test:integration": "node tests/integration_roundtrip.mjs",
     "test:all": "node --test tests/*.test.mjs",
+    "test:coverage": "node --test --experimental-test-coverage tests/*.test.mjs",
     "test:watch": "node --watch --test tests/*.test.mjs",
     "lint:dead": "node scripts/lint-dead.mjs",
     "lint:unused": "knip",
