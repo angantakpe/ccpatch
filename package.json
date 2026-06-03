@@ -48,7 +48,7 @@
     "SUPPORTED_VERSIONS.md",
     "CONTRIBUTING.md"
   ],
-  "workspaces": ["tools/reconstructor"],
+  "workspaces": ["tools/reconstructor", "packages/adk"],
   "scripts": {
     "test:patches": "node --test tests/patch-verification.test.mjs",
     "test:boot": "node --test tests/boot-smoke.test.mjs",
