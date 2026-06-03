@@ -179,6 +179,7 @@ patches:
   # ── Verticals (composed on top of the horizontals above) ────────────────────
   event_bus: false                # typed pub/sub (__ccpBus) — shared by orchestrator/bridge
   auth_token: false               # shared-secret loader (CC_BRIDGE_TOKEN / SIGHUP reload)
+  agent_lifecycle: false          # emit turn.start/turn.end/agent.spawn/agent.exit on __ccpBus
   agent_tree: false               # parent→child subagent tree with per-node cost/tool accounting
 
   headless_bridge:                # NDJSON socket: hello/submit/dispatch/subscribe/cancel/bye
@@ -343,6 +344,7 @@ profiles:
     extends: minimal
     patches:
       - subagent_hooks_stub
+      - agent_lifecycle
       - event_bus
       - expose_agent_tool
       - prime_agent_tool_on_boot
