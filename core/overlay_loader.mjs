@@ -18,6 +18,7 @@
  */
 
 const SENTINEL = '/* [ccpatch overlay-loader] */';
+const AGENTS_SENTINEL = '/* [ccpatch agents-dir] */';
 
 // Integrity-checking loader block injected into the bundle.
 // Uses synchronous fs/crypto so it runs safely at boot before the event loop.
@@ -40,7 +41,32 @@ const hook =
   `} ` +
   `require('./ccpatch-overlay.mjs'); ` +
   `})(); ` +
-  `} catch (e) { if (e && e.code !== 'MODULE_NOT_FOUND') console.error('[ccpatch] overlay load failed:', e && e.message); }\n`;
+  `} catch (e) { if (e && e.code !== 'MODULE_NOT_FOUND') console.error('[ccpatch] overlay load failed:', e && e.message); }\n` +
+  `${AGENTS_SENTINEL} ` +
+  `(function () { ` +
+  `var __ccp_ad = require('path').resolve(__dirname, 'ccpatch-agents'); ` +
+  `var __ccp_afs = require('fs'); ` +
+  `if (!__ccp_afs.existsSync(__ccp_ad)) return; ` +
+  `var __ccp_entries = __ccp_afs.readdirSync(__ccp_ad).filter(function (f) { return f.endsWith('.mjs'); }).sort(); ` +
+  `var __ccp_crypto = require('crypto'); ` +
+  `for (var __ccp_ai = 0; __ccp_ai < __ccp_entries.length; __ccp_ai++) { ` +
+  `(function (__ccp_fname) { ` +
+  `try { ` +
+  `var __ccp_afp = require('path').join(__ccp_ad, __ccp_fname); ` +
+  `var __ccp_asp = __ccp_afp + '.sha256'; ` +
+  `if (__ccp_afs.existsSync(__ccp_asp)) { ` +
+  `var __ccp_aexp = __ccp_afs.readFileSync(__ccp_asp, 'utf8').trim(); ` +
+  `var __ccp_aact = __ccp_crypto.createHash('sha256').update(__ccp_afs.readFileSync(__ccp_afp)).digest('hex'); ` +
+  `if (__ccp_aact !== __ccp_aexp) { ` +
+  `process.stderr.write('[ccpatch] INTEGRITY FAIL: agent file hash mismatch: ' + __ccp_fname + '\\n'); ` +
+  `return; ` +
+  `} ` +
+  `} ` +
+  `require(__ccp_afp); ` +
+  `} catch (e) { process.stderr.write('[ccpatch] agent load failed: ' + __ccp_fname + ': ' + (e && e.message) + '\\n'); } ` +
+  `})(__ccp_entries[__ccp_ai]); ` +
+  `} ` +
+  `})();\n`;
 
 const __cjsIife__ = '(function(exports, require, module, __filename, __dirname) {';
 
@@ -53,8 +79,8 @@ export default {
   phase: 'pre',
   required: true,
   verify: {
-    present: ["require('./ccpatch-overlay.mjs')", SENTINEL],
-    count: { present: 2 },
+    present: ["require('./ccpatch-overlay.mjs')", SENTINEL, AGENTS_SENTINEL],
+    count: { present: 3 },
   },
   apply: (code) => {
     if (code.includes(SENTINEL)) return code; // idempotent
