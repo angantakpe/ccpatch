@@ -100,6 +100,7 @@ export function detectDrift(preCode, normalized, name, patchOptions) {
 export function applySinglePatch({
   name, patch, normalized, preCode, beforeOpts, atSites,
   frame, globalStrict, patchOptions, logger, warnStorageOnce, compileKind,
+  storageRoot = PROJECT_ROOT,
 }) {
   const bestEffort = patchOptions.bestEffort === true;
   const _patchStart = Date.now();
@@ -169,8 +170,8 @@ export function applySinglePatch({
       const { candidates, probesCount, alertLine } = detectDrift(preCode, normalized, name, patchOptions);
       // First storage failure warns; subsequent ones are suppressed (S5).
       try {
-        mkdirSync(join(PROJECT_ROOT, 'storage', 'outputs'), { recursive: true });
-        appendFileSync(join(PROJECT_ROOT, 'storage', 'outputs', 'anchor-drift.jsonl'), alertLine + '\n', 'utf8');
+        mkdirSync(join(storageRoot, 'storage', 'outputs'), { recursive: true });
+        appendFileSync(join(storageRoot, 'storage', 'outputs', 'anchor-drift.jsonl'), alertLine + '\n', 'utf8');
       } catch (err) { warnStorageOnce('anchor-drift.jsonl', err); }
 
       if (candidates.length > 0) {

@@ -1,4 +1,5 @@
 import { structuredPatch } from 'diff';
+import { PROJECT_ROOT } from './paths.mjs';
 import { validateManifest } from './manifest.mjs';
 import { resolveAt } from './at-selector.mjs';
 import { compileKind } from './patch-kinds.mjs';
@@ -125,7 +126,7 @@ export function buildPatchReport(timings, drifts, verifyIssuesReport, results) {
  * @param {Function} warnStorageOnce — first-write-failure guard
  * @returns {Array<object>} allConflicts — array of conflict records
  */
-export function detectAndRecordOverlaps(phaseTraces, frame, globalStrict, logger, warnStorageOnce) {
+export function detectAndRecordOverlaps(phaseTraces, frame, globalStrict, logger, warnStorageOnce, storageRoot = PROJECT_ROOT) {
   const allConflicts = [];
   const failures = [];
   for (const phaseKey of ['pre', 'main', 'post']) {
@@ -183,7 +184,7 @@ export function detectAndRecordOverlaps(phaseTraces, frame, globalStrict, logger
   }
   // Conflicts JSONL is written BEFORE the strict-failure throw (so a strict
   // build that aborts still leaves the conflict forensics behind). ARCH1.
-  writeConflictsArtifact(allConflicts, warnStorageOnce);
+  writeConflictsArtifact(allConflicts, warnStorageOnce, storageRoot);
   return { allConflicts, failures };
 }
 
@@ -199,6 +200,7 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
   // S5: run-scoped latch — first storage-write failure warns, rest stay quiet.
   const warnStorageOnce = makeStorageWarnOnce(logger);
   const globalStrict = patchOptions.strict === true;
+  const storageRoot = patchOptions.storageRoot ?? PROJECT_ROOT;
   const failures = [];
   // Per-phase trace for overlap detection.
   const phaseTraces = { pre: [], main: [], post: [] };
@@ -375,6 +377,7 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
       const r = applySinglePatch({
         name, patch, normalized, preCode, beforeOpts, atSites,
         frame, globalStrict, patchOptions, logger, warnStorageOnce, compileKind,
+        storageRoot,
       });
       timings.push({ name, ms: r.timingMs });
       results[name] = r.status;
@@ -459,7 +462,7 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
   // strict mode; in strict mode they become fatal unless allowlisted.
   // Delegated to detectAndRecordOverlaps() — independently testable.
   const { allConflicts, failures: overlapFailures } = detectAndRecordOverlaps(
-    phaseTraces, frame, globalStrict, logger, warnStorageOnce,
+    phaseTraces, frame, globalStrict, logger, warnStorageOnce, storageRoot,
   );
   for (const f of overlapFailures) failures.push(f);
 
@@ -490,7 +493,7 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
   }
 
   // ARCH1: coverage-apply manifest + patch-results catalog, consolidated.
-  writeApplyArtifacts({ results, patches, phaseTraces, patchOptions, phaseOf, logger, warnStorageOnce });
+  writeApplyArtifacts({ results, patches, phaseTraces, patchOptions, phaseOf, logger, warnStorageOnce, root: storageRoot });
 
   // Return shape (LOCKED contract — see cli.mjs apply path which reads .code +
   // .report defensively): the patched bundle (`code`), the per-patch outcome
