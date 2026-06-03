@@ -326,11 +326,36 @@ export async function runBuild(ctx) {
     return 0;
   }
 
+  // Compute the output hash once so it can be reused for the sidecar and the
+  // post-write integrity check without hashing patchedCode twice.
+  const outputSha256 = sha256(patchedCode);
+
   const bundleWriteStartedAt = Date.now();
   fs.writeFileSync(options.outputPath, patchedCode, 'utf8');
   fs.chmodSync(options.outputPath, 0o755);
   phaseMs.bundleWrite = Date.now() - bundleWriteStartedAt;
   logger.log(`\nSuccessfully saved patched bundle to: ${options.outputPath}`);
+
+  // Issue #8: post-write integrity check + .sha256 sidecar (skipped in dry-run).
+  if (!options.patchOptions?.dryRun) {
+    // 1. Re-read the written file and compare hashes.
+    const writtenBytes = fs.readFileSync(options.outputPath, 'utf8');
+    const writtenSha = sha256(writtenBytes);
+    if (writtenSha === outputSha256) {
+      logger.log(`  [+] Output integrity: OK`);
+    } else {
+      logger.warn(`  [!] Output integrity: MISMATCH`);
+    }
+
+    // 2. Write a .sha256 sidecar next to the output bundle.
+    try {
+      const sha256SidecarPath = options.outputPath + '.sha256';
+      fs.writeFileSync(sha256SidecarPath, outputSha256 + '\n', 'utf8');
+      logger.log(`  [+] SHA-256 sidecar written to: ${sha256SidecarPath}`);
+    } catch (err) {
+      logger.warn(`  [!] Could not write .sha256 sidecar: ${err.message}`);
+    }
+  }
 
   // S1: persist a capability-gate-bypass sentinel next to the output bundle.
   // The make step (scripts/mk/cli.mk) reads this to set the manifest's
@@ -376,7 +401,7 @@ export async function runBuild(ctx) {
       timestamp: new Date().toISOString(),
       ccVersion: patchOptions.version ?? null,
       inputSha256: sha256(originalCode),
-      outputSha256: sha256(patchedCode),
+      outputSha256,
       patches: captureReverse,
     };
     const sidecarPath = sidecarPathFor(options.outputPath);
