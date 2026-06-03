@@ -88,6 +88,65 @@ jobs:
         # version-matrix.yml, where drift only comments and does not block.
         run: node scripts/ci-drift-sweep.mjs --latest "$CC_BUNDLE" --latest-version "$CC_VERSION"
 
+      - name: Summarise drift results
+        if: always()
+        id: drift-summary
+        run: |
+          JSONL="storage/outputs/anchor-drift.jsonl"
+          if [ ! -f "$JSONL" ]; then
+            echo "✅ No anchor drift detected" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # Parse the JSONL and build a markdown table.
+          node - "$JSONL" <<'NODE_EOF'
+          const fs = require('fs');
+          const filePath = process.argv[1];
+          const raw = fs.readFileSync(filePath, 'utf8').trim();
+          if (!raw) {
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, '✅ No anchor drift detected\n');
+            process.exit(0);
+          }
+
+          const lines = raw.split('\n').map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+          // Deduplicate: latest record wins per (patch, version) pair.
+          const byKey = new Map();
+          for (const e of lines) {
+            const key = `${e.patch}||${e.version ?? ''}`;
+            byKey.set(key, e);
+          }
+          const entries = [...byKey.values()];
+
+          if (entries.length === 0) {
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, '✅ No anchor drift detected\n');
+            process.exit(0);
+          }
+
+          // Build the step summary table.
+          const rows = ['| Patch | Version | Drift Candidates |', '|-------|---------|-----------------|'];
+          for (const e of entries) {
+            const patch = e.patch ?? '(unknown)';
+            const version = e.version ?? '(unknown)';
+            const candidates = Array.isArray(e.candidates) ? e.candidates.length : 0;
+            rows.push(`| ${patch} | ${version} | ${candidates} |`);
+          }
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, rows.join('\n') + '\n');
+
+          // Set output variable for downstream steps.
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, 'drifted=true\n');
+
+          // Emit per-version workflow annotations.
+          const byVersion = new Map();
+          for (const e of entries) {
+            const v = e.version ?? 'unknown';
+            if (!byVersion.has(v)) byVersion.set(v, []);
+            byVersion.get(v).push(e.patch ?? '(unknown)');
+          }
+          for (const [v, patches] of byVersion) {
+            process.stdout.write(`::warning::${patches.length} patch(es) drifted in version ${v}: ${patches.join(', ')}\n`);
+          }
+          NODE_EOF
+
       - name: Strict apply (capability gate)
         # Fails if any enabled patch declares high-risk capabilities the
         # allowlist doesn't acknowledge. The allowlist below covers what

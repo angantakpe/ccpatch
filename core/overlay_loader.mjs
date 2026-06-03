@@ -19,9 +19,27 @@
 
 const SENTINEL = '/* [ccpatch overlay-loader] */';
 
+// Integrity-checking loader block injected into the bundle.
+// Uses synchronous fs/crypto so it runs safely at boot before the event loop.
 const hook =
-  `${SENTINEL} try { require('./ccpatch-overlay.mjs'); } ` +
-  `catch (e) { if (e && e.code !== 'MODULE_NOT_FOUND') console.error('[ccpatch] overlay load failed:', e && e.message); }\n`;
+  `${SENTINEL} try { ` +
+  `(function () { ` +
+  `var __ccp_op = require('path').resolve(__dirname, 'ccpatch-overlay.mjs'); ` +
+  `var __ccp_sp = __ccp_op + '.sha256'; ` +
+  `var __ccp_fs = require('fs'); ` +
+  `if (__ccp_fs.existsSync(__ccp_sp)) { ` +
+  `var __ccp_expected = __ccp_fs.readFileSync(__ccp_sp, 'utf8').trim(); ` +
+  `var __ccp_actual = require('crypto').createHash('sha256').update(__ccp_fs.readFileSync(__ccp_op)).digest('hex'); ` +
+  `if (__ccp_actual !== __ccp_expected) { ` +
+  `process.stderr.write('[ccpatch] INTEGRITY FAIL: overlay file hash mismatch — possible tampering. Skipping overlay load.\\n'); ` +
+  `return; ` +
+  `} ` +
+  `} else { ` +
+  `process.stderr.write('[ccpatch] overlay integrity sidecar not found — skipping hash check (old build).\\n'); ` +
+  `} ` +
+  `require('./ccpatch-overlay.mjs'); ` +
+  `})(); ` +
+  `} catch (e) { if (e && e.code !== 'MODULE_NOT_FOUND') console.error('[ccpatch] overlay load failed:', e && e.message); }\n`;
 
 const __cjsIife__ = '(function(exports, require, module, __filename, __dirname) {';
 

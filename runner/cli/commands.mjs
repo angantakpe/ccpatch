@@ -34,6 +34,7 @@ import path from 'node:path';
 // cmd-explain.mjs is a leaf that only depends on config/manifest/runner, so we
 // can import it directly here without creating a cycle.
 import { runExplain } from './cmd-explain.mjs';
+import { runOutputsClear } from './cmd-outputs.mjs';
 
 export const DEFAULT_KEY = '__build__';
 
@@ -298,6 +299,29 @@ export function buildCommandTable(impl) {
         return { explain: true, requestedPatches, profile, json };
       },
       run: (ctx) => runExplain(ctx),
+    },
+    {
+      name: 'outputs',
+      resultKey: 'outputs',
+      helpKey: 'outputs',
+      needsPatches: false,
+      parse(rest) {
+        // Expect: outputs clear [--force] [--rotate <N>]
+        const sub = rest[0];
+        if (sub !== 'clear') {
+          return { error: 'Usage: node patch-cli.mjs outputs clear [--force] [--rotate <KB>]' };
+        }
+        let force = false;
+        let rotateKb = null;
+        let outputsDir = null;
+        for (let i = 1; i < rest.length; i++) {
+          if (rest[i] === '--force') force = true;
+          else if (rest[i] === '--rotate' && rest[i + 1]) rotateKb = parseFloat(rest[++i]);
+          else if (rest[i] === '--outputs-dir' && rest[i + 1]) outputsDir = rest[++i];
+        }
+        return { outputs: true, outputsSub: sub, force, rotateKb, outputsDir };
+      },
+      run: (ctx) => runOutputsClear(ctx),
     },
     {
       // The default build path is NOT a named subcommand: it takes positional

@@ -1,13 +1,10 @@
 // A1: default (no-subcommand) build invocation, split out of cli.mjs. Applies
 // patches and writes the patched bundle (plus overlay/sidecar/preload/report),
 // including the capability gate and config/profile resolution it calls.
-// parseBuildArgs (#1) and sha256 integrity gate (#8) also live here.
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { createHash } from 'node:crypto';
 
-import { USAGE } from './help.mjs';
 import { renderBanner } from './banner.mjs';
 import { buildJsonReport, renderTextSummary } from './build-report.mjs';
 import {
@@ -18,7 +15,7 @@ import {
 } from './capabilities.mjs';
 import { sha256, sidecarPathFor, REVERT_SIDECAR_VERSION } from './sidecar.mjs';
 import { applyNamedPatches } from '../runner.mjs';
-import { readAcks, resolveEffectivePatches, getBundleSha } from '../config.mjs';
+import { readAcks, resolveEffectivePatches } from '../config.mjs';
 import { CAPABILITIES } from '../manifest.mjs';
 import { buildPreload } from '../preload-builder.mjs';
 import { emitOverlay } from '../overlay-builder.mjs';
@@ -30,103 +27,6 @@ import {
 } from './native-profile.mjs';
 
 /**
- * Parse the default (no-subcommand) build invocation: positional
- * `<input.js> <output.js>` plus the apply flags. Moved here from cli.mjs (#1)
- * alongside runBuild. Re-exported by cli.mjs for backward compat.
- */
-export function parseBuildArgs(args) {
-  if (args.length < 2) {
-    return { error: USAGE };
-  }
-
-  // Guard: the first two positionals are <input> <output>. A flag landing in
-  // either slot means the author omitted a positional (a flag is being silently
-  // swallowed as a filename — e.g. `patch-cli.mjs bundle.js --patch foo` writes a
-  // file literally named "--patch"). Reject with a pointed message instead.
-  if (args[0].startsWith('--')) {
-    return { error: `Error: expected <input> <output>; got flag '${args[0]}' in input position — did you omit the input path?\n${USAGE}` };
-  }
-  if (args[1].startsWith('--')) {
-    return { error: `Error: expected <input> <output>; got flag '${args[1]}' in output position — did you omit the output path?\n${USAGE}` };
-  }
-
-  const inputPath = path.resolve(args[0]);
-  const outputPath = path.resolve(args[1]);
-  const requestedPatches = [];
-  let preloadPath = null;
-  let profile = null;
-
-  const patchOptions = {};
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === '--patch' && args[i + 1]) {
-      requestedPatches.push(args[i + 1]);
-    }
-    if ((args[i] === '--profile' || args[i] === '-p') && args[i + 1]) {
-      profile = args[i + 1];
-    }
-    if ((args[i] === '--model' || args[i] === '--version') && args[i + 1]) {
-      patchOptions[args[i].slice(2)] = args[i + 1];
-    }
-    if (args[i] === '--preload' && args[i + 1]) {
-      preloadPath = path.resolve(args[i + 1]);
-    }
-    if (args[i] === '--strict') {
-      patchOptions.strict = true;
-    }
-    if (args[i] === '--dry-run') {
-      patchOptions.dryRun = true;
-    }
-    if (args[i] === '--write-on-clean') {
-      patchOptions.writeOnClean = true;
-    }
-    if (args[i] === '--no-fallback') {
-      patchOptions.disableFallback = true;
-    }
-    if (args[i] === '--best-effort') {
-      patchOptions.bestEffort = true;
-    }
-    if (args[i] === '--dev') {
-      patchOptions.dev = true;
-    }
-    if (args[i] === '--allow-capabilities' && args[i + 1]) {
-      patchOptions.allowCapabilitiesRaw = args[++i];
-    } else if (args[i].startsWith('--allow-capabilities=')) {
-      patchOptions.allowCapabilitiesRaw = args[i].slice('--allow-capabilities='.length);
-    }
-    if (args[i] === '--allow-unacked') {
-      patchOptions.allowUnacked = true;
-    }
-    // WS6 Item 5: --paranoid / strict mode. At build time it forces fail-closed
-    // repack (never pass --allow-unverified to WS1's repacker, treat any
-    // [repack:skip] degradation as a build FAILURE) and documents the loud
-    // CCPATCH_PARANOID runtime toggle for the injected fetch_interceptor.
-    if (args[i] === '--paranoid') {
-      patchOptions.paranoid = true;
-    }
-    // --allow-unverified: explicit opt-out of WS1's now-required post-repack
-    // smoke check. Only threaded through to repack when the user passes it AND
-    // paranoid mode is off (paranoid forces fail-closed and ignores this).
-    if (args[i] === '--allow-unverified') {
-      patchOptions.allowUnverified = true;
-    }
-  }
-  if (!patchOptions.strict && process.env.CCPATCH_STRICT === '1') {
-    patchOptions.strict = true;
-  }
-  if (!patchOptions.paranoid && process.env.CCPATCH_PARANOID === '1') {
-    patchOptions.paranoid = true;
-  }
-  if (!patchOptions.dev && process.env.CCPATCH_DEV === '1') {
-    patchOptions.dev = true;
-  }
-  if (!patchOptions.bestEffort && process.env.CCPATCH_BEST_EFFORT === '1') {
-    patchOptions.bestEffort = true;
-  }
-
-  return { inputPath, outputPath, requestedPatches, patchOptions, preloadPath, profile };
-}
-
-/**
  * The default (no-subcommand) build invocation: apply patches and write the
  * patched bundle (plus overlay/sidecar/preload/report). Extracted from the old
  * runPatchCli tail so the command table (DEFAULT_KEY) can dispatch to it.
@@ -135,41 +35,6 @@ export function parseBuildArgs(args) {
 export async function runBuild(ctx) {
   const { options, patches, logger } = ctx;
   let code = fs.readFileSync(options.inputPath, 'utf8');
-
-  // ── Issue #8: sha256 integrity gate ──────────────────────────────────────────
-  // If ccpatch.yml has a bundle_sha entry for the resolved version, verify the
-  // input file matches before applying any patches. Skipped silently when no sha
-  // is configured for this version. Throws (exits 1) on mismatch unless
-  // options.patchOptions.allowUnverified is true.
-  {
-    const resolvedVersion =
-      options.patchOptions?.version ||
-      process.env.CCPATCH_CLI_VERSION ||
-      null;
-    if (resolvedVersion) {
-      const expectedSha = getBundleSha(resolvedVersion);
-      if (expectedSha) {
-        const actualSha = createHash('sha256').update(code).digest('hex');
-        if (actualSha !== expectedSha) {
-          logger.warn('');
-          logger.warn('  ⚠ ─────────────────────────────────────────────────────────────────');
-          logger.warn('  ⚠ BUNDLE SHA256 MISMATCH — input file does not match known sha');
-          logger.warn(`  ⚠ version:  ${resolvedVersion}`);
-          logger.warn(`  ⚠ expected: ${expectedSha}`);
-          logger.warn(`  ⚠ actual:   ${actualSha}`);
-          logger.warn('  ⚠ ─────────────────────────────────────────────────────────────────');
-          logger.warn('');
-          if (!options.patchOptions?.allowUnverified) {
-            logger.error(
-              'Error: bundle sha256 mismatch. Pass --allow-unverified to skip this check.'
-            );
-            return 1;
-          }
-          logger.warn('  [!] --allow-unverified set — proceeding despite sha mismatch.');
-        }
-      }
-    }
-  }
 
   // ── Feature flags / profile / --patch resolution ───────────────────────────
   // U2: precedence (explicit --patch > --profile > ccpatch.yml enabled flags,
@@ -415,15 +280,29 @@ export async function runBuild(ctx) {
   phaseMs.apply = Date.now() - applyStartedAt;
 
   if (patchOptions.dryRun) {
-    const { createPatch } = await import('diff');
-    const diffOutput = createPatch(
-      path.basename(options.inputPath),
-      originalCode,
-      patchedCode,
-      'original',
-      'patched'
-    );
-    process.stdout.write(diffOutput);
+    // Lazy diff: only compute the full unified diff (expensive on ~15MB bundles)
+    // when stdout is a TTY (a human is watching) or when --output-diff is passed
+    // explicitly. When piped to a file or /dev/null, skip createPatch entirely and
+    // emit a one-line summary to stderr instead — repeated dry-run iteration in
+    // scripts is much faster this way.
+    const shouldEmitDiff = patchOptions.outputDiff || process.stdout.isTTY;
+    if (shouldEmitDiff) {
+      const { createPatch } = await import('diff');
+      const diffOutput = createPatch(
+        path.basename(options.inputPath),
+        originalCode,
+        patchedCode,
+        'original',
+        'patched'
+      );
+      process.stdout.write(diffOutput);
+    } else {
+      const deltaBytes = Buffer.byteLength(patchedCode, 'utf8') - Buffer.byteLength(originalCode, 'utf8');
+      const sign = deltaBytes >= 0 ? '+' : '';
+      process.stderr.write(
+        `dry-run: ${patchesToApply.length} patch${patchesToApply.length === 1 ? '' : 'es'} applied, ${sign}${deltaBytes} bytes delta\n`
+      );
+    }
 
     // ── Shadow-mode semantic check ─────────────────────────────────────
     // Compare unpatched vs patched along several dimensions that pure
@@ -594,12 +473,11 @@ export async function runBuild(ctx) {
     ...runnerReport,
     phases: { ...(runnerReport.phases || {}), ...phaseMs },
   };
-  if (options.jsonOutput || options.json) {
+  if (options.json) {
     // JSON path: a single JSON object on stdout. The leveled logger has
     // already routed informational text to stderr when --json was set, so
     // the payload is the only thing on stdout.
-    // #12: emit the compact per-patch array format alongside the full report.
-    const fullPayload = buildJsonReport({
+    const payload = buildJsonReport({
       ok: true,
       durationMs,
       report: reportWithPhases,
@@ -607,32 +485,7 @@ export async function runBuild(ctx) {
       paranoid: patchOptions.paranoid === true,
       platformDegradation: platformSkip,
     });
-    const version =
-      patchOptions.version ||
-      process.env.CCPATCH_CLI_VERSION ||
-      null;
-    // Build a per-patch status array from the runner report's statuses map
-    // (may be empty on older runner shapes — falls back to 'applied' for all).
-    const statusMap = reportWithPhases.statuses || {};
-    const patchResults = patchesToApply.map(name => {
-      const status = statusMap[name] || 'applied';
-      return {
-        name,
-        status,
-        changed: status === 'applied',
-        verifyPassed: !(Array.isArray(reportWithPhases.verifyIssues)
-          ? reportWithPhases.verifyIssues.some(v => (v.name || v.patch) === name)
-          : false),
-      };
-    });
-    // Merge both formats into one payload so consumers get the compact view
-    // (version + patches) AND the full detail (ok, durationMs, drifts, etc.)
-    const payload = {
-      ...fullPayload,
-      version,
-      patches: patchResults,
-    };
-    process.stdout.write(JSON.stringify(payload, null, 2) + '\n');
+    process.stdout.write(JSON.stringify(payload) + '\n');
   } else {
     logger.log('');
     logger.log(renderTextSummary({

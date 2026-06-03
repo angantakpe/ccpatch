@@ -28,11 +28,13 @@ export const HELP = Object.freeze({
     'unminified Claude Code bundle and write the patched output.\n' +
     '\n' +
     'Options:\n' +
-    '  --patch <name>           Apply just this patch (repeatable). "all" = every patch.\n' +
+    '  --patch <name[,name…]>   Apply just this patch (repeatable; comma-separated list ok). "all" = every patch.\n' +
     '  --profile <name>         Profile from ccpatch.yml: minimal | standard | power | native\n' +
     '  --preload <path.mjs>     Emit a Node --require preload helper to this path\n' +
     '  --strict                 Fail on weak verify, anchor drift, or unacked caps\n' +
     '  --dry-run                Print the unified diff + shadow report, don\'t write\n' +
+    '                           (diff skipped when stdout is not a TTY; use --output-diff to force)\n' +
+    '  --output-diff            With --dry-run: always emit the unified diff even when stdout is piped\n' +
     '  --write-on-clean         With --dry-run: write only if shadow report is clean\n' +
     '  --no-fallback            Skip fallback diff application on anchor miss\n' +
     '  --best-effort            Downgrade verify.present no-ops from fatal to warn (env: CCPATCH_BEST_EFFORT=1)\n' +
@@ -108,6 +110,21 @@ export const HELP = Object.freeze({
     '  --drift <path>    Override the anchor-drift.jsonl source\n' +
     '  --anchors <path>  Override the runner/anchors.mjs target',
 
+  outputs:
+    'Usage: ccpatch outputs clear [--force] [--rotate <KB>]\n' +
+    '\n' +
+    'Inspect and manage the JSONL/JSON files written to storage/outputs/ by\n' +
+    'the runner, doctor, and CI drift sweep.\n' +
+    '\n' +
+    'Without --force: lists files and their sizes, then exits 0.\n' +
+    '\n' +
+    'Options:\n' +
+    '  --force          Delete (or rotate) the listed files.\n' +
+    '  --rotate <KB>    Keep only the last KB kilobytes per file instead of\n' +
+    '                   deleting. For JSONL files: oldest lines are dropped\n' +
+    '                   until the retained content fits. For plain JSON files\n' +
+    '                   that exceed the limit: deleted (no line-level trim).',
+
   module:
     'Usage:\n' +
     '  ccpatch module install <path-or-url> [--strict] [--allow-capabilities <list>] [--force]\n' +
@@ -171,6 +188,7 @@ export const USAGE =
   '  node patch-cli.mjs module remove <name>\n' +
   '  node patch-cli.mjs module verify <name>\n' +
   '  node patch-cli.mjs module update <name>\n' +
+  '  node patch-cli.mjs outputs clear [--force] [--rotate <KB>]\n' +
   '  node patch-cli.mjs --list\n' +
   '\n' +
   'Global options: --log-level=silent|error|warn|info|debug   --quiet   --json   --help\n' +
