@@ -174,7 +174,12 @@ export default {
     };
 
     sock.on('data', (chunk) => {
-      buf += chunk.toString('utf8');
+      const chunkStr = chunk.toString('utf8');
+      if (buf.length + chunkStr.length > MAX_LINE) {
+        send({ kind: 'error', error: 'line too long' });
+        return sock.destroy();
+      }
+      buf += chunkStr;
       let i;
       while ((i = buf.indexOf('\\n')) >= 0) {
         const line = buf.slice(0, i);
