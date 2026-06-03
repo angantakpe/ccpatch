@@ -115,6 +115,7 @@ patches:
   rate_limit: false          # skip retries on subscription limits, cap Retry-After at 30s
   large_content_guard: false # truncate oversized system-message content before terminal crash
   recap_strip_hint: false    # remove "(disable recaps in /config)" hint from recaps
+  suppress_npm_deprecation: false # hide "switched from npm to native installer" banner (irrelevant for patched bundles)
 
   # ── Command System ───────────────────────────────────────────────────────────
   custom_commands: false     # slash-command registry (/costs, /stats, /export, /clear-cache)
@@ -219,6 +220,7 @@ profiles:
       - slash_dispatch
       - context_budget_warn
       - recap_strip_hint
+      - suppress_npm_deprecation
       - unhide_features
       - extended_thinking
       - force_thinking
@@ -251,6 +253,7 @@ profiles:
     - rate_limit
     - large_content_guard
     - recap_strip_hint
+    - suppress_npm_deprecation
     - custom_commands
     - slash_dispatch
     - subagent_hooks_stub
