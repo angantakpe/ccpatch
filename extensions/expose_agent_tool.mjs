@@ -84,6 +84,10 @@
  *   background?   : boolean,   // default true — takes the async path
  *   model?        : string,    // optional model override
  *   timeoutMs?    : number,    // default 120_000
+ *   agentDef?     : object,    // optional CC-shaped agent definition merged into
+ *                              // activeAgents so a non-native subagent_type (e.g.
+ *                              // an ADK-defined agent) resolves. Shape: { agentType,
+ *                              // whenToUse, tools, source, getSystemPrompt, model? }.
  * }) → Promise<{
  *   text        : string,
  *   durationMs  : number,
@@ -186,7 +190,7 @@ try {
        * invoke({ subagent_type, prompt, description, background, model, timeoutMs })
        * → Promise<{ text, durationMs, agentType, runId }>
        */
-      invoke({ subagent_type, prompt, description = 'heartbeat task', background = true, model, timeoutMs = 120000 } = {}) {
+      invoke({ subagent_type, prompt, description = 'heartbeat task', background = true, model, timeoutMs = 120000, agentDef } = {}) {
         if (!this._primed || !this._ctxTemplate) {
           return Promise.reject(Object.assign(new Error('AgentTool not yet primed — no user prompt has run in this session'), { code: 'not-yet-primed' }));
         }
@@ -286,6 +290,24 @@ try {
               return c;
             });
           }
+          // ── ADK agent bridge ───────────────────────────────────────────────
+          // subagent_type is resolved against options.agentDefinitions.activeAgents
+          // (see prime_agent_tool_on_boot). ADK-defined agents live in the ADK's
+          // own registry, invisible to that lookup. When the caller supplies a
+          // CC-shaped agentDef ({ agentType, whenToUse, tools, source,
+          // getSystemPrompt, ... }), merge it into activeAgents so the spawn
+          // resolves it. Replaces any existing def of the same agentType. The
+          // resolution filter (kPH) only drops deny-ruled agents, so a synthetic
+          // def survives. No-op when agentDef is absent (native subagent path).
+          let liveAgentDefs = tmpl.options?.agentDefinitions;
+          if (agentDef && typeof agentDef === 'object' && agentDef.agentType) {
+            const baseDefs = (liveAgentDefs && typeof liveAgentDefs === 'object')
+              ? liveAgentDefs
+              : { activeAgents: [] };
+            const prevActive = Array.isArray(baseDefs.activeAgents) ? baseDefs.activeAgents : [];
+            const filtered = prevActive.filter((a) => a && a.agentType !== agentDef.agentType);
+            liveAgentDefs = { ...baseDefs, activeAgents: [...filtered, agentDef] };
+          }
           const bgCtx = {
             ...tmpl,
             agentId: runId,
@@ -304,6 +326,9 @@ try {
               tools: liveTools,
               mcpClients: liveMcpClients,
               mcpResources: liveMcpResources,
+              // Only override agentDefinitions when we merged an ADK agent def;
+              // otherwise inherit tmpl.options.agentDefinitions unchanged.
+              ...(agentDef && agentDef.agentType ? { agentDefinitions: liveAgentDefs } : {}),
             },
           };
 
