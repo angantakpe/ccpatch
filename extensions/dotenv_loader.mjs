@@ -16,7 +16,12 @@ export default {
   //   - CC_SAVE_CONVERSATIONS, CC_CACHE_RESPONSES, CLAUDE_CACHE
   //                                        (would silently enable disk capture
   //                                        of conversation/response data)
-  //   - any CC_*_TOKEN                    (bridge / integration tokens)
+  //   - any CC_*TOKEN                     (bridge / integration tokens,
+  //                                        including bare CC_TOKEN)
+  //   - CLERK_SECRET_KEY, DATABASE_URL, REDIS_URL, OPENAI_API_KEY,
+  //     GITHUB_TOKEN, AWS_SECRET_ACCESS_KEY, AWS_ACCESS_KEY_ID
+  //                                        (credential injection via
+  //                                        hostile repo .env)
   // A blocked key found in .env is skipped and a warning is emitted.
   capabilities: ["env","fs"],
   // No dependsOn — runs LAST in patch order (moved to end of PATCH list in vars.mk)
@@ -63,10 +68,18 @@ if (!globalThis.__ccpDotenvLoaded) {
         'PATH': 1,
         // blocks runtime-behaviour changes via hostile .env
         'NODE_DEBUG': 1,
+        // blocks credential injection via hostile repo .env
+        'CLERK_SECRET_KEY': 1,
+        'DATABASE_URL': 1,
+        'REDIS_URL': 1,
+        'OPENAI_API_KEY': 1,
+        'GITHUB_TOKEN': 1,
+        'AWS_SECRET_ACCESS_KEY': 1,
+        'AWS_ACCESS_KEY_ID': 1,
       };
       var __isBlocked = function(k) {
         if (__envDeny[k]) return true;
-        if (/^CC_.*_TOKEN$/.test(k)) return true;
+        if (/^CC_[A-Z0-9_]*TOKEN$/.test(k)) return true;
         return false;
       };
       for (var __i = 0; __i < __lines.length; __i++) {
