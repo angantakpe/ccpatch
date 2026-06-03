@@ -1,0 +1,9 @@
+{
+  "name": "@codehornets/adk",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Agent Development Kit — define, register, and orchestrate agents inside Claude Code via ccpatch internals",
+  "main": "index.mjs",
+  "exports": { ".": "./index.mjs", "./memory": "./memory.mjs", "./tool-registry": "./tool-registry.mjs" },
+  "engines": { "node": ">=20" }
+}
