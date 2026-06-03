@@ -50,7 +50,20 @@ if (!globalThis.__ccpDotenvLoaded) {
       // SECURITY: security-critical keys must never be settable from a
       // repo-local .env (see file header). Exact-match denylist + a pattern
       // for any CC_*_TOKEN. Shell-set values are unaffected (handled below).
-      var __envDeny = { 'CC_BRIDGE_TOKEN': 1, 'CC_BRIDGE_ADDR': 1, 'ANTHROPIC_BASE_URL': 1, 'ANTHROPIC_API_KEY': 1, 'ANTHROPIC_AUTH_TOKEN': 1, 'CC_WEBHOOK_URL': 1, 'CC_PROJECT_ROOT': 1, 'CLAUDE_CODE_OAUTH_TOKEN': 1, 'CC_SAVE_CONVERSATIONS': 1, 'CC_CACHE_RESPONSES': 1, 'CLAUDE_CACHE': 1 };
+      var __envDeny = {
+        'CC_BRIDGE_TOKEN': 1, 'CC_BRIDGE_ADDR': 1, 'ANTHROPIC_BASE_URL': 1,
+        'ANTHROPIC_API_KEY': 1, 'ANTHROPIC_AUTH_TOKEN': 1, 'CC_WEBHOOK_URL': 1,
+        'CC_PROJECT_ROOT': 1, 'CLAUDE_CODE_OAUTH_TOKEN': 1,
+        'CC_SAVE_CONVERSATIONS': 1, 'CC_CACHE_RESPONSES': 1, 'CLAUDE_CACHE': 1,
+        // blocks --require / --inspect injection via hostile .env (arbitrary code execution)
+        'NODE_OPTIONS': 1,
+        // blocks module-resolution shadowing via hostile .env
+        'NODE_PATH': 1,
+        // blocks executable-lookup shadowing via hostile .env
+        'PATH': 1,
+        // blocks runtime-behaviour changes via hostile .env
+        'NODE_DEBUG': 1,
+      };
       var __isBlocked = function(k) {
         if (__envDeny[k]) return true;
         if (/^CC_.*_TOKEN$/.test(k)) return true;
