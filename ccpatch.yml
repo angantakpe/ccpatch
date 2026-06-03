@@ -142,6 +142,7 @@ patches:
   expose_api_client: false        # Anthropic SDK client via __ccpApiClient
   expose_submit_input: false      # React submit callback via __ccpSubmitInput
   expose_agent_tool: false        # native AgentTool via __ccpAgentTool
+  expose_system_prompt: false     # __ccpSetSystemPrompt persona overlay (ADK swap handoff)
   prime_agent_tool_on_boot: false # prime AgentTool at React mount (no user input needed)
   capture_interactive_request: false # capture first /v1/messages shape for reuse
 
@@ -273,6 +274,7 @@ profiles:
     - expose_api_client
     - expose_submit_input
     - expose_agent_tool
+    - expose_system_prompt
     - prime_agent_tool_on_boot
     - capture_interactive_request
     - model
@@ -347,6 +349,7 @@ profiles:
       - agent_lifecycle
       - event_bus
       - expose_agent_tool
+      - expose_system_prompt
       - prime_agent_tool_on_boot
       - tools_log
       - tool_result_trim

@@ -1,7 +1,7 @@
 export { defineAgent } from './agent.mjs';
 export { defineTool } from './tool-registry.mjs';
 export { createMemory } from './memory.mjs';
-export { AgentRouter } from './handoff.mjs';
+export { AgentRouter, defineHandoff } from './handoff.mjs';
 
 export function useAgentBus() {
   const bus = globalThis.__ccpBus;
