@@ -171,8 +171,8 @@ export async function runDoctorCore(options, patches, logger) {
     logger.log(`  [warning] ${unverified} patch(es) have weak verify (only 'present'). Strengthen with verify.absent or verify.count.`);
   }
 
-  // #12: --json output — emit structured result on stdout after all logging is done
-  if (options.jsonOutput) {
+  // #12/#13: --json output — emit structured result on stdout after all logging is done
+  if (options.json || options.jsonOutput) {
     const version = options.patchOptions?.version ?? process.env.CCPATCH_CLI_VERSION ?? null;
     process.stdout.write(JSON.stringify(
       { version, anchors: anchorResults.map(r => ({ name: r.name, status: r.status, candidates: r.candidates ?? [] })) },

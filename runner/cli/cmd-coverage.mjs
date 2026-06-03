@@ -190,6 +190,19 @@ export async function runCoverage(options, logger = console) {
     rows.push({ name, applied, hits, instrumented, status, marker: entry.coverageMarker ?? null });
   }
 
+  // #13: --json output — emit structured result on stdout instead of text table
+  if (options.json) {
+    const payload = {
+      ccVersion: applyManifest.ccVersion ?? null,
+      bundlePath,
+      runAt: new Date().toISOString(),
+      patches: rows,
+      deadCount,
+    };
+    process.stdout.write(JSON.stringify(payload, null, 2) + '\n');
+    return deadCount > 0 ? 1 : 0;
+  }
+
   // Print markdown table.
   const headers = ['Patch', 'Applied', 'Hit', 'Status'];
   const widths = [
