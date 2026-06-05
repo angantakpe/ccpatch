@@ -30,6 +30,10 @@ import { probeAnchor, fuzzyMatch } from '../runner/anchors.mjs';
 import { compileKind } from '../runner/patch-kinds.mjs';
 import { resolveProfile } from '../runner/manifest.mjs';
 import { readProfiles } from '../runner/config.mjs';
+import { style, icon as glyph } from '../runner/cli/style.mjs';
+
+// Dim, consistent prefix for the doctor's own status lines.
+const TAG = style.gray('🩺 anchor doctor');
 
 const args = process.argv.slice(2);
 let bundlePath = null;
@@ -63,10 +67,10 @@ const versionMatch = absPath.match(/[v\/-](\d+\.\d+\.\d+)/);
 const version = versionMatch ? versionMatch[1] : null;
 
 if (!jsonOut) {
-  console.log(`[anchor_doctor] bundle: ${absPath}`);
-  console.log(`[anchor_doctor] sha256: ${sha}`);
-  console.log(`[anchor_doctor] size: ${(code.length / 1_000_000).toFixed(2)} MB`);
-  if (version) console.log(`[anchor_doctor] inferred version: ${version}`);
+  console.log(`${TAG} ${style.dim('bundle')}  ${absPath}`);
+  console.log(`${TAG} ${style.dim('sha256')}  ${sha}`);
+  console.log(`${TAG} ${style.dim('size')}    ${(code.length / 1_000_000).toFixed(2)} MB`);
+  if (version) console.log(`${TAG} ${style.dim('version')} ${style.cyan(version)}`);
 }
 
 // ── Load every patch via the runner's own loader so we exercise the real
@@ -87,11 +91,11 @@ if (profile) {
     const profiles = readProfiles(yamlPath);
     const { enabled, unknown } = resolveProfile(profile, profiles, enabledNames);
     if (!jsonOut && unknown.length > 0) {
-      console.log(`[anchor_doctor] profile "${profile}": ${unknown.length} unknown patch name(s) skipped: ${unknown.join(', ')}`);
+      console.log(`${TAG} profile ${style.cyan(profile)}: ${unknown.length} unknown patch name(s) skipped: ${unknown.join(', ')}`);
     }
     enabledNames = enabled;
     if (!jsonOut) {
-      console.log(`[anchor_doctor] profile=${profile} — checking ${enabledNames.length} of ${Object.keys(patches).length} patches`);
+      console.log(`${TAG} profile ${style.cyan(profile)} ${style.dim('·')} checking ${style.bold(enabledNames.length)} of ${Object.keys(patches).length} patches`);
     }
   } catch (err) {
     // Unknown profile (or unreadable ccpatch.yml): fail loud rather than
@@ -130,21 +134,27 @@ if (jsonOut) {
 } else {
   const widthName = Math.max(...rows.map(r => r.name.length), 10);
   console.log();
-  console.log(`  ${'patch'.padEnd(widthName)}  status   detail`);
-  console.log(`  ${'-'.repeat(widthName)}  -------  ${'-'.repeat(60)}`);
-  const icon = { ok: ' ✓ ', drift: ' ~ ', missing: ' ✗ ', deprecated: ' ⊘ ' };
+  console.log(`  ${style.dim('patch'.padEnd(widthName))}   ${style.dim('status   detail')}`);
+  console.log(`  ${style.gray('─'.repeat(widthName))}   ${style.gray('───────  ' + '─'.repeat(60))}`);
+  // Emoji render two columns wide; the trailing spaces normalize each cell to a
+  // consistent on-screen width (⊘ is one column, so it gets an extra pad).
+  const icon = { ok: `${glyph.ok} `, drift: `${glyph.drift} `, missing: `${glyph.missing} `, deprecated: `${glyph.deprecated}  ` };
+  const paint = { ok: style.green, drift: style.yellow, missing: style.red, deprecated: style.gray };
   for (const r of rows) {
     const patch = patches[r.name];
     if (patch && patch.deprecated) {
       const detail = `deprecated: ${patch.deprecated.reason}${patch.deprecated.since ? ` (since ${patch.deprecated.since})` : ''}`.slice(0, 70);
-      console.log(`  ${r.name.padEnd(widthName)} ${icon.deprecated} ${'deprecated'.padEnd(7)} ${detail}`);
+      console.log(`  ${style.bold(r.name.padEnd(widthName))}  ${icon.deprecated} ${style.gray('deprecated'.padEnd(7))} ${style.dim(detail)}`);
       continue;
     }
     const detail = (r.detail || (r.weak ? 'weak verify (no absent/count)' : '')).slice(0, 70);
-    console.log(`  ${r.name.padEnd(widthName)} ${icon[r.status] ?? ' ? '} ${r.status.padEnd(7)} ${detail}`);
+    const tint = paint[r.status] ?? style.gray;
+    console.log(`  ${style.bold(r.name.padEnd(widthName))}  ${icon[r.status] ?? '?  '} ${tint(r.status.padEnd(7))} ${style.dim(detail)}`);
   }
   console.log();
-  console.log(`[anchor_doctor] summary: ${rows.length} patches | ${missingCount} missing | ${driftCount} drift | ${rows.length - missingCount - driftCount} ok`);
+  const allOk = missingCount === 0 && driftCount === 0;
+  const head = allOk ? style.green('🩺 all anchors healthy') : style.yellow('🩺 anchor doctor');
+  console.log(`${head} ${style.dim('·')} ${style.bold(rows.length)} patches ${style.dim('|')} ${missingCount ? style.red(missingCount + ' missing') : '0 missing'} ${style.dim('|')} ${driftCount ? style.yellow(driftCount + ' drift') : '0 drift'} ${style.dim('|')} ${style.green((rows.length - missingCount - driftCount) + ' ok')}`);
 }
 
 // ── Write drift entries (same schema as runner.mjs) ──────────────────────

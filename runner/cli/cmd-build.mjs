@@ -80,7 +80,7 @@ export async function runBuild(ctx) {
       ['patches', String(patchesToApply.length)],
       ['output', path.basename(options.outputPath)],
     ];
-    logger.log(renderBanner({ title: bannerVersion ? `ccpatch v${bannerVersion}` : 'ccpatch', rows }));
+    logger.log(renderBanner({ title: bannerVersion ? `ccpatch v${bannerVersion}` : 'ccpatch', rows, icon: '✨' }));
     logger.log('');
   }
 

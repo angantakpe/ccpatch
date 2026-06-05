@@ -36,4 +36,4 @@ const rows = [
 ];
 
 const title = version ? `ccpatch v${version} · ${profile}` : `ccpatch · ${profile}`;
-process.stdout.write(renderBanner({ title, rows, labelMax: 22 }) + '\n\n');
+process.stdout.write('\n' + renderBanner({ title, rows, labelMax: 22, icon: '📦' }) + '\n\n');

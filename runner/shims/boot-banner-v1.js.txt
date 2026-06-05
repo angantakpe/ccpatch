@@ -18,6 +18,22 @@
   var buf = (globalThis.__ccpBootBuf || (globalThis.__ccpBootBuf = []));
   var state = { timer: null, lastLen: -1, flushed: false, printed: 0 };
 
+  // Color is opt-out and CI-safe: honor NO_COLOR / FORCE_COLOR, else only tint
+  // when stderr (where this box prints) is an interactive TTY. Self-contained —
+  // this shim is injected verbatim, so it can't import runner/cli/style.mjs.
+  var COLOR = (function () {
+    try {
+      if (process.env.NO_COLOR != null) return false;
+      if (process.env.FORCE_COLOR != null && process.env.FORCE_COLOR !== '0') return true;
+      return !!(process.stderr && process.stderr.isTTY);
+    } catch (_) { return false; }
+  })();
+  function sgr(open, close, s) { return COLOR ? ('\u001b[' + open + 'm' + s + '\u001b[' + close + 'm') : String(s); }
+  function cyan(s) { return sgr(36, 39, s); }
+  function bold(s) { return sgr(1, 22, s); }
+  function dim(s) { return sgr(2, 22, s); }
+  function green(s) { return sgr(32, 39, s); }
+
   function cols() {
     var c = (process.stderr && process.stderr.columns) ||
             (process.stdout && process.stdout.columns) || 80;
@@ -30,6 +46,21 @@
     if (s.length <= n) return s;
     if (n === 1) return '…';
     return s.slice(0, n - 1) + '…';
+  }
+  // Visible column width: emoji/astral glyphs and the sparkle occupy two
+  // columns, the VS16 / ZWJ joiners occupy none. Keeps box edges aligned once
+  // the title carries an emoji.
+  function visLen(s) {
+    s = String(s == null ? '' : s);
+    var w = 0;
+    for (var i = 0; i < s.length; i++) {
+      var cp = s.codePointAt(i);
+      if (cp > 0xFFFF) { i++; w += 2; continue; }
+      if (cp === 0xFE0F || cp === 0x200D) continue;
+      if (cp === 0x2728 || cp === 0x2705 || cp === 0x274C) { w += 2; continue; }
+      w += 1;
+    }
+    return w;
   }
 
   function render(entries) {
@@ -46,24 +77,27 @@
 
     var out = [];
 
-    // Top border with embedded title: ╭─ TITLE ───────╮
-    var titleSeg = ' ' + TITLE + ' ';
-    if (titleSeg.length > inner - 1) titleSeg = clip(titleSeg, inner - 1);
-    var fill = inner - 1 - titleSeg.length;
-    out.push('╭─' + titleSeg + rep('─', fill) + '╮');
+    // Top border with embedded title: ╭─ ✨ TITLE ───────╮
+    var titleSeg = ' ✨ ' + TITLE + ' ';
+    if (visLen(titleSeg) > inner - 1) titleSeg = clip(titleSeg, inner - 1);
+    var fill = inner - 1 - visLen(titleSeg);
+    if (fill < 0) fill = 0;
+    out.push(cyan('╭─') + bold(titleSeg) + cyan(rep('─', fill) + '╮'));
 
     // Body lines: │  tag   message            │
     for (var j = 0; j < entries.length; j++) {
       var tag = clip(entries[j][0], tagW);
       var left = '  ' + tag + rep(' ', tagW - tag.length) + '  ';
       var avail = inner - left.length;
-      var content = left + clip(entries[j][1], avail);
-      content += rep(' ', inner - content.length);
-      out.push('│' + content + '│');
+      var msg = clip(entries[j][1], avail);
+      var padN = inner - (left.length + msg.length);
+      if (padN < 0) padN = 0;
+      var body = '  ' + green(tag) + rep(' ', tagW - tag.length) + '  ' + dim(msg) + rep(' ', padN);
+      out.push(cyan('│') + body + cyan('│'));
     }
 
     // Bottom border: ╰───────────╯
-    out.push('╰' + rep('─', inner) + '╯');
+    out.push(cyan('╰' + rep('─', inner) + '╯'));
 
     return '\n' + out.join('\n') + '\n\n';
   }
@@ -74,7 +108,7 @@
       // Late arrivals (after the box was drawn) print as plain indented lines.
       for (; state.printed < buf.length; state.printed++) {
         var e = buf[state.printed];
-        try { process.stderr.write('  ' + String(e[0]) + '  ' + String(e[1]) + '\n'); } catch (_) {}
+        try { process.stderr.write('  ' + green(String(e[0])) + '  ' + dim(String(e[1])) + '\n'); } catch (_) {}
       }
       return;
     }

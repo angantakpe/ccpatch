@@ -1,3 +1,5 @@
+import { style, icon } from './style.mjs';
+
 // End-of-build summary helpers.
 //
 // Two consumers:
@@ -99,9 +101,13 @@ export function renderTextSummary({ ok, durationMs, report, outputPath, drySugge
   const drifts = Array.isArray(r.drifts) ? r.drifts : [];
   const phases = (r.phases && typeof r.phases === 'object') ? r.phases : null;
 
+  const rule = style.gray('─'.repeat(64));
+  const secs = (Number(durationMs) / 1000).toFixed(1);
   const lines = [];
-  lines.push('─'.repeat(64));
-  lines.push(`Build ${ok ? 'OK' : 'FAILED'} in ${durationMs} ms`);
+  lines.push(rule);
+  lines.push(ok
+    ? `${icon.build} ${style.green('Build OK')} ${style.dim('in')} ${style.bold(secs + 's')} ${style.dim(`(${durationMs} ms)`)}`
+    : `${icon.fail} ${style.red('Build FAILED')} ${style.dim('in')} ${style.bold(secs + 's')} ${style.dim(`(${durationMs} ms)`)}`);
 
   if (timings.length > 0) {
     // Sort DESCENDING by transform ms so the slowest patches surface first as
@@ -124,8 +130,8 @@ export function renderTextSummary({ ok, durationMs, report, outputPath, drySugge
     // a slow-patch regression is obvious in the summary box.
     for (const t of top) {
       const ms = Number(t.ms);
-      const slow = Number.isFinite(ms) && ms > 5000 ? '  ⚠ slow' : '';
-      lines.push(`  ${String(t.name).padEnd(w)}  ${String(t.ms ?? '?').padStart(5)} ms${slow}`);
+      const slow = Number.isFinite(ms) && ms > 5000 ? style.yellow(`  ${icon.warn} slow`) : '';
+      lines.push(`  ${style.dim(String(t.name).padEnd(w))}  ${String(t.ms ?? '?').padStart(5)} ms${slow}`);
     }
 
     // Harness overhead = total wall-clock minus the sum of per-patch transform
@@ -161,9 +167,9 @@ export function renderTextSummary({ ok, durationMs, report, outputPath, drySugge
   }
 
   if (drifts.length > 0) {
-    lines.push(`Drift: ${drifts.length} patch(es) — run \`ccpatch doctor <input.js> --suggest\` for fuzzy candidates.`);
+    lines.push(`${style.yellow(`${icon.warn} Drift:`)} ${drifts.length} patch(es) — run \`ccpatch doctor <input.js> --suggest\` for fuzzy candidates.`);
   } else if (timings.length > 0) {
-    lines.push('Drift: none.');
+    lines.push(`${style.green('Drift: none.')}`);
   }
 
   // Finding #1/#2: prominently surface no-op and stale-fallback tallies. A
@@ -179,13 +185,13 @@ export function renderTextSummary({ ok, durationMs, report, outputPath, drySugge
   }
 
   if (!ok) {
-    lines.push('Next: re-run with `--dry-run --strict` to inspect failures.');
+    lines.push(`${style.cyan('→ Next:')} re-run with \`--dry-run --strict\` to inspect failures.`);
   } else if (drySuggest) {
-    lines.push('Next: drop --dry-run (or add --write-on-clean) to write the bundle.');
+    lines.push(`${style.cyan('→ Next:')} drop --dry-run (or add --write-on-clean) to write the bundle.`);
   } else if (outputPath) {
-    lines.push(`Next: \`ccpatch coverage ${outputPath}\` to confirm patches execute at runtime.`);
+    lines.push(`${style.cyan('→ Next:')} \`ccpatch coverage ${outputPath}\` to confirm patches execute at runtime.`);
   }
 
-  lines.push('─'.repeat(64));
+  lines.push(rule);
   return lines.join('\n');
 }

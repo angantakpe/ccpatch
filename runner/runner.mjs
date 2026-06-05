@@ -10,6 +10,7 @@ import { checkVerifyCore, toList } from './verify-core.mjs';
 import { getResolvedVariant } from './loader.mjs';
 import { compareVersions } from './version-resolver.mjs';
 import { PHASE_ORDER, phaseOf, orderPatches } from './apply-order.mjs';
+import { style, icon } from './cli/style.mjs';
 import {
   makeStorageWarnOnce,
   writeConflictsArtifact,
@@ -292,7 +293,7 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
       fail(`manifest invalid (${manifestErrors.join('; ')})`);
       continue;
     }
-    logger.log(`  [+] Applying: ${name} - ${patch.description}`);
+    logger.log(`  ${style.green(icon.apply)} ${style.bold(name)} ${style.dim('· ' + patch.description)}`);
 
     // Revisit marker: nudge the maintainer when a forensic patch has reached
     // the upstream version it was supposed to be re-evaluated at.

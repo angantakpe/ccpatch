@@ -10,6 +10,8 @@
  * as a verbatim string, while this one runs in the patcher's own Node process.
  */
 
+import { style, vwidth } from './style.mjs';
+
 function termCols() {
   const c = (process.stdout && process.stdout.columns) ||
             (process.stderr && process.stderr.columns) || 80;
@@ -35,10 +37,18 @@ function clip(s, n) {
  *   - string          → plain left-indented line (use '' for a blank spacer)
  *   - null            → a horizontal section divider (├──┤)
  *
- * @param {{ title: string, rows?: Array<[string,string]|string|null>, cols?: number, labelMax?: number }} opts
+ * An optional `icon` is rendered just before the title inside the top border.
+ *
+ * Border glyphs are tinted cyan and the title is bold; labels are dimmed. All
+ * padding math runs on the visible (ANSI-stripped, emoji-aware) width via
+ * vwidth(), so color codes and wide glyphs never skew the box edges. When color
+ * is disabled (NO_COLOR / non-TTY) every style helper is an identity passthrough
+ * and the box renders exactly as before.
+ *
+ * @param {{ title: string, rows?: Array<[string,string]|string|null>, cols?: number, labelMax?: number, icon?: string }} opts
  * @returns {string}
  */
-export function renderBanner({ title, rows = [], cols, labelMax = 16 } = {}) {
+export function renderBanner({ title, rows = [], cols, labelMax = 16, icon = '' } = {}) {
   let width = Math.min(cols || termCols(), 100);
   if (width < 24) width = 24;
   const inner = width - 2;
@@ -51,27 +61,31 @@ export function renderBanner({ title, rows = [], cols, labelMax = 16 } = {}) {
   }
   if (labelW > labelMax) labelW = labelMax;
 
-  const pad = (content) => '│' + content + rep(' ', inner - content.length) + '│';
+  const B = style.cyan; // border tint
+  // `content` may carry color codes; pad against its visible width.
+  const pad = (content) => B('│') + content + rep(' ', Math.max(0, inner - vwidth(content))) + B('│');
   const out = [];
 
-  let titleSeg = ' ' + String(title == null ? '' : title) + ' ';
-  if (titleSeg.length > inner - 1) titleSeg = clip(titleSeg, inner - 1);
-  const fill = inner - 1 - titleSeg.length;
-  out.push('╭─' + titleSeg + rep('─', fill) + '╮');
+  const head = (icon ? icon + ' ' : '') + String(title == null ? '' : title);
+  let titleSeg = ' ' + head + ' ';
+  if (vwidth(titleSeg) > inner - 1) titleSeg = clip(titleSeg, inner - 1);
+  const fill = Math.max(0, inner - 1 - vwidth(titleSeg));
+  out.push(B('╭─') + style.bold(titleSeg) + B(rep('─', fill) + '╮'));
 
   for (const row of rows) {
     if (row === null) {
-      out.push('├' + rep('─', inner) + '┤');
+      out.push(B('├' + rep('─', inner) + '┤'));
     } else if (Array.isArray(row)) {
       const lab = clip(row[0], labelW);
-      const left = '  ' + lab + rep(' ', labelW - lab.length) + '  ';
-      out.push(pad(left + clip(row[1], inner - left.length)));
+      const left = '  ' + style.dim(lab) + rep(' ', labelW - vwidth(lab)) + '  ';
+      const leftW = labelW + 4; // 2 leading + labelW + 2 trailing spaces
+      out.push(pad(left + clip(row[1], inner - leftW)));
     } else {
       out.push(pad('  ' + clip(row, inner - 2)));
     }
   }
 
-  out.push('╰' + rep('─', inner) + '╯');
+  out.push(B('╰' + rep('─', inner) + '╯'));
 
   return out.join('\n');
 }
