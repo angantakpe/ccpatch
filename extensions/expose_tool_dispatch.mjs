@@ -36,6 +36,18 @@
  *   (e.g. a compromised MCP server) that did not participate in the original
  *   patch load.
  *
+ * globalThis.__ccpRegisterTool(callerNonce, toolObj)
+ *   Nonce-gated upsert of `toolObj` into the live __ccpRawTools array, keyed by
+ *   toolObj.name (replaces an existing entry of the same name, else pushes).
+ *   Reuses the SAME dispatch nonce as __ccpInvokeTool — registration and
+ *   dispatch share one trust domain. Wrong/absent nonce throws "invalid nonce".
+ *   Returns true on success. Lets the ADK tool-registry inject through a guarded
+ *   boundary instead of mutating __ccpRawTools directly.
+ *
+ * globalThis.__ccpUnregisterTool(callerNonce, name)
+ *   Nonce-gated splice-by-name from __ccpRawTools. Returns true if a tool of
+ *   that name was removed, false if none matched. Wrong/absent nonce throws.
+ *
  * ── Anchor strategy (multi-anchor fallback chain) ─────────────────────────
  *
  * ANCHOR 1 (primary) — structural five-arg pattern in Promise.all/map/formatter:
@@ -270,23 +282,48 @@ export default {
             'throw __ccp_te;' +
           '}' +
         '};' +
+        // __ccpRegisterTool — nonce-gated upsert into __ccpRawTools by name.
+        // Same nonce as __ccpInvokeTool (registration + dispatch are one trust
+        // domain). Lets the ADK tool-registry inject through a guarded boundary
+        // instead of mutating the raw array directly.
+        'globalThis.__ccpRegisterTool=function(callerNonce,toolObj){' +
+          'if(callerNonce!==_ccpDispatchNonce)throw new Error("__ccpRegisterTool: invalid nonce. Call __ccpGetDispatchNonce() at startup.");' +
+          'if(!toolObj||typeof toolObj.name!=="string"||!toolObj.name)throw new Error("__ccpRegisterTool: toolObj.name must be a non-empty string");' +
+          'var tools=globalThis.__ccpRawTools;' +
+          'if(!Array.isArray(tools))throw new Error("[ccpRegisterTool] tool registry not stashed yet");' +
+          'var i=tools.findIndex(function(t){return t&&t.name===toolObj.name;});' +
+          'if(i>=0)tools[i]=toolObj;else tools.push(toolObj);' +
+          'return!0;' +
+        '};' +
+        // __ccpUnregisterTool — nonce-gated splice-by-name. Returns true if removed.
+        'globalThis.__ccpUnregisterTool=function(callerNonce,name){' +
+          'if(callerNonce!==_ccpDispatchNonce)throw new Error("__ccpUnregisterTool: invalid nonce. Call __ccpGetDispatchNonce() at startup.");' +
+          'var tools=globalThis.__ccpRawTools;' +
+          'if(!Array.isArray(tools))return!1;' +
+          'var i=tools.findIndex(function(t){return t&&t.name===name;});' +
+          'if(i<0)return!1;' +
+          'tools.splice(i,1);' +
+          'return!0;' +
+        '};' +
         // ── Contract registration ────────────────────────────────────────
         // Single "toolDispatch" contract exposes the four helpers as one
         // bundle so consumers can probe shape paths against the same object.
         'if(typeof globalThis.__ccpProvide==="function"){' +
           'try{globalThis.__ccpProvide("toolDispatch",{' +
             'version:2,producer:"expose_tool_dispatch",' +
-            'shape:["getTools","invokeTool","buildToolContext","mcpHealth","getDispatchNonce"],' +
+            'shape:["getTools","invokeTool","buildToolContext","mcpHealth","getDispatchNonce","registerTool","unregisterTool"],' +
             'value:{' +
               'getTools:globalThis.__ccpGetTools,' +
               'invokeTool:globalThis.__ccpInvokeTool,' +
               'buildToolContext:globalThis.__ccpBuildToolContext,' +
               'mcpHealth:globalThis.__ccpMcpHealth,' +
-              'getDispatchNonce:globalThis.__ccpGetDispatchNonce' +
+              'getDispatchNonce:globalThis.__ccpGetDispatchNonce,' +
+              'registerTool:globalThis.__ccpRegisterTool,' +
+              'unregisterTool:globalThis.__ccpUnregisterTool' +
             '}' +
           '});}catch(_ccpTD_prov_){}' +
         '}' +
-        'console.log("[expose_tool_dispatch] ccpatch tool dispatch v2 exposed (__ccpGetTools/__ccpInvokeTool/__ccpBuildToolContext/__ccpMcpHealth/__ccpGetDispatchNonce)");' +
+        'console.log("[expose_tool_dispatch] ccpatch tool dispatch v2 exposed (__ccpGetTools/__ccpInvokeTool/__ccpBuildToolContext/__ccpMcpHealth/__ccpGetDispatchNonce/__ccpRegisterTool/__ccpUnregisterTool)");' +
       '}catch(__ccpTD_err){' +
         'console.warn("[expose_tool_dispatch] stash failed:",String(__ccpTD_err));' +
       '}';
