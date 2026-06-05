@@ -43,6 +43,17 @@
       "cliSha256": "b99c1e9b6f15f92573e0876adc87e925bf0ecd8e17964c061fa32c02ed4f6c0e",
       "sizeBytes": 15894934,
       "source": "bun-native (extracted from claude.exe linux-x64)"
+    },
+    "2.1.161": {
+      "cliSha256": "8981d9950cc27122af65ae771df0645d81b9a57a2192c94ef87b0c6280ecc354",
+      "sizeBytes": 15951552,
+      "source": "npm (cli.v2.1.161.cjs)"
+    },
+    "2.1.165": {
+      "cliSha256": "b1b39a555518c2a60926af26ccf62b4245b6f6f8b7859077e1119ac6f2b2ae39",
+      "sizeBytes": 16181948,
+      "tarballIntegrity": "sha512-gqRw9XegRhh1fLUB8+/sTWzBpO2xvpdx0sF07lKIjUC3ZySolobu8k1pHlV1yMtK52yHw5BPWk/17yA9Qagvgg==",
+      "source": "bun-native (extracted from claude.exe linux-x64)"
     }
   }
 }

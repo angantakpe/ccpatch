@@ -142,15 +142,56 @@ export function defineHandoff({
   });
 }
 
+/**
+ * AgentRouter — the SECONDARY, predicate-driven handoff path.
+ *
+ * The PRIMARY protocol is tool-call-driven `defineHandoff` (delegate/swap); reach
+ * for that first. AgentRouter exists for *code-decided* orchestration: register
+ * agents that each expose a `handoff(context) -> nextName|null` predicate, call
+ * `start(name)`, and after each agent is installed its predicate picks the next
+ * one. The next persona is injected via `__ccpSubmitInput` as a *user* message
+ * (lower authority than a swap), which is why this is not the default surface.
+ *
+ * Hardening over the original stub:
+ *   - transitions are capped (`maxTransitions`, default 50) so a predicate that
+ *     never converges (e.g. two agents ping-ponging) halts instead of looping
+ *     unbounded — a `limit` event fires when the cap is hit;
+ *   - predicate and persona-install errors surface as an `error` event (only
+ *     when a listener is attached, so an unobserved error never crashes the
+ *     EventEmitter) instead of being silently swallowed;
+ *   - `stop()` halts the chain; `active` exposes the current agent.
+ *
+ * Events: `transition` {from,to} · `error` {phase,error} · `limit` {transitions}.
+ */
 export class AgentRouter extends EventEmitter {
   #agents = new Map();
   #active = null;
+  #transitions = 0;
+  #maxTransitions;
+  #stopped = false;
+
+  constructor({ maxTransitions = 50 } = {}) {
+    super();
+    this.#maxTransitions = maxTransitions;
+  }
+
+  get active() { return this.#active; }
 
   register(agentDef) {
+    if (!agentDef || typeof agentDef.name !== 'string') {
+      throw new Error('AgentRouter.register: agentDef.name must be a non-empty string');
+    }
     this.#agents.set(agentDef.name, agentDef);
+    return this;
+  }
+
+  /** Halt the chain; in-flight predicate results are ignored. */
+  stop() {
+    this.#stopped = true;
   }
 
   async start(agentName) {
+    if (this.#stopped) return;
     const def = this.#agents.get(agentName) ?? getAgent(agentName);
     if (!def) throw new Error(`AgentRouter: unknown agent "${agentName}"`);
 
@@ -158,22 +199,45 @@ export class AgentRouter extends EventEmitter {
 
     const submit = globalThis.__ccpSubmitInput;
     if (typeof submit === 'function') {
-      await submit(def.systemPrompt);
+      try {
+        await submit(def.systemPrompt);
+      } catch (err) {
+        this.#emitError('install', err);
+        return;
+      }
     }
 
     this.#scheduleHandoff(def);
   }
 
+  // Emit 'error' only when observed — EventEmitter throws on an unhandled
+  // 'error', and a routing diagnostic must never take down the host process.
+  #emitError(phase, error) {
+    if (this.listenerCount('error') > 0) this.emit('error', { phase, error });
+  }
+
   #scheduleHandoff(def) {
-    if (typeof def.handoff !== 'function') return;
+    if (this.#stopped || typeof def.handoff !== 'function') return;
+
+    if (this.#transitions >= this.#maxTransitions) {
+      this.emit('limit', { transitions: this.#transitions });
+      return;
+    }
 
     const context = { active: this.#active, agents: [...this.#agents.keys()] };
 
-    Promise.resolve(def.handoff(context)).then(next => {
-      if (typeof next === 'string' && next !== this.#active) {
-        this.emit('transition', { from: this.#active, to: next });
-        this.start(next);
-      }
-    }).catch(() => {});
+    // Promise.resolve().then(...) so a synchronous throw in the predicate is
+    // captured by the chain's .catch rather than escaping unhandled.
+    Promise.resolve()
+      .then(() => def.handoff(context))
+      .then(next => {
+        if (this.#stopped) return;
+        if (typeof next === 'string' && next !== this.#active) {
+          this.#transitions++;
+          this.emit('transition', { from: this.#active, to: next });
+          return this.start(next);
+        }
+      })
+      .catch(err => this.#emitError('handoff', err));
   }
 }

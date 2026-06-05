@@ -182,6 +182,7 @@ patches:
   auth_token: false               # shared-secret loader (CC_BRIDGE_TOKEN / SIGHUP reload)
   agent_lifecycle: false          # emit turn.start/turn.end/agent.spawn/agent.exit on __ccpBus
   agent_tree: false               # parent→child subagent tree with per-node cost/tool accounting
+  assistant_stream_events: false  # re-emit Anthropic /v1/messages SSE events to __ccpBus
 
   headless_bridge:                # NDJSON socket: hello/submit/dispatch/subscribe/cancel/bye
     enabled: false

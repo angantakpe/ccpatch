@@ -30,13 +30,15 @@
  * We rewrite `<VAR>=<wrap>([...])` → `<VAR>=globalThis.__ccpApplySystemPromptOverride(<wrap>([...]))`,
  * preserving the surrounding `,a19($);` comma-sequence statement.
  *
- * ── Scope caveat ─────────────────────────────────────────────────────────────
- * The overlay applies to every query through the main assembly path, which can
- * include subagent queries while the slot is set. Subagents normally carry their
- * own getSystemPrompt-derived prompt; an active overlay would also append to
- * theirs. Swap is an advanced/opt-in mode — callers should clear the overlay
- * (__ccpSetSystemPrompt(null)) when the swapped session ends. A future revision
- * may scope by querySource.
+ * ── Scope ────────────────────────────────────────────────────────────────────
+ * The overlay is scoped to main-loop queries by query source: __ccpApplySystem-
+ * PromptOverride only appends the persona block when globalThis.__ccp_path is
+ * unset or "root". While a subagent runs, expose_agent_tool sets __ccp_path to a
+ * non-root "<parent>/<child>" path, so an active overlay is NOT appended to a
+ * subagent's prompt — the swapped persona stays on the main agent. Callers should
+ * still clear the overlay (__ccpSetSystemPrompt(null)) when the swapped session
+ * ends. Note: scoping degrades safely to "always apply" if expose_agent_tool is
+ * absent (no __ccp_path is ever set, so every query reads as main-loop).
  */
 import { spliceBoot } from '../runner/patch-helpers.mjs';
 
@@ -58,10 +60,18 @@ const BOOT = `
   };
   // Wraps the bundle's system-prompt array builder result. Appends the overlay
   // block when set; always returns the same array reference.
+  //
+  // Scoped by query source: the overlay is a main-loop persona swap, so it must
+  // only apply to main-loop queries. While a subagent runs, expose_agent_tool
+  // sets globalThis.__ccp_path to a non-root path ("<parent>/<child>"); when the
+  // path is non-root we are assembling a subagent's prompt and skip the overlay,
+  // so a swapped persona never leaks into a concurrently-running subagent query.
   globalThis.__ccpApplySystemPromptOverride = function (arr) {
     try {
       var sp = globalThis.__ccpSystemPromptOverride;
-      if (sp && typeof sp === 'string' && Array.isArray(arr)) {
+      var path = globalThis.__ccp_path;
+      var isMainLoop = !path || path === 'root';
+      if (sp && typeof sp === 'string' && isMainLoop && Array.isArray(arr)) {
         arr.push({ type: 'text', text: sp });
       }
     } catch (_ccpSP_) {}

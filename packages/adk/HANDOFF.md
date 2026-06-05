@@ -78,10 +78,12 @@ logs once and falls back to `delegate`.
 
 The base Claude Code system prompt (tools, environment, harness rules) always
 remains — only the persona overlay changes. Swapping again replaces the overlay;
-`__ccpSetSystemPrompt(null)` clears it. **Caveat:** the overlay is global to the
-main-loop assembly path and is not yet scoped by `querySource`, so a subagent
-query running while an overlay is set also receives it — clear the overlay when
-the swapped session ends.
+`__ccpSetSystemPrompt(null)` clears it. The overlay is **scoped by query source**:
+`__ccpApplySystemPromptOverride` only appends the persona when
+`globalThis.__ccp_path` is unset or `"root"`, so a subagent query running while an
+overlay is set (its `__ccp_path` is the non-root `"<parent>/<child>"` set by
+`expose_agent_tool`) does **not** receive it. Still clear the overlay when the
+swapped session ends so the next top-level turn starts clean.
 
 ## Bus events
 
@@ -104,8 +106,9 @@ handoffs thread into the same agent-path tree the lifecycle patch builds.
 `__ccpGetSystemPrompt()`, and wraps the main-loop system-prompt array builder
 (`<var>=<wrap>([…isNonInteractive…hasAppendSystemPrompt…].filter(Boolean))`,
 cardinality 1 across v2.1.156–161) so a set overlay is appended as a trailing
-system block. Remaining refinement: scope the overlay by `querySource` so it does
-not leak into concurrent subagent queries.
+system block. The overlay is scoped to main-loop queries via `globalThis.__ccp_path`
+(unset/`"root"` ⇒ apply; non-root ⇒ skip), so it does not leak into concurrent
+subagent queries.
 
 ### ADK-agent resolution — `agentDef` merge
 

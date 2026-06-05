@@ -23,13 +23,46 @@ export default {
 
   // Each streaming API call is one turn. We track in-flight turns by a
   // counter-based id so concurrent sub-agent turns stay distinct.
+  //
+  // turn.start fires from the BEFORE hook (request dispatch) and turn.end from
+  // the AFTER hook (stream complete), so the two timestamps actually bracket the
+  // turn instead of both being stamped at completion. The pair is correlated by
+  // the per-call options object (each fetch carries its own), stashed in a
+  // WeakMap so concurrent turns don't cross-talk and entries can't leak.
   let _seq = 0;
+  const _pending = new WeakMap(); // options object -> { id, startTs }
 
-  globalThis.__ccpOnFetch && globalThis.__ccpOnFetch('agent_lifecycle_after', ({ url, options, isApi, events }) => {
-    if (!isApi || !events) return;
-
+  globalThis.__ccpOnFetchBefore && globalThis.__ccpOnFetchBefore('agent_lifecycle_before', (ctx) => {
+    if (!ctx || !ctx.isApi) return;
     const id = String(++_seq);
-    const ts = Date.now();
+    const startTs = Date.now();
+    if (ctx.options && typeof ctx.options === 'object') {
+      _pending.set(ctx.options, { id, startTs });
+    }
+    emit('turn.start', { id, ts: startTs });
+    // Return nothing — a truthy return would short-circuit the real fetch.
+  });
+
+  globalThis.__ccpOnFetch && globalThis.__ccpOnFetch('agent_lifecycle_after', ({ options, isApi, events }) => {
+    if (!isApi) return;
+
+    // Recover the turn opened in the before hook; fall back to a fresh id if the
+    // pairing was lost (e.g. a before-subscriber replaced the options object, or
+    // the before hook never ran because another patch isn't present).
+    const rec = (options && typeof options === 'object') ? _pending.get(options) : null;
+    if (rec) _pending.delete(options);
+
+    // Non-streaming or failed responses carry no events. Still close any turn the
+    // before hook opened so every turn.start has a matching turn.end.
+    if (!events) {
+      if (rec) emit('turn.end', { id: rec.id, ts: Date.now(), ms: Date.now() - rec.startTs, usage: null });
+      return;
+    }
+
+    const id = rec ? rec.id : String(++_seq);
+    const startTs = rec ? rec.startTs : Date.now();
+    // No before hook ran for this turn — emit a start so the pair stays intact.
+    if (!rec) emit('turn.start', { id, ts: startTs });
 
     // Derive usage from the message_delta stop event if present.
     let usage = null;
@@ -46,8 +79,8 @@ export default {
       }
     }
 
-    emit('turn.start', { id, ts });
-    emit('turn.end', { id, ts: Date.now(), usage });
+    const endTs = Date.now();
+    emit('turn.end', { id, ts: endTs, ms: endTs - startTs, usage });
   });
 
   // Subagent spawn/exit are surfaced through __ccpSubagent when expose_agent_tool
