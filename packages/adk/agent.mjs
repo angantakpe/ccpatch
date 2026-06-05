@@ -93,6 +93,11 @@ export function defineAgent(spec) {
   return defineAgentIn(_defaultScope, spec);
 }
 
+// NOTE: unlike the tool/handoff modules, the DEFAULT agent scope is not
+// re-exported — nothing consumes it (index.mjs builds the default registry via
+// the bound defineAgent/getAgent/listAgents below). Add an export here only if a
+// consumer actually needs the raw scope.
+
 /**
  * Look up an agent in the DEFAULT instance.
  * @param {string} name
@@ -109,6 +114,3 @@ export function getAgent(name) {
 export function listAgents() {
   return listAgentsIn(_defaultScope);
 }
-
-/** The DEFAULT agent scope — shared with the DEFAULT tool/handoff instances. */
-export const _defaultAgentScope = _defaultScope;
