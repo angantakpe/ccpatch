@@ -10,6 +10,8 @@ export const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.
  *
  * @param {string} root - project root (or test tmpdir)
  * @returns {{ outputs: string, diagnostics: string, logs: string }}
+ * @knipignore Injectable storage-root factory retained for test isolation; no
+ *   in-repo caller wires it yet (see commit c4fd00d).
  */
 export function makeStoragePaths(root) {
   return {

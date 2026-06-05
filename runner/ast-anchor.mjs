@@ -230,6 +230,8 @@ export function findFunctionByLiteral(code, literal) {
 
 /**
  * False: this module uses a single-slot cache that is not safe for concurrent callers.
+ * @knipignore Documented concurrency-contract marker retained for callers/tests
+ *   that assert this module's threading guarantee by name.
  */
 export const AST_ANCHOR_CONCURRENCY_SAFE = false;
 

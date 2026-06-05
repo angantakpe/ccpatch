@@ -4,8 +4,6 @@
     "bin/extract-from-binary.mjs",
     "bin/repack-bundle.mjs",
     "bin/scaffold-patch.mjs",
-    "scripts/gen-types.mjs",
-    "scripts/check-declarative.mjs",
     "scripts/codemod-declarative.mjs",
     "scripts/print-banner.mjs",
     "scripts/anchor-report.mjs",
@@ -22,7 +20,6 @@
     "tests/smoke_bridge.mjs",
     "tests/bridge_host.mjs",
     "tests/smoke_integration.mjs",
-    "tests/integration_roundtrip.mjs",
     "core/**/*.mjs",
     "extensions/**/*.mjs"
   ],
@@ -37,12 +34,20 @@
   ],
   "ignore": [
     "tools/reconstructor/**",
-    "**/fixtures/**"
+    "**/fixtures/**",
+    "runner/agents-dir-builder.mjs"
   ],
   "ignoreDependencies": [
     "ink",
     "react",
-    "source-map"
+    "source-map",
+    "concurrently"
+  ],
+  "ignoreBinaries": [
+    "concurrently"
+  ],
+  "tags": [
+    "-knipignore"
   ],
   "ignoreExportsUsedInFile": true
 }

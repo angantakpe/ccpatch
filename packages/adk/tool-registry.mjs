@@ -42,6 +42,75 @@ function getDispatchNonce() {
 }
 
 /**
+ * Louder-on-debug warning. Quiet by default (silent-failure modes stay quiet so
+ * normal runs aren't noisy); escalates to console.warn only when the project
+ * debug switch is on — process.env.CLAUDE_DEBUG or globalThis.__ccpDebug truthy
+ * (matches the core/contracts.mjs convention). Best-effort; never throws.
+ * @param {string} msg
+ */
+function debug(msg) {
+  if (!(process.env.CLAUDE_DEBUG || globalThis.__ccpDebug)) return;
+  try { console.warn(msg); } catch (_) {}
+}
+
+/**
+ * Load-bearing drift guard for the gated injection path (FINDING 2, call-site
+ * half). Runs AT MOST ONCE per process (memoized). When the typed contract
+ * registry is present AND advertises a 'toolDispatch' contract, we positively
+ * re-validate its shape through __ccpRequire BEFORE routing an injection through
+ * the (possibly drifted) __ccpRegisterTool global. If __ccpRequire THROWS, that
+ * is proven drift — we latch a refusal and tryInject() fails closed.
+ *
+ * Fail-OPEN by design when there is nothing to prove: if __ccpRequire is absent
+ * OR no 'toolDispatch' contract is registered, we leave the gated path alone
+ * (this is what keeps the bare-array / fake-registrar test stubs working — they
+ * never register a contract).
+ *
+ * @returns {boolean} true if the gated path is SAFE to use; false if drift proven.
+ */
+let _driftChecked = false;
+let _driftOk = true;
+function gatedPathTrusted() {
+  if (_driftChecked) return _driftOk;
+  _driftChecked = true;
+
+  const require = globalThis.__ccpRequire;
+  const inspect = globalThis.__ccpInspectContracts;
+  // Nothing to prove → fail open (preserve bare-array / stub test paths).
+  if (typeof require !== 'function' || typeof inspect !== 'function') return _driftOk;
+
+  let registered = false;
+  try {
+    registered = inspect().some((e) => e && e.name === 'toolDispatch');
+  } catch (_) {
+    // Inspect itself is advisory; if it blows up we cannot prove drift.
+    return _driftOk;
+  }
+  if (!registered) return _driftOk; // unguarded boundary → fail open.
+
+  try {
+    require('toolDispatch', { consumer: 'adk:tools', shape: ['registerTool'] });
+  } catch (err) {
+    // Proven drift: the registered global does NOT match the contract shape.
+    _driftOk = false;
+    debug(`[adk:tools] refusing injection — toolDispatch contract drift: ${err?.message ?? err}`);
+  }
+  return _driftOk;
+}
+
+/**
+ * TEST SEAM ONLY. The drift guard above memoizes at most once per process (by
+ * design); tests that exercise distinct contract-registry configurations within
+ * one process need to clear that latch between cases. Not part of the public ADK
+ * surface — do not surface in index.mjs / index.d.ts.
+ * @returns {void}
+ */
+export function __resetDriftGuardForTests() {
+  _driftChecked = false;
+  _driftOk = true;
+}
+
+/**
  * @typedef {Object} ToolDef
  * @property {string} name
  * @property {string} description
@@ -54,6 +123,12 @@ function getDispatchNonce() {
  *   rejects the handle's separate `.injected` promise (default: it resolves to
  *   the same false `.ready` does). `.ready` ALWAYS resolves false (never rejects)
  *   for backward compatibility.
+ * @property {(input:any)=>(string|null)} [validate]  Optional PLUGGABLE validator
+ *   (FINDING 12). Runs in the call() boundary AFTER the built-in validateInput
+ *   (which short-circuits first on failure). Return a non-empty string to reject
+ *   the input with that message, or null/undefined to accept. A thrown error is
+ *   surfaced as a validation error. This is the dependency-free hook for plugging
+ *   in ajv/zod/etc. to cover the deep checks validateInput does NOT perform.
  */
 
 /**
@@ -69,13 +144,20 @@ function getDispatchNonce() {
  * @typedef {Object} ToolScope
  * @property {ToolDef[]} queue            Tools awaiting __ccpRawTools.
  * @property {boolean} drained            True once the queue has been flushed.
- * @property {*} pollHandle               setInterval handle (or null).
- * @property {number} pollAttempts        Poll tick counter (bounded by POLL_LIMIT).
+ * @property {*} pollHandle               Shared-scheduler registration sentinel
+ *                                        (SHARED_POLL symbol) while waiting, else null.
+ * @property {number} pollAttempts        Poll attempt counter (bounded by the scope's pollLimit).
+ * @property {number} [pollBaseTicks]     Base-tick counter used to derive the scope's cadence.
+ * @property {number} [pollInterval]      Effective poll cadence for this scope (50ms or 250ms).
+ * @property {number} [pollLimit]         Give-up attempt ceiling for this scope (100 or 20).
  * @property {boolean} pollWarned         True once the "patch not enabled" warning fired.
  * @property {Function|null} busUnsub     Unsubscribe fn for the bus readiness signal.
  * @property {Map<string,{resolve:Function}>} pending  name → {resolve} for .ready promises.
- * @property {Set<string>} live           Names currently injected/queued in this scope
- *                                        (introspection source for listToolsIn).
+ * @property {Map<string,'queued'|'live'|'failed'>} live  name → lifecycle status
+ *   for every tool this scope knows about. listToolsIn() reports ONLY names whose
+ *   status is 'live'; toolStatusesIn() reports the full {name,status} set. (Kept
+ *   the field name `live` for backward-compat with internal callers; it is now a
+ *   Map of statuses rather than a Set of names.)
  */
 
 /**
@@ -91,19 +173,36 @@ export function createToolScope() {
     pollWarned: false,
     busUnsub: null,
     pending: new Map(),
-    live: new Set(),
+    live: new Map(), // name → 'queued' | 'live' | 'failed'
   };
 }
 
 /**
- * Names of tools currently live/queued in `scope`. Introspection hook surfaced
- * by createToolRegistry().listTools and the top-level listTools() export so the
- * finalizer can wire adk.listTools().
+ * Names of tools currently LIVE in `scope` (status 'live' only — queued and
+ * failed tools are intentionally excluded; FINDING 14). Introspection hook
+ * surfaced by createToolRegistry().listTools and the top-level listTools() export
+ * so the finalizer can wire adk.listTools().
  * @param {ToolScope} scope
  * @returns {string[]}
  */
 export function listToolsIn(scope) {
-  return [...scope.live];
+  const out = [];
+  for (const [name, status] of scope.live) {
+    if (status === 'live') out.push(name);
+  }
+  return out;
+}
+
+/**
+ * Full lifecycle view of `scope` (FINDING 14): every tool the scope knows about
+ * with its current status — 'queued' (awaiting injection), 'live' (injected) or
+ * 'failed' (poll timed out / never injected). Unlike listToolsIn() this does NOT
+ * drop queued/failed entries, so callers can SEE the silent-failure cases.
+ * @param {ToolScope} scope
+ * @returns {Array<{name:string,status:'queued'|'live'|'failed'}>}
+ */
+export function toolStatusesIn(scope) {
+  return [...scope.live].map(([name, status]) => ({ name, status }));
 }
 
 // ── A tiny dependency-free JSON-schema validator ──────────────────────────────
@@ -119,11 +218,21 @@ export function listToolsIn(scope) {
 //   - `properties[k].enum: any[]`            → value must be one of the enum members
 //   - `properties[k].minLength/maxLength`    → string length bounds (strings only)
 //
-// WHAT IS NOT validated (authors must NOT over-trust this):
-//   - nested object/array element schemas (no recursion into `items`/sub-`properties`)
-//   - number `minimum`/`maximum`, `pattern`, `format`, `const`, `oneOf`/`anyOf`,
-//     `additionalProperties` as a SCHEMA (only the literal `false` is honored)
-//   - any keyword not listed above is silently ignored (fail open).
+// WHAT IS NOT validated — READ THIS, do NOT treat validateInput as a real
+// JSON-Schema validator. It is a SHALLOW, BEST-EFFORT, FAIL-OPEN guard. It does
+// NOT, and will NOT, check ANY of the following:
+//   - NESTED object/array shapes: there is NO recursion into `items` or into a
+//     property's sub-`properties`. A property typed `object`/`array` is checked
+//     ONLY for being an object/array — its CONTENTS are completely unchecked.
+//   - numeric bounds: `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum`/
+//     `multipleOf` are ignored.
+//   - `pattern`, `format`, `const`, `oneOf`/`anyOf`/`allOf`/`not`, `$ref`.
+//   - `additionalProperties` as a SCHEMA (only the literal `false` is honored).
+//   - any keyword not in the "WHAT IS validated" list above → silently ignored.
+// If you need ANY of the above (deep shapes, numeric ranges, regex, etc.), pass a
+// pluggable `validate(input)=>string|null` to defineTool — see FINDING 12 below;
+// that hook runs at the call() boundary AFTER this built-in and is where you wire
+// ajv/zod/etc. (zero deps shipped here — the caller brings their own).
 // A separate MAX_INPUT_BYTES ceiling (enforced in the call() wrapper, not here)
 // guards against oversized input independent of schema.
 
@@ -202,6 +311,25 @@ function errorResult(text) {
 }
 
 /**
+ * Cheaply measure the input against the MAX_INPUT_BYTES ceiling without
+ * serializing scalars (FINDING 9). null/undefined/booleans/numbers are tiny by
+ * construction, so we short-circuit to 0; strings use Buffer.byteLength (UTF-8,
+ * no allocation of a JSON copy); only objects/arrays fall back to JSON.stringify.
+ * On a non-serializable object (cycle/throwing toJSON) we return 0 — matching the
+ * prior behaviour of treating an unserializable payload as un-measurable (the
+ * schema validator and execute() are the next line of defence).
+ * @param {any} input
+ * @returns {number} approximate UTF-8 byte length.
+ */
+function inputByteSize(input) {
+  if (input === null || input === undefined) return 0;
+  const t = typeof input;
+  if (t === 'string') return Buffer.byteLength(input, 'utf8');
+  if (t !== 'object') return 0; // number / boolean / bigint / symbol → tiny
+  try { return Buffer.byteLength(JSON.stringify(input), 'utf8'); } catch (_) { return 0; }
+}
+
+/**
  * Build the live tool object handed to the formatter / dispatcher.
  * @param {ToolDef} toolDef
  */
@@ -219,8 +347,7 @@ function buildToolObj(toolDef) {
     //      enum/minLength/maxLength) vs. ignored. Do NOT assume deeper guarantees:
     //      nested schemas, numeric bounds, pattern, etc. are NOT enforced here.
     call: async (input) => {
-      let size = 0;
-      try { size = JSON.stringify(input === undefined ? null : input).length; } catch (_) { size = 0; }
+      const size = inputByteSize(input);
       if (size > MAX_INPUT_BYTES) {
         return errorResult(
           `Invalid input for tool "${toolDef.name}": input exceeds ${MAX_INPUT_BYTES} byte ceiling (${size})`,
@@ -229,6 +356,20 @@ function buildToolObj(toolDef) {
       const verr = validateInput(toolDef.inputSchema, input);
       if (verr) {
         return errorResult(`Invalid input for tool "${toolDef.name}": ${verr}`);
+      }
+      // FINDING 12 (code half): optional pluggable validator — runs AFTER the
+      // built-in validateInput (built-in failure short-circuits above). This is
+      // the dependency-free hook that lets a caller plug in ajv/zod/etc. for the
+      // deep checks validateInput intentionally does NOT perform. Contract:
+      // (input) => string|null — a string is treated as a validation error
+      // message, null/undefined means valid. A THROW is also surfaced as an error.
+      if (typeof toolDef.validate === 'function') {
+        let custom;
+        try { custom = toolDef.validate(input); }
+        catch (err) { custom = err?.message ?? String(err); }
+        if (typeof custom === 'string' && custom) {
+          return errorResult(`Invalid input for tool "${toolDef.name}": ${custom}`);
+        }
       }
       const result = await toolDef.execute(input);
       return typeof result === 'string' ? [{ type: 'text', text: result }] : result;
@@ -250,6 +391,11 @@ function tryInject(toolDef) {
 
   // Gated path — the real patch always provides this registrar.
   if (typeof globalThis.__ccpRegisterTool === 'function') {
+    // FINDING 2 (call-site half): before trusting the gated global, consult the
+    // typed contract registry. If the 'toolDispatch' contract is registered and
+    // its shape no longer matches (proven drift), refuse rather than call the
+    // drifted global. Memoized — runs at most once per process.
+    if (!gatedPathTrusted()) return false;
     const nonce = getDispatchNonce();
     return globalThis.__ccpRegisterTool(nonce, toolObj) === true;
   }
@@ -288,7 +434,13 @@ function settleReady(scope, name, value) {
 function failInject(scope, def) {
   const p = scope.pending.get(def.name);
   if (p) scope.pending.delete(def.name);
-  scope.live.delete(def.name); // never injected → drop from introspection set
+  // FINDING 14: never injected → mark 'failed' (observable) rather than dropping
+  // it from the status map. listToolsIn() already excludes non-'live' statuses,
+  // so it stays out of the live list while toolStatusesIn() can still report it.
+  scope.live.set(def.name, 'failed');
+  // FINDING 16: louder ONLY on the debug switch (the once-only hard-timeout
+  // console.warn in scheduleDrain stays as-is for the no-array case).
+  debug(`[adk:tools] tool "${def.name}" was never injected (poll timed out) — status=failed`);
   if (typeof def.onInjectFail === 'function') {
     try { def.onInjectFail(def.name); } catch (_) {}
   }
@@ -308,17 +460,23 @@ function drainQueue(scope) {
   scope.drained = true;
   for (const def of scope.queue) {
     if (tryInject(def)) {
-      scope.live.add(def.name);
+      scope.live.set(def.name, 'live');
       settleReady(scope, def.name, true);
+    } else {
+      // Drain ran but injection still refused (e.g. proven drift / removed array)
+      // — surface as a failed inject so it never masquerades as live.
+      failInject(scope, def);
     }
   }
   scope.queue.length = 0;
 }
 
-/** Tear down poller + bus subscription once we've drained or given up. */
+/** Tear down poller registration + bus subscription once drained or given up. */
 function stopWatchers(scope) {
   if (scope.pollHandle !== null) {
-    clearInterval(scope.pollHandle);
+    // pollHandle is now a registration sentinel into the SHARED scheduler (FINDING
+    // 8), not a per-scope setInterval handle. Deregister + clear.
+    deregisterScope(scope);
     scope.pollHandle = null;
   }
   if (typeof scope.busUnsub === 'function') {
@@ -327,14 +485,94 @@ function stopWatchers(scope) {
   }
 }
 
+// ── SHARED drain scheduler (FINDING 8) ────────────────────────────────────────
+// Previously every waiting scope armed its OWN setInterval, so N scopes meant N
+// timers all polling __ccpRawTools. Now a SINGLE module-level timer ticks the set
+// of registered-waiting scopes. Semantics are preserved EXACTLY per scope:
+//   - cadence: a scope downshifts to the slower bus safety-net (250ms) once a bus
+//     subscription lands, else the aggressive 50ms primary cadence. The shared
+//     timer runs at the fast base tick; each scope only advances its own attempt
+//     counter every (interval / base) ticks, so its effective cadence and ~5s
+//     bounded timeout (interval × limit) are unchanged.
+//   - the once-only "patch not enabled" warning fires per scope (scope.pollWarned).
+//   - onInjectFail / throwOnInjectFail behaviour on give-up is unchanged.
+const _waitingScopes = new Set();
+let _schedulerHandle = null;
+
+/** Register `scope` with the shared scheduler and ensure the single timer runs. */
+function registerScope(scope) {
+  _waitingScopes.add(scope);
+  scope.pollHandle = SHARED_POLL; // sentinel: "registered in the shared scheduler"
+  if (_schedulerHandle === null) {
+    _schedulerHandle = setInterval(tickAll, POLL_INTERVAL_MS);
+    // Don't keep the event loop alive solely for the drain poll.
+    if (typeof _schedulerHandle?.unref === 'function') _schedulerHandle.unref();
+  }
+}
+
+/** Deregister `scope`; stop the single timer once no scope is waiting. */
+function deregisterScope(scope) {
+  _waitingScopes.delete(scope);
+  if (_waitingScopes.size === 0 && _schedulerHandle !== null) {
+    clearInterval(_schedulerHandle);
+    _schedulerHandle = null;
+  }
+}
+
+/** Sentinel stored in scope.pollHandle while a scope is registered (truthy != null). */
+const SHARED_POLL = Symbol('adk:tools:shared-poll');
+
+/** One shared tick: advance/drain/give-up every registered-waiting scope. */
+function tickAll() {
+  // Iterate a snapshot — handlers mutate _waitingScopes (drain/give-up deregister).
+  for (const scope of [..._waitingScopes]) pollOnce(scope);
+}
+
 /**
- * Wait for __ccpRawTools then drain. Two paths, both bounded to ≈5s:
+ * Advance a single scope by one base tick. Honors the scope's own interval (only
+ * counts an attempt every interval/base ticks) and per-scope give-up limit.
+ */
+function pollOnce(scope) {
+  if (Array.isArray(globalThis.__ccpRawTools)) {
+    drainQueue(scope);
+    stopWatchers(scope);
+    return;
+  }
+  // Count base ticks; only advance the attempt counter on the scope's cadence.
+  scope.pollBaseTicks = (scope.pollBaseTicks || 0) + 1;
+  const ticksPerAttempt = Math.max(1, Math.round(scope.pollInterval / POLL_INTERVAL_MS));
+  if (scope.pollBaseTicks < ticksPerAttempt) return;
+  scope.pollBaseTicks = 0;
+
+  if (++scope.pollAttempts >= scope.pollLimit) {
+    stopWatchers(scope);
+    if (!scope.pollWarned) {
+      scope.pollWarned = true;
+      try {
+        console.warn(
+          '[adk:tools] __ccpRawTools never appeared after ~5s — the expose_tool_dispatch ' +
+          'patch is not enabled, so ADK tools were never injected.',
+        );
+      } catch (_) {}
+    }
+    // Surface the silent failure to every waiting consumer: .ready=false,
+    // onInjectFail callback, and .injected rejection (throwOnInjectFail).
+    for (const def of scope.queue) failInject(scope, def);
+    scope.queue.length = 0;
+  }
+}
+
+/**
+ * Register `scope` to wait for __ccpRawTools then drain. Two paths, both bounded
+ * to ≈5s:
  *   - if __ccpBus exposes a 'tools.ready' signal, subscribe and drain on it; the
  *     bus is then the PRIMARY trigger, so the poll downshifts to a slower
  *     safety-net cadence (POLL_INTERVAL_MS_BUS=250ms × POLL_LIMIT_BUS=20 ≈ 5s) to
  *     avoid redundant wakeups;
  *   - with NO live bus, the poll is the primary signal and runs at the aggressive
  *     POLL_INTERVAL_MS=50ms × POLL_LIMIT=100 ≈ 5s.
+ * The actual ticking is done by the SINGLE shared scheduler (see above); this fn
+ * only wires the bus fast-path, fixes the scope's cadence/limit, and registers it.
  * After the limit with no array we stop, warn ONCE, resolve every pending .ready
  * with false, fire each tool's onInjectFail, and reject .injected for any tool
  * that opted into throwOnInjectFail (the tool was never injected).
@@ -362,34 +600,13 @@ function scheduleDrain(scope) {
     busActive = true;
   }
 
-  if (scope.pollHandle !== null) return;
+  if (scope.pollHandle !== null) return; // already registered/waiting.
   // Pick cadence from whether the bus is carrying the primary signal.
-  const interval = busActive ? POLL_INTERVAL_MS_BUS : POLL_INTERVAL_MS;
-  const limit = busActive ? POLL_LIMIT_BUS : POLL_LIMIT;
+  scope.pollInterval = busActive ? POLL_INTERVAL_MS_BUS : POLL_INTERVAL_MS;
+  scope.pollLimit = busActive ? POLL_LIMIT_BUS : POLL_LIMIT;
   scope.pollAttempts = 0;
-  scope.pollHandle = setInterval(() => {
-    if (Array.isArray(globalThis.__ccpRawTools)) {
-      drainQueue(scope);
-      stopWatchers(scope);
-      return;
-    }
-    if (++scope.pollAttempts >= limit) {
-      stopWatchers(scope);
-      if (!scope.pollWarned) {
-        scope.pollWarned = true;
-        try {
-          console.warn(
-            '[adk:tools] __ccpRawTools never appeared after ~5s — the expose_tool_dispatch ' +
-            'patch is not enabled, so ADK tools were never injected.',
-          );
-        } catch (_) {}
-      }
-      // Surface the silent failure to every waiting consumer: .ready=false,
-      // onInjectFail callback, and .injected rejection (throwOnInjectFail).
-      for (const def of scope.queue) failInject(scope, def);
-      scope.queue.length = 0;
-    }
-  }, interval);
+  scope.pollBaseTicks = 0;
+  registerScope(scope);
 }
 
 /**
@@ -417,7 +634,7 @@ function removeFromRaw(name) {
  * @param {ToolDef} spec
  * @returns {ToolHandle}
  */
-export function defineToolIn(scope, { name, description, inputSchema, execute, onInjectFail, throwOnInjectFail } = {}) {
+export function defineToolIn(scope, { name, description, inputSchema, execute, onInjectFail, throwOnInjectFail, validate } = {}) {
   if (typeof name !== 'string' || !name) {
     throw new Error('defineTool: `name` must be a non-empty string'); // PROGRAMMER error
   }
@@ -427,8 +644,11 @@ export function defineToolIn(scope, { name, description, inputSchema, execute, o
   if (onInjectFail !== undefined && typeof onInjectFail !== 'function') {
     throw new Error(`defineTool("${name}"): \`onInjectFail\` must be a function`); // PROGRAMMER error
   }
+  if (validate !== undefined && typeof validate !== 'function') {
+    throw new Error(`defineTool("${name}"): \`validate\` must be a function`); // PROGRAMMER error
+  }
 
-  const def = { name, description, inputSchema, execute, onInjectFail, throwOnInjectFail: !!throwOnInjectFail };
+  const def = { name, description, inputSchema, execute, onInjectFail, throwOnInjectFail: !!throwOnInjectFail, validate };
 
   // .ready resolves true once the tool is live, false if the bounded poll times
   // out (silent-failure fix: a queued-but-never-injected tool must be observable,
@@ -444,13 +664,18 @@ export function defineToolIn(scope, { name, description, inputSchema, execute, o
   injected.catch(() => {});
 
   if (tryInject(def)) {
-    scope.live.add(name);
+    scope.live.set(name, 'live');
     resolveReady(true);
     resolveInjected(true);
   } else {
     scope.pending.set(name, { resolve: resolveReady, resolveInjected, rejectInjected });
     scope.queue.push(def);
-    scope.live.add(name); // queued tools count as live for introspection until disposed/failed
+    // FINDING 14: queued tools are tracked as 'queued' — NOT reported by
+    // listToolsIn() until they actually go 'live'.
+    scope.live.set(name, 'queued');
+    // FINDING 16: silent-by-default queueing — escalate to a warning only when the
+    // debug switch is on, so authors can see a tool that did not inject immediately.
+    debug(`[adk:tools] tool "${name}" queued (registry not ready) — awaiting injection`);
     scheduleDrain(scope);
   }
 
@@ -481,13 +706,51 @@ const _defaultScope = createToolScope();
 /**
  * Bind the tool-registry API to a given scope.
  * @param {ToolScope} scope
- * @returns {{ defineTool: (spec: ToolDef) => ToolHandle, listTools: () => string[] }}
+ * @returns {{ defineTool: (spec: ToolDef) => ToolHandle, listTools: () => string[],
+ *   toolStatuses: () => Array<{name:string,status:'queued'|'live'|'failed'}> }}
  */
 export function createToolRegistry(scope) {
   return {
     defineTool: (spec) => defineToolIn(scope, spec),
     listTools: () => listToolsIn(scope),
+    // FINDING 14: scope-bound full lifecycle view (queued/live/failed).
+    toolStatuses: () => toolStatusesIn(scope),
   };
+}
+
+/**
+ * Tear down a tool scope (FINDING 15, cross-agent dispose contract). Idempotent:
+ *   - deregister the scope from the shared drain scheduler + drop its bus sub;
+ *   - unregister/dispose every LIVE tool from the registry (gated or fallback);
+ *   - clear the queue and resolve any pending .ready to false (so awaiters never
+ *     hang), settling .injected too;
+ *   - clear the status map.
+ * @param {ToolScope} scope
+ */
+export function disposeToolScope(scope) {
+  if (!scope) return;
+  // Stop pollers/watchers first so nothing re-drains mid-teardown.
+  stopWatchers(scope);
+
+  // Unregister every tool we believe is LIVE in the registry.
+  for (const [name, status] of [...scope.live]) {
+    if (status === 'live') {
+      try { removeFromRaw(name); } catch (_) {}
+    }
+  }
+
+  // Resolve every still-pending .ready false (queued-but-never-injected tools).
+  for (const [, p] of [...scope.pending]) {
+    try { p.resolve(false); p.resolveInjected(false); } catch (_) {}
+  }
+  scope.pending.clear();
+
+  // Clear queue + status map; reset drain bookkeeping for reuse.
+  scope.queue.length = 0;
+  scope.live.clear();
+  scope.drained = false;
+  scope.pollHandle = null;
+  scope.pollAttempts = 0;
 }
 
 /**

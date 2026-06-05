@@ -11,6 +11,8 @@ import { applyNativeProfileFilter } from './cli/native-profile.mjs';
  *
  * Looks for ccpatch.yml in cwd (same convention as the rest of config.mjs).
  * Callers must pass an absolute yamlPath if they need a different location.
+ * @knipignore Public config reader retained for sha-pinning callers; no in-repo
+ *   consumer wires it yet (verify-bundle-sha.mjs computes its own digest).
  */
 export function getBundleSha(version, yamlPath) {
   const p = yamlPath || (process.cwd() + '/ccpatch.yml');

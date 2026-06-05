@@ -26,6 +26,7 @@ import {
   mkdirSync,
   statSync,
   readdirSync,
+  utimesSync,
 } from 'node:fs';
 import { join, relative } from 'node:path';
 import { cwd, platform } from 'node:process';
@@ -306,4 +307,154 @@ test('dispose() cancels the pending debounce timer and is idempotent', async () 
   mem.set('x', 2);
   await mem.flush();
   assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), { x: 2 });
+});
+
+// ── memoized snapshot clone (FINDING 6) ───────────────────────────────────────
+
+test('snapshot() memoizes the deep clone and invalidates it on writes', async () => {
+  const dir = freshDir();
+  const file = join(dir, 'memo.json');
+  const mem = createMemory({ path: file });
+  mem.set('a', { n: 1 });
+
+  // A mutation to a returned snapshot must NOT bleed into a later snapshot —
+  // each snapshot() returns an independent deep copy even when memoized.
+  const s1 = mem.snapshot();
+  s1.a.n = 999;
+  s1.extra = 'tampered';
+  const s2 = mem.snapshot();
+  assert.deepEqual(s2, { a: { n: 1 } }, 'mutating a snapshot does not affect a later snapshot');
+  assert.notEqual(s2.a, s1.a, 'each snapshot deep-clones afresh (no shared nested refs)');
+  assert.deepEqual(mem.get('a'), { n: 1 }, 'the live store is untouched by snapshot mutation');
+
+  // A write BETWEEN two snapshots must be reflected (memo invalidated on set()).
+  mem.set('b', 2);
+  assert.deepEqual(mem.snapshot(), { a: { n: 1 }, b: 2 }, 'write between snapshots is reflected');
+
+  // delete() and clear() must invalidate the memo too.
+  mem.delete('a');
+  assert.deepEqual(mem.snapshot(), { b: 2 }, 'delete invalidates the memoized snapshot');
+  mem.clear();
+  assert.deepEqual(mem.snapshot(), {}, 'clear invalidates the memoized snapshot');
+
+  await mem.flush();
+});
+
+// ── hard coalesce cap (FINDING 7) ─────────────────────────────────────────────
+
+test('continuous set() churn cannot starve the flush beyond the 1s hard cap', async () => {
+  const dir = freshDir();
+  const file = join(dir, 'churn.json');
+  const mem = createMemory({ path: file });
+
+  // Hammer set() faster than the 100ms debounce so the timer keeps re-arming and
+  // would, without a hard cap, never fire. We drive wall-clock past MAX_COALESCE_MS
+  // (1s) by busy-spinning small sleeps between sets; once the oldest dirty
+  // mutation is >=1s old, the NEXT set() must flush synchronously.
+  const start = Date.now();
+  let n = 0;
+  while (Date.now() - start < 1300) {
+    mem.set('k', n++);
+    // Re-arm the debounce well before it (100ms) can fire on its own.
+    await new Promise((r) => setTimeout(r, 30));
+  }
+
+  // The file must exist even though we never let the 100ms debounce mature and
+  // never called flush() — the hard cap forced at least one write mid-churn.
+  assert.ok(existsSync(file), 'hard coalesce cap forced a write despite continuous churn');
+  await mem.flush();
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).k, n - 1, 'final value persisted');
+});
+
+// ── shape validation on load (FINDING 11a) ────────────────────────────────────
+
+test('a parseable-but-non-object file (array/primitive) resets to an empty store', () => {
+  const dir = freshDir();
+
+  for (const bad of ['[1,2,3]', '42', '"hi"', 'true', 'null']) {
+    const file = join(dir, `shape-${bad.replace(/[^a-z0-9]/gi, '_')}.json`);
+    writeFileSync(file, bad, 'utf8');
+    const mem = createMemory({ path: file });
+    assert.deepEqual(
+      mem.snapshot(),
+      {},
+      `parseable non-object (${bad}) must not become the store`,
+    );
+    // The store must still be usable as a plain object after the reset.
+    mem.set('ok', 1);
+    assert.equal(mem.get('ok'), 1);
+  }
+});
+
+// ── cross-process lost-write safety (FINDING 11b) ─────────────────────────────
+
+test('an external write between load and flush is merged, not clobbered', async () => {
+  const dir = freshDir();
+  const file = join(dir, 'concurrent.json');
+  // Initial on-disk state.
+  writeFileSync(file, JSON.stringify({ shared: 'v0', ours: 'old' }, null, 2), 'utf8');
+
+  const mem = createMemory({ path: file });
+  assert.equal(mem.get('shared'), 'v0', 'loaded initial state');
+
+  // We dirty our own key in-memory (debounced, not yet on disk).
+  mem.set('ours', 'new');
+
+  // Simulate ANOTHER process writing the file after we loaded it: it adds a key
+  // we never touched AND changes `shared`. Bump mtime to the future so our
+  // writeToDisk() detects the concurrent change.
+  writeFileSync(
+    file,
+    JSON.stringify({ shared: 'v0', theirs: 'external', ours: 'theirOld' }, null, 2),
+    'utf8',
+  );
+  const future = Date.now() / 1000 + 60;
+  utimesSync(file, future, future);
+
+  await mem.flush();
+
+  const onDisk = JSON.parse(readFileSync(file, 'utf8'));
+  // Our dirty key wins (last-write-wins per dirty key)...
+  assert.equal(onDisk.ours, 'new', 'our dirty key overwrites the disk value');
+  // ...the other process's brand-new key is preserved (not dropped)...
+  assert.equal(onDisk.theirs, 'external', "another process's key is not dropped");
+  // ...and a key we never touched keeps the fresher disk value.
+  assert.equal(onDisk.shared, 'v0', 'untouched key retains the concurrent disk value');
+});
+
+// ── optional encryption/redaction transform hook (FINDING 11c) ────────────────
+
+test('transform { onWrite, onRead } round-trips through disk (base64)', async () => {
+  const dir = freshDir();
+  const file = join(dir, 'transformed.json');
+
+  // Trivial reversible transform: base64 on the way out, decode on the way in.
+  const transform = {
+    onWrite: (s) => Buffer.from(s, 'utf8').toString('base64'),
+    onRead: (s) => Buffer.from(s, 'base64').toString('utf8'),
+  };
+
+  const mem = createMemory({ path: file, transform });
+  mem.set('secret', { token: 'hunter2', list: [1, 2, 3] });
+  await mem.flush();
+
+  // The raw on-disk bytes must NOT be plaintext JSON — they are base64.
+  const raw = readFileSync(file, 'utf8');
+  assert.doesNotMatch(raw, /hunter2/, 'on-disk bytes are encoded, not plaintext');
+  assert.equal(
+    Buffer.from(raw, 'base64').toString('utf8').includes('hunter2'),
+    true,
+    'decoding the on-disk bytes recovers the JSON',
+  );
+
+  // A second store with the SAME transform reads it back transparently.
+  const mem2 = createMemory({ path: file, transform });
+  assert.deepEqual(mem2.snapshot(), { secret: { token: 'hunter2', list: [1, 2, 3] } });
+
+  // Default (no transform) is plaintext / backward compatible.
+  const plainFile = join(dir, 'plain.json');
+  const plain = createMemory({ path: plainFile });
+  plain.set('k', 'v');
+  await plain.flush();
+  assert.match(readFileSync(plainFile, 'utf8'), /"k": "v"/, 'no transform → plaintext JSON');
 });

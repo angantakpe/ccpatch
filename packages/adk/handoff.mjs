@@ -41,6 +41,18 @@ import { defineTool as defineToolDefault } from './tool-registry.mjs';
  * the nonce lazily at the call site via setLiveSystemPrompt() and fall back to
  * the legacy single-arg form when no nonce getter exists (so existing stubs keep
  * working).
+ *
+ * TRUST BOUNDARY (exclusive swap lock — FINDING 1): because there is exactly ONE
+ * global persona slot shared by every createAdk() instance (above), per-instance
+ * isolation of the swap surface is a CONVENIENT FICTION. The LIFO-ownership path
+ * keeps well-nested cross-instance swaps honest, but it still silently REFUSES an
+ * out-of-order restore. tryAcquireSwap(scope) makes the single-ownership reality
+ * EXPLICIT and opt-in: while one scope holds the exclusive lock, another scope's
+ * tryAcquireSwap returns null, so a caller that wants guaranteed sole control of
+ * the live persona slot can detect contention up front instead of discovering it
+ * at restore time. The token-driven API and the legacy LIFO path coexist on the
+ * same GLOBAL_SWAP_STACK — the lock is advisory over that shared stack, not a
+ * separate slot.
  */
 
 /**
@@ -48,6 +60,8 @@ import { defineTool as defineToolDefault } from './tool-registry.mjs';
  * @property {string} id                 Stable unique scope id (GLOBAL_SWAP_STACK owner key).
  * @property {number} seq                Monotonic handoff id counter.
  * @property {boolean} swapWarned        True once the degrade-to-delegate warning fired.
+ * @property {boolean} [_restoreToolRegistered] Internal: transfer_back auto-registered.
+ * @property {import('./tool-registry.mjs').ToolHandle} [_restoreToolHandle] Internal: handle for dispose.
  */
 
 /**
@@ -64,8 +78,41 @@ const GLOBAL_SWAP_STACK = [];
 /** Monotonic counter feeding stable, unique scope ids. */
 let _scopeSeq = 0;
 
+/**
+ * FINDING 13 — cheap insurance on AgentRouter.start()'s submit. The trusted-code
+ * model means a predicate's persona string is not adversarial, but an unbounded
+ * or control-char-laden submit can still wedge the host's input pipeline. We cap
+ * the submitted byte length and strip C0/C1 control characters (allowing only
+ * newline `\n` and tab `\t`) before handing the string to __ccpSubmitInput.
+ */
+const MAX_SUBMIT_BYTES = 128 * 1024;
+
+/**
+ * Strip C0/C1 control characters from a submit string, preserving newline and
+ * tab. Used by AgentRouter.start() (FINDING 13). Returns '' for a non-string.
+ * @param {unknown} s
+ * @returns {string}
+ */
+function sanitizeSubmit(s) {
+  if (typeof s !== 'string') return '';
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, '');
+}
+
 /** One-shot guard so the out-of-order restore warning fires at most once. */
 let _restoreSkipWarned = false;
+
+/**
+ * FINDING 1 — the EXCLUSIVE swap-lock holder, or null when the lock is free. The
+ * single global persona slot can only be exclusively owned by one scope at a
+ * time; tryAcquireSwap() sets this to the acquiring scope id and refuses any other
+ * scope until release(). This is advisory over the SHARED GLOBAL_SWAP_STACK — it
+ * makes "one slot, all instances" contention OBSERVABLE up front rather than at
+ * restore time. The legacy LIFO path (defineHandoff swap, restoreSystemPromptIn)
+ * does NOT consult this lock, so existing callers are unaffected.
+ * @type {string|null}
+ */
+let _swapLockOwner = null;
 
 /**
  * Build a fresh handoff scope. Each scope gets a stable unique `id` so its swap
@@ -83,15 +130,70 @@ function busEmit(topic, payload) {
 }
 
 /**
+ * Memoized result of the FINDING 2 drift handshake. `undefined` = not yet run;
+ * once run it is `true` (proceed) and never re-evaluated — the contract registry
+ * is fixed at boot, so consulting it more than once per process is pure overhead.
+ * A PROVEN drift throws synchronously the first time (and is not memoized true).
+ * @type {boolean|undefined}
+ */
+let _driftChecked;
+
+/**
+ * FINDING 2 (call-site half) — make the drift guard load-bearing at handoff's
+ * write call site. The build-time `verify { present }` and capabilities()'s
+ * advisory handshake catch a drifted host, but the actual WRITE here is where a
+ * present-but-broken `systemPrompt` contract would do real damage. Before the
+ * first live write, consult __ccpRequire('systemPrompt', { minVersion: 2, shape:
+ * ['getNonce'] }) — but ONLY when BOTH the require helper AND a registered
+ * 'systemPrompt' contract exist (checked via __ccpInspectContracts). If
+ * __ccpRequire THROWS, that is PROVEN drift: we refuse the write with a clear
+ * thrown Error rather than calling the drifted global. If __ccpRequire is absent
+ * OR the contract is not registered, we proceed unchanged — fail-open preserves
+ * test stubs that set bare globals with no contract registry. Memoized so it runs
+ * at most once per process.
+ */
+function assertSystemPromptContract() {
+  if (_driftChecked) return;
+  const require_ = globalThis.__ccpRequire;
+  const inspect = globalThis.__ccpInspectContracts;
+  // Fail-open: no require helper, or no inspector to confirm the contract is
+  // registered, means a bare-global host/test stub — proceed unchanged.
+  if (typeof require_ !== 'function' || typeof inspect !== 'function') {
+    _driftChecked = true;
+    return;
+  }
+  let registered = false;
+  try {
+    registered = inspect().some((e) => e && e.name === 'systemPrompt');
+  } catch (_) {
+    // Inspector itself is broken/absent — treat as "not registered", fail-open.
+    _driftChecked = true;
+    return;
+  }
+  if (!registered) {
+    _driftChecked = true;
+    return;
+  }
+  // Contract IS registered → the handshake is now load-bearing. A throw here is
+  // proven drift; surface it (do NOT memoize true so a recovered host re-checks).
+  require_('systemPrompt', { consumer: 'adk:handoff', minVersion: 2, shape: ['getNonce'] });
+  _driftChecked = true;
+}
+
+/**
  * Write the live persona overlay through the host primitive. The writer is now
  * NONCE-GATED (expose_system_prompt mirrors the dispatch-nonce pattern): when
  * __ccpGetSystemPromptNonce() exists we acquire the nonce lazily and call the
  * gated two-arg form `__ccpSetSystemPrompt(nonce, value)`. When no nonce getter
  * is present (legacy host, or a test stub that only replaces __ccpSetSystemPrompt)
  * we fall back to the single-arg form so existing callers keep working.
+ *
+ * Before touching the raw global we run assertSystemPromptContract() (FINDING 2):
+ * a registered-but-drifted 'systemPrompt' contract refuses the write by throwing.
  * @param {string|null} value
  */
 function setLiveSystemPrompt(value) {
+  assertSystemPromptContract();
   const getNonce = globalThis.__ccpGetSystemPromptNonce;
   const setSP = globalThis.__ccpSetSystemPrompt;
   if (typeof getNonce === 'function') {
@@ -199,6 +301,122 @@ export function restoreSystemPromptIn(scope) {
 }
 
 /**
+ * FINDING 1 — acquire the EXCLUSIVE swap lock for `scope`, making the "single
+ * global persona slot, shared by every createAdk() instance" reality explicit and
+ * opt-in. Returns a swap TOKEN when no OTHER scope currently holds the lock; else
+ * returns null (the caller can then detect contention up front instead of finding
+ * out at out-of-order-restore time). Re-acquiring from the SAME scope that already
+ * holds the lock returns a fresh token bound to it (idempotent ownership).
+ *
+ * The token operates on the same SHARED GLOBAL_SWAP_STACK as the legacy LIFO path
+ * — it is a coordination layer, not a private stack:
+ *   - token.swap(persona): push `{ owner: scope.id, prev: <live> }` and set the
+ *     live prompt. Throws if the token has been released.
+ *   - token.restore(): LIFO-pop/restore the top entry IFF this scope owns it
+ *     (delegates to restoreSystemPromptIn). Returns the boolean it returns.
+ *   - token.release(): restore every remaining entry this scope still owns (LIFO),
+ *     drop the lock, and emit handoff.swap.release. Idempotent.
+ *   - token.owned (getter): true while this token still holds the lock.
+ *
+ * Emits handoff.swap.acquire on success and handoff.swap.release on release.
+ *
+ * @param {HandoffScope} scope
+ * @returns {{ swap(persona:string):void, restore():boolean, release():void, readonly owned:boolean }|null}
+ */
+export function tryAcquireSwap(scope) {
+  if (!scope || typeof scope.id !== 'string') return null;
+  // Contended: a DIFFERENT scope holds the exclusive lock → refuse.
+  if (_swapLockOwner !== null && _swapLockOwner !== scope.id) return null;
+
+  _swapLockOwner = scope.id;
+  let released = false;
+  busEmit('handoff.swap.acquire', { owner: scope.id });
+
+  const token = {
+    get owned() { return !released && _swapLockOwner === scope.id; },
+    swap(persona) {
+      if (released) throw new Error('tryAcquireSwap: token released — re-acquire before swapping');
+      if (typeof persona !== 'string') {
+        throw new Error('tryAcquireSwap: swap(persona) requires a string');
+      }
+      // Same shape/order as the legacy swap path so restoreSystemPromptIn() and
+      // swapDepthIn() treat token-pushed entries identically.
+      GLOBAL_SWAP_STACK.push({ owner: scope.id, prev: captureCurrentPrompt() });
+      setLiveSystemPrompt(persona);
+    },
+    restore() {
+      if (released) return false;
+      return restoreSystemPromptIn(scope);
+    },
+    release() {
+      if (released) return;
+      released = true;
+      // Restore any entries this scope still owns, honoring LIFO (only pops while
+      // THIS scope owns the top — never clobbers another instance's persona).
+      while (
+        GLOBAL_SWAP_STACK.length &&
+        GLOBAL_SWAP_STACK[GLOBAL_SWAP_STACK.length - 1].owner === scope.id
+      ) {
+        if (!restoreSystemPromptIn(scope)) break;
+      }
+      if (_swapLockOwner === scope.id) _swapLockOwner = null;
+      busEmit('handoff.swap.release', { owner: scope.id });
+    },
+  };
+  return token;
+}
+
+/**
+ * FINDING 15 — tear down `scope`'s swap footprint per the instance-dispose
+ * contract. LIFO-pops and restores every GLOBAL_SWAP_STACK entry OWNED by this
+ * scope (restoring each `prev`), releases the exclusive swap lock if this scope
+ * holds it, and unregisters the auto-registered `transfer_back` tool if present.
+ * Idempotent. Returns the number of swap entries restored.
+ *
+ * NOTE (single global slot): entries owned by OTHER scopes are left untouched —
+ * we never clobber another instance's live persona. An owned entry that is NOT at
+ * the LIFO top (because another instance swapped on top of it) cannot be safely
+ * popped without corrupting the slot, so it is left in place; restoreSystemPromptIn
+ * stops at the first non-owned top. This mirrors the honest-LIFO refusal policy.
+ *
+ * @param {HandoffScope} scope
+ * @returns {number} count of entries restored.
+ */
+export function disposeHandoffScope(scope) {
+  if (!scope || typeof scope.id !== 'string') return 0;
+  let restored = 0;
+  // Pop/restore only while THIS scope owns the top (honest LIFO; never clobbers
+  // another instance). Stops early if an out-of-order top blocks us.
+  while (
+    GLOBAL_SWAP_STACK.length &&
+    GLOBAL_SWAP_STACK[GLOBAL_SWAP_STACK.length - 1].owner === scope.id
+  ) {
+    if (!restoreSystemPromptIn(scope)) break;
+    restored++;
+  }
+  // Release the exclusive lock if held by this scope.
+  if (_swapLockOwner === scope.id) _swapLockOwner = null;
+  // Unregister the auto-registered transfer_back tool if it was installed. Prefer
+  // the stashed ToolHandle.unregister() (sink-agnostic); fall back to splicing the
+  // live __ccpRawTools array by name for the bare-array test path.
+  if (scope._restoreToolRegistered) {
+    const handle = scope._restoreToolHandle;
+    if (handle && typeof handle.unregister === 'function') {
+      try { handle.unregister(); } catch (_) {}
+    } else {
+      const raw = globalThis.__ccpRawTools;
+      if (Array.isArray(raw)) {
+        const i = raw.findIndex((t) => t && t.name === 'transfer_back');
+        if (i !== -1) raw.splice(i, 1);
+      }
+    }
+    scope._restoreToolRegistered = false;
+    scope._restoreToolHandle = null;
+  }
+  return restored;
+}
+
+/**
  * Read the current live system prompt, if the host exposes a getter. ccpatch's
  * expose_system_prompt stashes the active override on __ccpSystemPromptOverride;
  * we capture whatever is there (may be undefined) so restore() can put it back.
@@ -280,6 +498,15 @@ export function createDefineHandoff({ scope, getAgent, defineTool }) {
     // registered, hash its systemPrompt now and close over it; execute-time will
     // refuse the swap if the live persona's hash has drifted. `pinnedHash` stays
     // null for delegate mode or an unregistered target (nothing to pin yet).
+    //
+    // FINDING 10 — pin-on-first-resolve closes the deferred-case TOCTOU hole. When
+    // the target was UNREGISTERED at definition time, `pinDeferred` is set and
+    // nothing can be pinned yet. Rather than trusting whatever persona is
+    // registered on EVERY subsequent execute (guarded only by the name allowlist),
+    // the FIRST execute that resolves a live persona CAPTURES its sha256 into
+    // `pinnedHash` (mutated in the closure below) and treats it as the pin for all
+    // later executes — so a swapped-in persona that later drifts is refused with
+    // handoff.pin.mismatch exactly like the define-time-pinned case.
     let pinnedHash = null;
     let pinDeferred = false;
     if (mode === 'swap') {
@@ -347,8 +574,15 @@ export function createDefineHandoff({ scope, getAgent, defineTool }) {
                 return `Handoff to "${target}" refused: persona changed since handoff was defined; refusing swap.`;
               }
             } else if (pinDeferred) {
-              // Target was unregistered at definition time — nothing was pinned.
+              // FINDING 10 — pin-on-first-resolve. Target was unregistered at
+              // definition time, so this is the FIRST time a live persona has
+              // resolved. Capture its hash into the closure NOW and treat it as the
+              // pin for all subsequent executes. `handoff.pin.deferred` fires only
+              // for this very first resolve (subsequent executes take the pinned
+              // branch above); `handoff.pin.captured` records the capture itself.
               busEmit('handoff.pin.deferred', { id, target });
+              pinnedHash = hashPrompt(def.systemPrompt);
+              busEmit('handoff.pin.captured', { id, target, pinned: pinnedHash });
             }
             // REVERSIBLE SWAP: capture the prompt we're replacing onto the SINGLE
             // global stack (tagged with this scope's id) BEFORE overwriting, so a
@@ -399,7 +633,10 @@ export function createDefineHandoff({ scope, getAgent, defineTool }) {
 function ensureRestoreTool({ scope, defineTool }) {
   if (scope._restoreToolRegistered) return;
   scope._restoreToolRegistered = true;
-  defineTool({
+  // Stash the handle so disposeHandoffScope() can unregister via the sink's own
+  // primitive (the ToolHandle.unregister() returned by defineTool), independent of
+  // which sink/registry actually backs this scope.
+  scope._restoreToolHandle = defineTool({
     name: 'transfer_back',
     description: 'Revert the most recent swap handoff, restoring the previous persona/system prompt.',
     inputSchema: { type: 'object', properties: {} },
@@ -492,8 +729,23 @@ export class AgentRouter extends EventEmitter {
         this.#announced = true;
         busEmit('router.active', { agent: agentName });
       }
+      // FINDING 13 — cheap insurance before submitting. Strip control chars
+      // (keeping \n and \t) and enforce a MAX_SUBMIT_BYTES ceiling. Over the cap
+      // we refuse THIS submit: fire router.submit.rejected, surface a router
+      // 'error' event (only when observed, matching #emitError), and DO NOT
+      // advance the chain — a runaway/oversized persona must not wedge the host
+      // input pipeline. The trusted-code model makes this insurance, not a gate.
+      const clean = sanitizeSubmit(def.systemPrompt);
+      const bytes = Buffer.byteLength(clean, 'utf8');
+      if (bytes > MAX_SUBMIT_BYTES) {
+        busEmit('router.submit.rejected', { agent: agentName, bytes, max: MAX_SUBMIT_BYTES });
+        this.#emitError('submit', new Error(
+          `AgentRouter: refused submit for "${agentName}" — ${bytes} bytes exceeds MAX_SUBMIT_BYTES (${MAX_SUBMIT_BYTES})`,
+        ));
+        return;
+      }
       try {
-        await submit(def.systemPrompt);
+        await submit(clean);
       } catch (err) {
         this.#emitError('install', err);
         return;

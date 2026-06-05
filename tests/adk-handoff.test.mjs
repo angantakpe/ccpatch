@@ -29,6 +29,8 @@ import {
   restoreSystemPromptIn,
   swapDepthIn,
   currentPersona,
+  tryAcquireSwap,
+  disposeHandoffScope,
 } from '../packages/adk/handoff.mjs';
 import expose from '../extensions/expose_system_prompt.mjs';
 
@@ -65,6 +67,9 @@ function resetGlobals() {
   delete globalThis.__ccpGetSystemPromptNonce;
   delete globalThis.__ccpSystemPromptOverride;
   delete globalThis.__ccpBus;
+  delete globalThis.__ccpRequire;
+  delete globalThis.__ccpInspectContracts;
+  delete globalThis.__ccpSubmitInput;
 }
 
 // ── tool-registry: queue then drain (MUST run before any present-array inject) ─
@@ -581,4 +586,287 @@ test('AgentRouter emits router.active on the bus the first time it submits', asy
     delete globalThis.__ccpSubmitInput;
     delete globalThis.__ccpBus;
   }
+});
+
+// ── FINDING 1: exclusive swap-lock token (tryAcquireSwap) ─────────────────────
+
+test('tryAcquireSwap grants a token, refuses a second scope, releases the lock', async () => {
+  resetGlobals();
+  captureBus();
+  globalThis.__ccpSystemPromptOverride = 'BASE';
+  globalThis.__ccpSetSystemPrompt = (s) => { globalThis.__ccpSystemPromptOverride = s; };
+  globalThis.__ccpGetSystemPrompt = () => globalThis.__ccpSystemPromptOverride ?? null;
+
+  const scopeA = createHandoffScope();
+  const scopeB = createHandoffScope();
+
+  const tokA = tryAcquireSwap(scopeA);
+  assert.ok(tokA, 'first acquire returns a token');
+  assert.equal(tokA.owned, true);
+
+  // While A holds the lock, B is refused.
+  assert.equal(tryAcquireSwap(scopeB), null, 'second scope refused while A holds the lock');
+  // Re-acquire from the SAME scope is allowed (idempotent ownership).
+  assert.ok(tryAcquireSwap(scopeA), 'same scope can re-acquire');
+
+  tokA.swap('PERSONA_A');
+  assert.equal(globalThis.__ccpSystemPromptOverride, 'PERSONA_A');
+  assert.equal(swapDepthIn(scopeA), 1);
+
+  // release() restores remaining owned entries (→ BASE) and drops the lock.
+  tokA.release();
+  assert.equal(globalThis.__ccpSystemPromptOverride, 'BASE', 'release restored the displaced prompt');
+  assert.equal(tokA.owned, false);
+  assert.equal(swapDepthIn(scopeA), 0);
+
+  // Now B can acquire.
+  const tokB = tryAcquireSwap(scopeB);
+  assert.ok(tokB, 'B acquires after A released');
+  tokB.release();
+});
+
+test('tryAcquireSwap token.swap after release throws; events fire on acquire/release', async () => {
+  resetGlobals();
+  const events = captureBus();
+  globalThis.__ccpSystemPromptOverride = 'BASE';
+  globalThis.__ccpSetSystemPrompt = (s) => { globalThis.__ccpSystemPromptOverride = s; };
+  globalThis.__ccpGetSystemPrompt = () => globalThis.__ccpSystemPromptOverride ?? null;
+
+  const scope = createHandoffScope();
+  const tok = tryAcquireSwap(scope);
+  tok.release();
+  assert.throws(() => tok.swap('X'), /token released/);
+  assert.ok(topics(events).includes('handoff.swap.acquire'), 'emits handoff.swap.acquire');
+  assert.ok(topics(events).includes('handoff.swap.release'), 'emits handoff.swap.release');
+  // release() is idempotent.
+  tok.release();
+});
+
+test('tryAcquireSwap token.restore honors LIFO over the shared stack', async () => {
+  resetGlobals();
+  captureBus();
+  globalThis.__ccpSystemPromptOverride = 'BASE';
+  globalThis.__ccpSetSystemPrompt = (s) => { globalThis.__ccpSystemPromptOverride = s; };
+  globalThis.__ccpGetSystemPrompt = () => globalThis.__ccpSystemPromptOverride ?? null;
+
+  const scope = createHandoffScope();
+  const tok = tryAcquireSwap(scope);
+  tok.swap('P1');
+  tok.swap('P2');
+  assert.equal(globalThis.__ccpSystemPromptOverride, 'P2');
+  assert.equal(tok.restore(), true);
+  assert.equal(globalThis.__ccpSystemPromptOverride, 'P1', 'LIFO pop reveals P1');
+  assert.equal(tok.restore(), true);
+  assert.equal(globalThis.__ccpSystemPromptOverride, 'BASE');
+  tok.release();
+});
+
+// ── FINDING 10: pin-on-first-resolve for the deferred case ────────────────────
+
+test('deferred-pin captures the persona on first resolve and refuses later drift', async () => {
+  resetGlobals();
+  const events = captureBus();
+  globalThis.__ccpSystemPromptOverride = 'ORIGINAL';
+  globalThis.__ccpSetSystemPrompt = (s) => { globalThis.__ccpSystemPromptOverride = s; };
+  globalThis.__ccpGetSystemPrompt = () => globalThis.__ccpSystemPromptOverride ?? null;
+
+  const reg = createAgentScope();
+  const define = createDefineHandoff({ scope: createHandoffScope(), getAgent: (n) => getAgentIn(reg, n), defineTool });
+  // Target unregistered at define time → pin deferred.
+  const handle = define({ target: 'deferred', mode: 'swap', allowSwapTargets: ['deferred'] });
+
+  // First resolve: agent now exists. Captures the pin on this very first execute.
+  defineAgentIn(reg, { name: 'deferred', systemPrompt: 'FIRST PERSONA' });
+  const res1 = await handle.execute({ task: 'x' });
+  assert.match(res1, /persona swapped/i);
+  assert.equal(globalThis.__ccpSystemPromptOverride, 'FIRST PERSONA');
+  assert.ok(topics(events).includes('handoff.pin.deferred'), 'pin.deferred fires on first resolve only');
+  assert.ok(topics(events).includes('handoff.pin.captured'), 'pin.captured fires on first capture');
+
+  // Restore back to ORIGINAL so the next swap has a clean slot.
+  globalThis.__ccpSystemPromptOverride = 'ORIGINAL';
+
+  // Attacker re-defines the same name with a hostile persona AFTER first capture.
+  defineAgentIn(reg, { name: 'deferred', systemPrompt: 'HOSTILE PERSONA' });
+
+  const realWarn = console.warn;
+  console.warn = () => {};
+  const res2 = await handle.execute({ task: 'x' });
+  console.warn = realWarn;
+  assert.match(res2, /persona changed since handoff was defined; refusing swap/);
+  assert.equal(globalThis.__ccpSystemPromptOverride, 'ORIGINAL', 'drifted swap refused');
+  assert.ok(topics(events).includes('handoff.pin.mismatch'), 'second execute refused via pin.mismatch');
+});
+
+test('deferred-pin does NOT re-emit pin.deferred on subsequent (unchanged) executes', async () => {
+  resetGlobals();
+  globalThis.__ccpSystemPromptOverride = 'ORIGINAL';
+  globalThis.__ccpSetSystemPrompt = (s) => { globalThis.__ccpSystemPromptOverride = s; };
+  globalThis.__ccpGetSystemPrompt = () => globalThis.__ccpSystemPromptOverride ?? null;
+
+  const reg = createAgentScope();
+  const define = createDefineHandoff({ scope: createHandoffScope(), getAgent: (n) => getAgentIn(reg, n), defineTool });
+  const handle = define({ target: 'd2', mode: 'swap' });
+  defineAgentIn(reg, { name: 'd2', systemPrompt: 'STABLE' });
+
+  const events1 = captureBus();
+  await handle.execute({ task: 'x' });
+  assert.ok(topics(events1).includes('handoff.pin.deferred'), 'first resolve emits pin.deferred');
+
+  globalThis.__ccpSystemPromptOverride = 'ORIGINAL';
+  const events2 = captureBus();
+  const res2 = await handle.execute({ task: 'x' });
+  assert.match(res2, /persona swapped/i);
+  assert.equal(topics(events2).includes('handoff.pin.deferred'), false, 'no pin.deferred on the second execute');
+});
+
+// ── FINDING 13: AgentRouter.start() submit cap + control-char sanitization ────
+
+test('AgentRouter sanitizes control chars (keeps newline/tab) before submitting', async () => {
+  resetGlobals();
+  const submitted = [];
+  globalThis.__ccpSubmitInput = async (s) => { submitted.push(s); };
+  try {
+    const router = new AgentRouter();
+    router.register({ name: 'c-a', systemPrompt: 'a bc\nd\te', handoff: () => null });
+    await router.start('c-a');
+    await tick();
+    assert.equal(submitted.length, 1);
+    assert.equal(submitted[0], 'abc\nd\te', 'C0 control chars stripped, newline+tab preserved');
+  } finally {
+    delete globalThis.__ccpSubmitInput;
+  }
+});
+
+test('AgentRouter refuses an over-cap submit: rejects, errors, does not advance', async () => {
+  resetGlobals();
+  const events = captureBus();
+  const submitted = [];
+  globalThis.__ccpSubmitInput = async (s) => { submitted.push(s); };
+  try {
+    const huge = 'x'.repeat(128 * 1024 + 1);
+    const router = new AgentRouter();
+    let nextScheduled = false;
+    router.register({ name: 'big', systemPrompt: huge, handoff: () => { nextScheduled = true; return 'small'; } });
+    router.register({ name: 'small', systemPrompt: 'ok', handoff: () => null });
+    const errors = [];
+    router.on('error', (e) => errors.push(e));
+
+    await router.start('big');
+    await tick();
+
+    assert.equal(submitted.length, 0, 'oversized persona was not submitted');
+    assert.equal(nextScheduled, false, 'chain did not advance past the refused submit');
+    assert.equal(errors.length, 1, 'router error event fired (observed)');
+    assert.equal(errors[0].phase, 'submit');
+    assert.ok(topics(events).includes('router.submit.rejected'), 'fires router.submit.rejected');
+    const rej = payloadOf(events, 'router.submit.rejected');
+    assert.equal(rej.max, 128 * 1024);
+    assert.ok(rej.bytes > rej.max);
+  } finally {
+    delete globalThis.__ccpSubmitInput;
+  }
+});
+
+// ── FINDING 2: drift guard load-bearing at the write call site ────────────────
+
+test('setLiveSystemPrompt refuses the write when the systemPrompt contract is drifted', async () => {
+  resetGlobals();
+  captureBus();
+  globalThis.__ccpSetSystemPrompt = (s) => { globalThis.__ccpSystemPromptOverride = s; };
+  globalThis.__ccpGetSystemPrompt = () => globalThis.__ccpSystemPromptOverride ?? null;
+  // A registered-but-drifted systemPrompt contract: inspect lists it, require throws.
+  globalThis.__ccpInspectContracts = () => [{ name: 'systemPrompt', version: 1, producer: 'p', shape: [] }];
+  globalThis.__ccpRequire = (name) => {
+    if (name === 'systemPrompt') throw new Error('[ccp:contract] systemPrompt v1 < required v2');
+    return undefined;
+  };
+
+  const reg = createAgentScope();
+  defineAgentIn(reg, { name: 'drift', systemPrompt: 'P' });
+  const define = createDefineHandoff({ scope: createHandoffScope(), getAgent: (n) => getAgentIn(reg, n), defineTool });
+  const handle = define({ target: 'drift', mode: 'swap' });
+
+  const res = await handle.execute({ task: 'x' });
+  // setLiveSystemPrompt throws inside the swap → caught → readable failure.
+  assert.match(res, /failed:.*v1 < required v2/);
+  assert.notEqual(globalThis.__ccpSystemPromptOverride, 'P', 'drifted write refused — slot untouched');
+});
+
+test('drift guard fails OPEN when require/inspect are absent or the contract is unregistered', async () => {
+  resetGlobals();
+  captureBus();
+  // No __ccpRequire / __ccpInspectContracts at all → bare-global stub path proceeds.
+  globalThis.__ccpSetSystemPrompt = (s) => { globalThis.__ccpSystemPromptOverride = s; };
+  globalThis.__ccpGetSystemPrompt = () => globalThis.__ccpSystemPromptOverride ?? null;
+
+  const reg = createAgentScope();
+  defineAgentIn(reg, { name: 'open', systemPrompt: 'OPEN PERSONA' });
+  const define = createDefineHandoff({ scope: createHandoffScope(), getAgent: (n) => getAgentIn(reg, n), defineTool });
+  const handle = define({ target: 'open', mode: 'swap' });
+  const res = await handle.execute({ task: 'x' });
+  assert.match(res, /persona swapped/i);
+  assert.equal(globalThis.__ccpSystemPromptOverride, 'OPEN PERSONA', 'fail-open: write proceeded');
+});
+
+// ── FINDING 15: disposeHandoffScope tears down swap footprint, idempotent ─────
+
+test('disposeHandoffScope restores owned entries, releases lock, unregisters transfer_back', async () => {
+  resetGlobals();
+  captureBus();
+  globalThis.__ccpSystemPromptOverride = 'BASE';
+  globalThis.__ccpSetSystemPrompt = (s) => { globalThis.__ccpSystemPromptOverride = s; };
+  globalThis.__ccpGetSystemPrompt = () => globalThis.__ccpSystemPromptOverride ?? null;
+
+  const reg = createAgentScope();
+  defineAgentIn(reg, { name: 'dh', systemPrompt: 'PERSONA_DH' });
+  const scope = createHandoffScope();
+  const define = createDefineHandoff({ scope, getAgent: (n) => getAgentIn(reg, n), defineTool });
+
+  // Swap installs an entry AND auto-registers transfer_back into __ccpRawTools.
+  await define({ target: 'dh', mode: 'swap' }).execute({ task: 'x' });
+  assert.equal(globalThis.__ccpSystemPromptOverride, 'PERSONA_DH');
+  assert.equal(swapDepthIn(scope), 1);
+  assert.ok(globalThis.__ccpRawTools.some((t) => t.name === 'transfer_back'), 'transfer_back registered');
+
+  // Hold the exclusive lock too, to prove dispose releases it.
+  // (Same scope, so acquire is permitted.)
+  const tok = tryAcquireSwap(scope);
+  assert.ok(tok);
+
+  const count = disposeHandoffScope(scope);
+  assert.equal(count, 1, 'restored exactly one owned entry');
+  assert.equal(globalThis.__ccpSystemPromptOverride, 'BASE', 'live persona restored to BASE');
+  assert.equal(swapDepthIn(scope), 0, 'no owned entries remain');
+  assert.equal(globalThis.__ccpRawTools.some((t) => t.name === 'transfer_back'), false, 'transfer_back unregistered');
+  // Lock released → another scope can now acquire.
+  assert.ok(tryAcquireSwap(createHandoffScope()), 'lock released by dispose');
+
+  // Idempotent: a second dispose restores nothing and does not throw.
+  assert.equal(disposeHandoffScope(scope), 0, 'second dispose is a no-op');
+});
+
+test('disposeHandoffScope leaves another instance’s entry untouched (single slot honesty)', async () => {
+  resetGlobals();
+  captureBus();
+  globalThis.__ccpSystemPromptOverride = 'BASE';
+  globalThis.__ccpSetSystemPrompt = (s) => { globalThis.__ccpSystemPromptOverride = s; };
+  globalThis.__ccpGetSystemPrompt = () => globalThis.__ccpSystemPromptOverride ?? null;
+
+  const regA = createAgentScope();
+  const regB = createAgentScope();
+  defineAgentIn(regA, { name: 'pa', systemPrompt: 'PA' });
+  defineAgentIn(regB, { name: 'pb', systemPrompt: 'PB' });
+  const scopeA = createHandoffScope();
+  const scopeB = createHandoffScope();
+  const defA = createDefineHandoff({ scope: scopeA, getAgent: (n) => getAgentIn(regA, n), defineTool });
+  const defB = createDefineHandoff({ scope: scopeB, getAgent: (n) => getAgentIn(regB, n), defineTool });
+
+  await defA({ target: 'pa', mode: 'swap' }).execute({ task: 't' });
+  await defB({ target: 'pb', mode: 'swap' }).execute({ task: 't' });
+  // B is on top. Disposing A must NOT clobber B's live persona.
+  const count = disposeHandoffScope(scopeA);
+  assert.equal(count, 0, 'A owns no top entry → nothing restored');
+  assert.equal(globalThis.__ccpSystemPromptOverride, 'PB', 'B live persona untouched');
+  assert.equal(swapDepthIn(scopeA), 1, 'A entry preserved beneath B (cannot pop out of order)');
 });

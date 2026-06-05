@@ -23,6 +23,9 @@ import {
   createToolRegistry,
   validateInput,
   listToolsIn,
+  toolStatusesIn,
+  disposeToolScope,
+  __resetDriftGuardForTests,
 } from '../packages/adk/tool-registry.mjs';
 
 // ── shared global hygiene ─────────────────────────────────────────────────────
@@ -32,6 +35,7 @@ function isolateGlobals() {
   const keys = [
     '__ccpRawTools', '__ccpGetDispatchNonce', '__ccpRegisterTool',
     '__ccpUnregisterTool', '__ccpBus',
+    '__ccpRequire', '__ccpInspectContracts', '__ccpDebug',
   ];
   const saved = {};
   for (const k of keys) saved[k] = globalThis[k];
@@ -321,6 +325,230 @@ test('createToolRegistry exposes a scope-bound listTools()', () => {
     const reg = createToolRegistry(scope);
     reg.defineTool({ name: 'r1', inputSchema: {}, execute: async () => 'x' });
     assert.deepEqual(reg.listTools(), ['r1'], 'registry.listTools() reflects the bound scope');
+  } finally {
+    restore();
+  }
+});
+
+// ── FINDING 2: load-bearing drift guard refuses a drifted gated path ──────────
+
+test('proven toolDispatch contract drift refuses injection through the gated registrar', () => {
+  const restore = isolateGlobals();
+  __resetDriftGuardForTests();
+  try {
+    const raw = installGatedRegistrar('NONCE-XYZ');
+    // A registered 'toolDispatch' contract whose shape probe THROWS (proven drift):
+    // __ccpRequire must throw when asked for shape ['registerTool'].
+    globalThis.__ccpInspectContracts = () => [{ name: 'toolDispatch', version: 1, shape: ['somethingElse'] }];
+    globalThis.__ccpRequire = (name, opts) => {
+      assert.equal(name, 'toolDispatch');
+      assert.equal(opts.consumer, 'adk:tools');
+      assert.deepEqual(opts.shape, ['registerTool']);
+      throw new Error('contract "toolDispatch" missing required path "registerTool"');
+    };
+
+    const scope = createToolScope();
+    const h = defineToolIn(scope, {
+      name: 'drifted', inputSchema: { type: 'object' }, execute: async () => 'x',
+    });
+    // Injection refused: the drifted global was NOT called, tool is not live, and
+    // it is queued (awaiting a registry that drift-guard will keep refusing).
+    assert.equal(raw.some((t) => t.name === 'drifted'), false, 'drifted registrar was NOT called');
+    assert.deepEqual(listToolsIn(scope), [], 'refused tool is not reported live');
+    assert.equal(toolStatusesIn(scope).find((s) => s.name === 'drifted')?.status, 'queued');
+    h.dispose();
+  } finally {
+    restore();
+    __resetDriftGuardForTests();
+  }
+});
+
+test('an UNREGISTERED toolDispatch contract leaves the gated path alone (fail-open)', () => {
+  const restore = isolateGlobals();
+  __resetDriftGuardForTests();
+  try {
+    const raw = installGatedRegistrar('NONCE-XYZ');
+    // __ccpRequire present, but NO 'toolDispatch' contract registered → fail open.
+    globalThis.__ccpInspectContracts = () => [{ name: 'somethingUnrelated' }];
+    globalThis.__ccpRequire = () => { throw new Error('should not be consulted'); };
+
+    const scope = createToolScope();
+    defineToolIn(scope, {
+      name: 'open', inputSchema: { type: 'object' }, execute: async () => 'x',
+    });
+    assert.ok(raw.some((t) => t.name === 'open'), 'fail-open: tool injected via gated registrar');
+    assert.deepEqual(listToolsIn(scope), ['open']);
+  } finally {
+    restore();
+    __resetDriftGuardForTests();
+  }
+});
+
+// ── FINDING 4: exercise the GATED nonce path end-to-end (inject + dispose) ────
+
+test('gated nonce-shaped registrar path: inject then dispose end-to-end', () => {
+  const restore = isolateGlobals();
+  __resetDriftGuardForTests();
+  try {
+    const raw = installGatedRegistrar('NONCE-XYZ');
+    const scope = createToolScope();
+
+    const h = defineToolIn(scope, {
+      name: 'gated-e2e', inputSchema: { type: 'object' }, execute: async () => 'ok',
+    });
+    assert.ok(raw.some((t) => t.name === 'gated-e2e'), 'inject landed via the nonce-gated registrar');
+    assert.deepEqual(listToolsIn(scope), ['gated-e2e'], 'reported live after gated inject');
+    assert.equal(toolStatusesIn(scope)[0].status, 'live');
+
+    // dispose() must route through the nonce-gated __ccpUnregisterTool.
+    assert.equal(h.dispose(), true, 'gated unregister removed the tool');
+    assert.equal(raw.some((t) => t.name === 'gated-e2e'), false, 'tool gone from backing array');
+    assert.deepEqual(listToolsIn(scope), [], 'no longer reported live after dispose');
+  } finally {
+    restore();
+    __resetDriftGuardForTests();
+  }
+});
+
+// ── FINDING 14: queued-then-timed-out is NOT live and shows status 'failed' ───
+
+test('a queued-then-timed-out tool is not reported live and shows status failed', async () => {
+  const restore = isolateGlobals();
+  try {
+    delete globalThis.__ccpRawTools; // registry never appears
+    const realWarn = console.warn;
+    console.warn = () => {};
+    try {
+      const scope = createToolScope();
+      const h = defineToolIn(scope, {
+        name: 'queued-fail', inputSchema: { type: 'object' }, execute: async () => 'ok',
+      });
+      // While queued: NOT live, status 'queued'.
+      assert.deepEqual(listToolsIn(scope), [], 'queued tool is not reported live');
+      assert.equal(toolStatusesIn(scope).find((s) => s.name === 'queued-fail')?.status, 'queued');
+
+      const settled = await Promise.race([
+        h.ready.then((v) => ({ v })),
+        new Promise((r) => setTimeout(() => r({ timeout: true }), 8000)),
+      ]);
+      assert.deepEqual(settled, { v: false }, '.ready resolved false on poll timeout');
+      // After timeout: still NOT live, but observable with status 'failed'.
+      assert.deepEqual(listToolsIn(scope), [], 'timed-out tool is NOT reported live');
+      assert.equal(toolStatusesIn(scope).find((s) => s.name === 'queued-fail')?.status, 'failed',
+        'timed-out tool shows status failed');
+    } finally {
+      console.warn = realWarn;
+    }
+  } finally {
+    restore();
+  }
+});
+
+// ── FINDING 12: pluggable custom validator hook ───────────────────────────────
+
+test('custom validate() hook runs AFTER built-in validateInput at the call() boundary', async () => {
+  const restore = isolateGlobals();
+  try {
+    globalThis.__ccpRawTools = [];
+    const scope = createToolScope();
+    let ran = false;
+    const seen = [];
+    defineToolIn(scope, {
+      name: 'custom-validate',
+      inputSchema: { type: 'object', properties: { n: { type: 'number' } } },
+      // Deep/numeric-bound check the built-in does NOT do.
+      validate: (input) => { seen.push('called'); return input.n > 10 ? 'n must be <= 10' : null; },
+      execute: async () => { ran = true; return 'ok'; },
+    });
+    const t = globalThis.__ccpRawTools.find((x) => x.name === 'custom-validate');
+
+    // Built-in failure short-circuits FIRST — custom validator must NOT run.
+    const builtinFail = await t.call({ n: 'not-a-number' });
+    assert.match(builtinFail[0].text, /must be of type number/);
+    assert.equal(seen.length, 0, 'custom validator did not run when built-in already failed');
+    assert.equal(ran, false);
+
+    // Built-in passes, custom validator rejects.
+    const customFail = await t.call({ n: 99 });
+    assert.match(customFail[0].text, /n must be <= 10/);
+    assert.equal(ran, false, 'execute() not called when custom validator rejects');
+
+    // Both pass → execute runs.
+    const ok = await t.call({ n: 5 });
+    assert.equal(ran, true);
+    assert.deepEqual(ok, [{ type: 'text', text: 'ok' }]);
+  } finally {
+    restore();
+  }
+});
+
+test('a throwing custom validate() is surfaced as a validation error', async () => {
+  const restore = isolateGlobals();
+  try {
+    globalThis.__ccpRawTools = [];
+    const scope = createToolScope();
+    let ran = false;
+    defineToolIn(scope, {
+      name: 'throwing-validate',
+      inputSchema: { type: 'object' },
+      validate: () => { throw new Error('boom from validator'); },
+      execute: async () => { ran = true; return 'ok'; },
+    });
+    const t = globalThis.__ccpRawTools.find((x) => x.name === 'throwing-validate');
+    const res = await t.call({ anything: 1 });
+    assert.match(res[0].text, /boom from validator/);
+    assert.equal(ran, false);
+  } finally {
+    restore();
+  }
+});
+
+// ── FINDING 15: disposeToolScope tears everything down (idempotent) ───────────
+
+test('disposeToolScope removes live tools, resolves pending false, and is idempotent', async () => {
+  const restore = isolateGlobals();
+  try {
+    const raw = installGatedRegistrar('NONCE-XYZ');
+    const scope = createToolScope();
+
+    const live = defineToolIn(scope, {
+      name: 'live-tool', inputSchema: { type: 'object' }, execute: async () => 'ok',
+    });
+    assert.ok(raw.some((t) => t.name === 'live-tool'), 'tool is live before dispose');
+
+    // Now make the registry "disappear" so a second tool stays QUEUED/pending.
+    delete globalThis.__ccpRegisterTool;
+    delete globalThis.__ccpUnregisterTool;
+    delete globalThis.__ccpRawTools;
+    const realWarn = console.warn; console.warn = () => {};
+    try {
+      const pendingHandle = defineToolIn(scope, {
+        name: 'pending-tool', inputSchema: { type: 'object' }, execute: async () => 'x',
+      });
+      assert.equal(toolStatusesIn(scope).find((s) => s.name === 'pending-tool')?.status, 'queued');
+
+      // Re-expose the array so the gated removal of the live tool has a backing store.
+      globalThis.__ccpRawTools = raw;
+      disposeToolScope(scope);
+
+      // Pending .ready resolves false (no hang) — verify within a tick.
+      const v = await Promise.race([
+        pendingHandle.ready,
+        new Promise((r) => setTimeout(() => r('HANG'), 1000)),
+      ]);
+      assert.equal(v, false, 'pending .ready resolved false on dispose');
+      assert.equal(raw.some((t) => t.name === 'live-tool'), false, 'live tool removed from registry');
+      assert.deepEqual(listToolsIn(scope), [], 'scope reports nothing live after dispose');
+      assert.deepEqual(toolStatusesIn(scope), [], 'status map cleared');
+      assert.equal(scope.pollHandle, null, 'scheduler registration cleared');
+
+      // Idempotent: second call is a no-op and does not throw.
+      assert.doesNotThrow(() => disposeToolScope(scope));
+      // unused live handle ref to satisfy lint
+      void live;
+    } finally {
+      console.warn = realWarn;
+    }
   } finally {
     restore();
   }
