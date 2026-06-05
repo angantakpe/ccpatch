@@ -16,7 +16,7 @@ protocol is **tool-call driven** — the LLM decides when to hand off by calling
 `transfer_to_<target>` tool — with two transfer **modes** behind one API.
 
 ```js
-import { defineHandoff } from 'ccpatch-adk';
+import { defineHandoff } from '@codehornets/adk';
 
 defineHandoff({
   target: 'researcher',

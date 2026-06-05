@@ -20,27 +20,30 @@
 import {
   createAgentScope, createAgentRegistry,
   defineAgent, getAgent, listAgents,
+  disposeAgentScope,
 } from './agent.mjs';
 import {
   createToolScope, createToolRegistry,
+  disposeToolScope,
 } from './tool-registry.mjs';
 import {
   createHandoffScope, createDefineHandoff, restoreSystemPromptIn,
   swapDepthIn, currentPersona, _defaultHandoffScope,
+  tryAcquireSwap as tryAcquireSwapIn, disposeHandoffScope,
   AgentRouter,
 } from './handoff.mjs';
 import { createMemory } from './memory.mjs';
 
 export { defineAgent, getAgent, listAgents } from './agent.mjs';
-export { defineTool, listTools } from './tool-registry.mjs';
+export { defineTool, listTools, toolStatuses } from './tool-registry.mjs';
 export { createMemory } from './memory.mjs';
 export { AgentRouter, defineHandoff, restoreSystemPrompt } from './handoff.mjs';
 
-// Introspection (FINDING 12) — top-level mirrors bound to the DEFAULT instance.
-// `listTools` re-exports the DEFAULT-scoped variant straight from tool-registry
-// (above). `swapDepth`/`currentPersona` bind here: the swap depth is per-handoff-
-// scope (DEFAULT = _defaultHandoffScope) while the live persona is a single global
-// slot (currentPersona reads it directly).
+// Introspection — top-level mirrors bound to the DEFAULT instance.
+// `listTools`/`toolStatuses` re-export the DEFAULT-scoped variants straight from
+// tool-registry (above). `swapDepth`/`currentPersona` bind here: the swap depth is
+// per-handoff-scope (DEFAULT = _defaultHandoffScope) while the live persona is a
+// single global slot (currentPersona reads it directly).
 export { currentPersona } from './handoff.mjs';
 
 /**
@@ -50,6 +53,17 @@ export { currentPersona } from './handoff.mjs';
  */
 export function swapDepth() {
   return swapDepthIn(_defaultHandoffScope);
+}
+
+/**
+ * Acquire the exclusive swap lock for the DEFAULT ADK instance. Returns a token
+ * to drive an in-place persona swap (`swap`/`restore`/`release`/`owned`), or null
+ * when a DIFFERENT scope already holds the lock. Bound to _defaultHandoffScope —
+ * the scoped variant lives on createAdk().tryAcquireSwap.
+ * @returns {{ swap(persona:string):void, restore():boolean, release():void, readonly owned:boolean }|null}
+ */
+export function tryAcquireSwap() {
+  return tryAcquireSwapIn(_defaultHandoffScope);
 }
 
 /**
@@ -95,7 +109,7 @@ const CAPABILITY_PATCH = {
  * Probe the __ccp* globals and report which ADK capabilities are live. Pure /
  * side-effect-free — safe to call before wiring anything up.
  *
- * VERSION/SHAPE HANDSHAKE (FINDING 2): where a typed contract is registered
+ * VERSION/SHAPE HANDSHAKE: where a typed contract is registered
  * (core/contracts.mjs — capabilities() is the ADK's drift-refusal consumer), we
  * cross-check ALL contracted capabilities via __ccpInspectContracts so a
  * present-but-shape/version-drifted global is not reported as usable. The direct
@@ -119,7 +133,7 @@ export function capabilities() {
     bus: !!globalThis.__ccpBus,
   };
 
-  // FINDING 13 — remediation detail. `live` mirrors each boolean; `patch` names
+  // Remediation detail. `live` mirrors each boolean; `patch` names
   // the providing patch so a caller seeing `false` knows what to enable.
   const detail = {};
   for (const cap of Object.keys(CAPABILITY_PATCH)) {
@@ -127,7 +141,7 @@ export function capabilities() {
   }
   caps.detail = detail;
 
-  // FINDING 2 — version/shape handshake against the typed contract registry. Only
+  // Version/shape handshake against the typed contract registry. Only
   // ever flips a capability true→false (and records a reason); a missing contract
   // entry leaves the direct probe authoritative.
   const inspect = globalThis.__ccpInspectContracts;
@@ -192,12 +206,15 @@ export function useAgentBus() {
  * @property {(opts:any)=>import('./tool-registry.mjs').ToolHandle} defineHandoff
  * @property {() => boolean} restoreSystemPrompt  Pop this instance's swap stack.
  * @property {() => string[]} listTools  Tools live/queued in this instance's scope.
+ * @property {() => Array<{name:string,status:'queued'|'live'|'failed'}>} toolStatuses  Full lifecycle view of this instance's tools.
  * @property {() => number} swapDepth    Swap-stack entries owned by this instance.
  * @property {() => (string|null)} currentPersona  The live persona overlay (single global slot).
+ * @property {() => ({ swap(persona:string):void, restore():boolean, release():void, readonly owned:boolean }|null)} tryAcquireSwap  Acquire this instance's exclusive swap lock (null if held elsewhere).
  * @property {new (opts?:any)=>AgentRouter} AgentRouter  Router pre-bound to this instance's agents.
  * @property {typeof createMemory} createMemory
  * @property {() => Capabilities} capabilities
  * @property {() => ReturnType<typeof useAgentBus>} useAgentBus
+ * @property {() => void} dispose  Tear down this instance's tool/swap/agent scopes (idempotent).
  */
 
 /**
@@ -223,6 +240,8 @@ export function createAdk() {
     defineTool: toolApi.defineTool,
   });
 
+  let disposed = false;
+
   return {
     defineAgent: agentApi.defineAgent,
     getAgent: agentApi.getAgent,
@@ -230,12 +249,15 @@ export function createAdk() {
     defineTool: toolApi.defineTool,
     defineHandoff: defineHandoffScoped,
     restoreSystemPrompt: () => restoreSystemPromptIn(handoffScope),
-    // Introspection (FINDING 12): listTools is this instance's tool scope;
+    // Introspection: listTools/toolStatuses are this instance's tool scope;
     // swapDepth counts entries THIS instance owns on the single global swap stack;
     // currentPersona reads the one global persona slot (shared by all instances).
     listTools: toolApi.listTools,
+    toolStatuses: toolApi.toolStatuses,
     swapDepth: () => swapDepthIn(handoffScope),
     currentPersona,
+    // Exclusive swap lock bound to THIS instance's handoff scope.
+    tryAcquireSwap: () => tryAcquireSwapIn(handoffScope),
     // Router bound to this instance's agent registry (falls back to it on start).
     AgentRouter: class extends AgentRouter {
       constructor(opts = {}) {
@@ -245,5 +267,15 @@ export function createAdk() {
     createMemory,
     capabilities,
     useAgentBus,
+    // Tear down every scope this instance owns: live tools + pending queue/pollers,
+    // its swap-stack footprint (+ swap lock if held), and its agent registry.
+    // Idempotent — safe to call twice.
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      disposeHandoffScope(handoffScope);
+      disposeToolScope(toolScope);
+      disposeAgentScope(agentScope);
+    },
   };
 }

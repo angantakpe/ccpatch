@@ -102,6 +102,22 @@ export function defineTool(spec: ToolDef): ToolHandle;
 /** Names of tools currently live/queued in the DEFAULT instance. */
 export function listTools(): string[];
 
+/** Lifecycle status of a tool: queued (awaiting inject), live, or failed (poll timeout). */
+export type ToolStatus = 'queued' | 'live' | 'failed';
+
+/** A tool plus its current lifecycle status, as reported by toolStatuses(). */
+export interface ToolStatusEntry {
+  name: string;
+  status: ToolStatus;
+}
+
+/**
+ * Full lifecycle view of the DEFAULT instance: every tool it knows about with its
+ * current status — 'queued' / 'live' / 'failed'. Completes the "why didn't my tool
+ * inject?" story alongside listTools().
+ */
+export function toolStatuses(): ToolStatusEntry[];
+
 // ── Handoffs ──────────────────────────────────────────────────────────────────
 
 /** Handoff mode: spawn an isolated subagent ('delegate') or swap persona in place ('swap'). */
@@ -143,6 +159,29 @@ export function swapDepth(): number;
 
 /** The live persona overlay currently applied (single global slot), or null. */
 export function currentPersona(): string | null;
+
+/**
+ * The exclusive swap-lock token returned by tryAcquireSwap(). Drives an in-place
+ * persona swap: `swap` pushes a persona, `restore` LIFO-pops one entry, `release`
+ * unwinds every entry this lock owns and frees the lock. `owned` is false once
+ * released (or if a different scope owns the lock).
+ */
+export interface SwapToken {
+  /** Push `persona` as the live system prompt (records the prior prompt for restore). */
+  swap(persona: string): void;
+  /** Pop one entry this scope owns; false when there is nothing to restore. */
+  restore(): boolean;
+  /** Unwind every entry this scope still owns and release the exclusive lock. */
+  release(): void;
+  /** True while this token still holds the exclusive swap lock. */
+  readonly owned: boolean;
+}
+
+/**
+ * Acquire the exclusive swap lock for the DEFAULT instance. Returns a SwapToken,
+ * or null when a DIFFERENT scope already holds the lock.
+ */
+export function tryAcquireSwap(): SwapToken | null;
 
 // ── AgentRouter ───────────────────────────────────────────────────────────────
 
@@ -318,15 +357,28 @@ export interface Adk {
   restoreSystemPrompt(): boolean;
   /** Names of tools currently live/queued in this instance's tool scope. */
   listTools(): string[];
+  /** Full lifecycle view of this instance's tools (queued/live/failed). */
+  toolStatuses(): ToolStatusEntry[];
   /** Swap-stack entries owned by this instance (its current swap depth). */
   swapDepth(): number;
   /** The live persona overlay currently applied (single global slot), or null. */
   currentPersona(): string | null;
+  /**
+   * Acquire this instance's exclusive swap lock; null when a different scope
+   * already holds it.
+   */
+  tryAcquireSwap(): SwapToken | null;
   /** Router pre-bound to this instance's agents. */
   AgentRouter: new (opts?: AgentRouterOptions) => AgentRouter;
   createMemory(opts?: CreateMemoryOptions): Memory;
   capabilities(): Capabilities;
   useAgentBus(): AgentBus;
+  /**
+   * Tear down this instance's tool/swap/agent scopes: removes live tools, cancels
+   * pending injections, unwinds its swap footprint (and frees the swap lock if
+   * held), and clears its agent registry. Idempotent — safe to call twice.
+   */
+  dispose(): void;
 }
 
 /** Create an isolated ADK instance with its own agent/tool/handoff registries. */

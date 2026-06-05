@@ -198,7 +198,7 @@ test('flush() coalesces rapid writes last-write-wins', async () => {
   assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), { k: 3 }, 'last write wins on disk');
 });
 
-// ── 0600 file mode + atomic write (FINDING 7) ─────────────────────────────────
+// ── 0600 file mode + atomic write ─────────────────────────────────────────────
 
 test('persisted file is created mode 0600 (owner-only)', { skip: platform === 'win32' }, async () => {
   // POSIX-only: Windows does not honour Unix permission bits.
@@ -240,7 +240,7 @@ test('atomic write leaves no leftover .tmp sibling', async () => {
   assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), { a: 1, b: 2 });
 });
 
-// ── deep-clone snapshot isolation (FINDING 15) ────────────────────────────────
+// ── deep-clone snapshot isolation ─────────────────────────────────────────────
 
 test('snapshot() is a DEEP copy: mutating nested values does not leak into the store', () => {
   const dir = freshDir();
@@ -264,7 +264,7 @@ test('snapshot() is a DEEP copy: mutating nested values does not leak into the s
   assert.notEqual(snap2.cfg, snap.cfg, 'each snapshot deep-clones afresh');
 });
 
-// ── dispose(): exit-listener registry does not grow (FINDING 8) ───────────────
+// ── dispose(): exit-listener registry does not grow ───────────────────────────
 
 test('createMemory() does not register a per-instance process exit listener', () => {
   // Many instances must NOT each add an 'exit' listener — the module installs a
@@ -309,7 +309,7 @@ test('dispose() cancels the pending debounce timer and is idempotent', async () 
   assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), { x: 2 });
 });
 
-// ── memoized snapshot clone (FINDING 6) ───────────────────────────────────────
+// ── memoized snapshot clone ───────────────────────────────────────────────────
 
 test('snapshot() memoizes the deep clone and invalidates it on writes', async () => {
   const dir = freshDir();
@@ -340,7 +340,7 @@ test('snapshot() memoizes the deep clone and invalidates it on writes', async ()
   await mem.flush();
 });
 
-// ── hard coalesce cap (FINDING 7) ─────────────────────────────────────────────
+// ── hard coalesce cap ─────────────────────────────────────────────────────────
 
 test('continuous set() churn cannot starve the flush beyond the 1s hard cap', async () => {
   const dir = freshDir();
@@ -366,7 +366,7 @@ test('continuous set() churn cannot starve the flush beyond the 1s hard cap', as
   assert.equal(JSON.parse(readFileSync(file, 'utf8')).k, n - 1, 'final value persisted');
 });
 
-// ── shape validation on load (FINDING 11a) ────────────────────────────────────
+// ── shape validation on load ──────────────────────────────────────────────────
 
 test('a parseable-but-non-object file (array/primitive) resets to an empty store', () => {
   const dir = freshDir();
@@ -386,7 +386,7 @@ test('a parseable-but-non-object file (array/primitive) resets to an empty store
   }
 });
 
-// ── cross-process lost-write safety (FINDING 11b) ─────────────────────────────
+// ── cross-process lost-write safety ───────────────────────────────────────────
 
 test('an external write between load and flush is merged, not clobbered', async () => {
   const dir = freshDir();
@@ -422,7 +422,47 @@ test('an external write between load and flush is merged, not clobbered', async 
   assert.equal(onDisk.shared, 'v0', 'untouched key retains the concurrent disk value');
 });
 
-// ── optional encryption/redaction transform hook (FINDING 11c) ────────────────
+// ── concurrent write + local clear() merge semantics ──────────────────────────
+
+test('local clear() drops keys we knew but preserves a concurrent writer\'s foreign keys', async () => {
+  const dir = freshDir();
+  const file = join(dir, 'clear-merge.json');
+  // Initial on-disk state this instance will load (and thus "know about").
+  writeFileSync(file, JSON.stringify({ ours: 'v0', alsoOurs: 'v0' }, null, 2), 'utf8');
+
+  const mem = createMemory({ path: file });
+  assert.equal(mem.get('ours'), 'v0', 'loaded initial state (these keys are now known)');
+
+  // Locally wipe the store, then re-set one key after the clear.
+  mem.clear();
+  mem.set('reborn', 'fresh'); // a post-clear re-set: must survive the merge
+
+  // Simulate ANOTHER process writing the file after we loaded it: it both
+  // re-creates a key WE knew about (`ours`) and introduces a brand-new foreign
+  // key (`theirs`) we never saw. Bump mtime so writeToDisk() merges.
+  writeFileSync(
+    file,
+    JSON.stringify({ ours: 'theirValue', theirs: 'external' }, null, 2),
+    'utf8',
+  );
+  const future = Date.now() / 1000 + 60;
+  utimesSync(file, future, future);
+
+  await mem.flush();
+
+  const onDisk = JSON.parse(readFileSync(file, 'utf8'));
+  // A genuinely foreign key the concurrent writer introduced survives our clear.
+  assert.equal(onDisk.theirs, 'external', "a concurrent writer's foreign key survives our clear()");
+  // Our post-clear re-set lands.
+  assert.equal(onDisk.reborn, 'fresh', 'a post-clear set() is persisted');
+  // A key we KNEW about is dropped even though the concurrent writer re-created
+  // it under the same name — we cannot tell their fresh key from the one we
+  // intended to wipe, and we resolve that ambiguity in favour of the local clear.
+  assert.ok(!('ours' in onDisk), 'a known key is wiped despite a concurrent same-name write');
+  assert.ok(!('alsoOurs' in onDisk), 'every key we knew about is wiped by the clear');
+});
+
+// ── optional encryption/redaction transform hook ──────────────────────────────
 
 test('transform { onWrite, onRead } round-trips through disk (base64)', async () => {
   const dir = freshDir();

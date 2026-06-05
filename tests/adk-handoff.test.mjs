@@ -31,6 +31,7 @@ import {
   currentPersona,
   tryAcquireSwap,
   disposeHandoffScope,
+  __resetSystemPromptDriftGuardForTests,
 } from '../packages/adk/handoff.mjs';
 import expose from '../extensions/expose_system_prompt.mjs';
 
@@ -398,7 +399,7 @@ test('expose_system_prompt scopes the overlay to main-loop queries via __ccp_pat
   assert.throws(() => sandbox.__ccpSetSystemPrompt('PERSONA'), /invalid nonce/);
 });
 
-// ── FINDING 4: nonce-gated swap writer (handoff side) ─────────────────────────
+// ── nonce-gated swap writer (handoff side) ────────────────────────────────────
 
 test('swap uses the GATED writer — passes the nonce as the first arg', async () => {
   resetGlobals();
@@ -454,7 +455,7 @@ test('swap uses the LEGACY single-arg writer when no nonce getter exists', async
   assert.deepEqual(calls[0], ['LEGACY PERSONA'], 'legacy host called with a single (value) arg, no nonce');
 });
 
-// ── FINDING 1: cross-instance swap isolation over ONE global slot ─────────────
+// ── cross-instance swap isolation over ONE global slot ────────────────────────
 
 test('two ADK instances share ONE live slot without clobbering each other (LIFO ownership)', async () => {
   resetGlobals();
@@ -502,7 +503,7 @@ test('two ADK instances share ONE live slot without clobbering each other (LIFO 
   assert.equal(globalThis.__ccpSystemPromptOverride, 'BASE', 'A pop returns to BASE');
 });
 
-// ── FINDING 5: TOCTOU pin — persona changed after definition is refused ────────
+// ── TOCTOU pin — persona changed after definition is refused ──────────────────
 
 test('swap refuses when the target persona is mutated after the handoff is defined', async () => {
   resetGlobals();
@@ -568,7 +569,7 @@ test('swap against an unregistered-at-define target emits handoff.pin.deferred',
   assert.ok(topics(events).includes('handoff.pin.deferred'), 'emits handoff.pin.deferred');
 });
 
-// ── FINDING 3: AgentRouter announces code-driven control on first submit ───────
+// ── AgentRouter announces code-driven control on first submit ─────────────────
 
 test('AgentRouter emits router.active on the bus the first time it submits', async () => {
   const events = captureBus();
@@ -588,7 +589,7 @@ test('AgentRouter emits router.active on the bus the first time it submits', asy
   }
 });
 
-// ── FINDING 1: exclusive swap-lock token (tryAcquireSwap) ─────────────────────
+// ── exclusive swap-lock token (tryAcquireSwap) ────────────────────────────────
 
 test('tryAcquireSwap grants a token, refuses a second scope, releases the lock', async () => {
   resetGlobals();
@@ -661,7 +662,7 @@ test('tryAcquireSwap token.restore honors LIFO over the shared stack', async () 
   tok.release();
 });
 
-// ── FINDING 10: pin-on-first-resolve for the deferred case ────────────────────
+// ── pin-on-first-resolve for the deferred case ────────────────────────────────
 
 test('deferred-pin captures the persona on first resolve and refuses later drift', async () => {
   resetGlobals();
@@ -720,7 +721,7 @@ test('deferred-pin does NOT re-emit pin.deferred on subsequent (unchanged) execu
   assert.equal(topics(events2).includes('handoff.pin.deferred'), false, 'no pin.deferred on the second execute');
 });
 
-// ── FINDING 13: AgentRouter.start() submit cap + control-char sanitization ────
+// ── AgentRouter.start() submit cap + control-char sanitization ────────────────
 
 test('AgentRouter sanitizes control chars (keeps newline/tab) before submitting', async () => {
   resetGlobals();
@@ -768,10 +769,14 @@ test('AgentRouter refuses an over-cap submit: rejects, errors, does not advance'
   }
 });
 
-// ── FINDING 2: drift guard load-bearing at the write call site ────────────────
+// ── drift guard load-bearing at the write call site ──────────────────────────
 
 test('setLiveSystemPrompt refuses the write when the systemPrompt contract is drifted', async () => {
   resetGlobals();
+  // Earlier tests run swaps with no contract registered, which (correctly) take
+  // the fail-open path. Clear the drift latch so this case starts fresh — the
+  // guard re-evaluates against THIS test's registered-but-drifted contract.
+  __resetSystemPromptDriftGuardForTests();
   captureBus();
   globalThis.__ccpSetSystemPrompt = (s) => { globalThis.__ccpSystemPromptOverride = s; };
   globalThis.__ccpGetSystemPrompt = () => globalThis.__ccpSystemPromptOverride ?? null;
@@ -809,7 +814,40 @@ test('drift guard fails OPEN when require/inspect are absent or the contract is 
   assert.equal(globalThis.__ccpSystemPromptOverride, 'OPEN PERSONA', 'fail-open: write proceeded');
 });
 
-// ── FINDING 15: disposeHandoffScope tears down swap footprint, idempotent ─────
+test('drift guard honors a contract registry that populates AFTER the first swap', async () => {
+  resetGlobals();
+  __resetSystemPromptDriftGuardForTests();
+  captureBus();
+  globalThis.__ccpSetSystemPrompt = (s) => { globalThis.__ccpSystemPromptOverride = s; };
+  globalThis.__ccpGetSystemPrompt = () => globalThis.__ccpSystemPromptOverride ?? null;
+
+  const reg = createAgentScope();
+  defineAgentIn(reg, { name: 'late', systemPrompt: 'LATE OK' });
+  const define = createDefineHandoff({ scope: createHandoffScope(), getAgent: (n) => getAgentIn(reg, n), defineTool });
+  const handle = define({ target: 'late', mode: 'swap' });
+
+  // FIRST swap: no contract registry yet → fail-open path proceeds. The guard
+  // must NOT latch this fail-open decision.
+  const res1 = await handle.execute({ task: 'x' });
+  assert.match(res1, /persona swapped/i);
+  assert.equal(globalThis.__ccpSystemPromptOverride, 'LATE OK', 'first swap proceeds (no contract yet)');
+
+  // Registry populates LATE with a DRIFTED systemPrompt contract.
+  globalThis.__ccpSystemPromptOverride = 'ORIGINAL';
+  globalThis.__ccpInspectContracts = () => [{ name: 'systemPrompt', version: 1, producer: 'p', shape: [] }];
+  globalThis.__ccpRequire = (name) => {
+    if (name === 'systemPrompt') throw new Error('[ccp:contract] systemPrompt v1 < required v2');
+    return undefined;
+  };
+
+  // SECOND swap: the late-registered drifted contract MUST now be enforced —
+  // proving the earlier fail-open was not latched forever.
+  const res2 = await handle.execute({ task: 'x' });
+  assert.match(res2, /failed:.*v1 < required v2/, 'late-registered drift is enforced');
+  assert.equal(globalThis.__ccpSystemPromptOverride, 'ORIGINAL', 'drifted write refused — slot untouched');
+});
+
+// ── disposeHandoffScope tears down swap footprint, idempotent ─────────────────
 
 test('disposeHandoffScope restores owned entries, releases lock, unregisters transfer_back', async () => {
   resetGlobals();

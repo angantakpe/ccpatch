@@ -24,6 +24,7 @@ import assert from 'node:assert/strict';
 
 import {
   createAdk, capabilities, listTools, swapDepth, currentPersona, defineTool,
+  tryAcquireSwap,
 } from '../packages/adk/index.mjs';
 import { defineToolIn, createToolScope, validateInput } from '../packages/adk/tool-registry.mjs';
 
@@ -609,6 +610,131 @@ test('swapDepth()/currentPersona() track swaps on default + createAdk instances'
     adk.restoreSystemPrompt();
     assert.equal(adk.swapDepth(), 0, 'restore drops this instance’s depth back to 0');
     assert.equal(adk.currentPersona(), 'BASE', 'persona restored');
+  } finally {
+    restore();
+  }
+});
+
+// ── createAdk().dispose() ─────────────────────────────────────────────────────
+
+test('createAdk().dispose() tears down tools/swap/agents and is idempotent', async () => {
+  const restore = isolateGlobals();
+  try {
+    globalThis.__ccpRawTools = [];
+    globalThis.__ccpSystemPromptOverride = 'BASE';
+    globalThis.__ccpGetSystemPrompt = () => globalThis.__ccpSystemPromptOverride;
+    globalThis.__ccpSetSystemPrompt = (s) => { globalThis.__ccpSystemPromptOverride = s; };
+
+    const adk = createAdk();
+    adk.defineAgent({ name: 'd-agent', systemPrompt: 'PERSONA D' });
+    adk.defineTool({ name: 'd-tool', inputSchema: { type: 'object' }, execute: async () => 'x' });
+
+    // A live tool + a registered agent + an active swap before teardown.
+    assert.ok(globalThis.__ccpRawTools.some((t) => t.name === 'd-tool'), 'tool injected live');
+    assert.deepEqual(adk.listTools(), ['d-tool']);
+    assert.ok(adk.getAgent('d-agent'), 'agent registered');
+    await adk.defineHandoff({ target: 'd-agent', mode: 'swap' }).execute({ task: 't' });
+    assert.equal(adk.swapDepth(), 1, 'one swap owned before dispose');
+    assert.equal(globalThis.__ccpSystemPromptOverride, 'PERSONA D');
+
+    adk.dispose();
+
+    // Tools removed from the live array + the scope listing cleared.
+    assert.equal(
+      globalThis.__ccpRawTools.some((t) => t.name === 'd-tool'), false,
+      'dispose removed the live tool from __ccpRawTools',
+    );
+    assert.deepEqual(adk.listTools(), [], 'tool scope listing cleared');
+    // Swap footprint unwound → persona restored, depth back to 0.
+    assert.equal(adk.swapDepth(), 0, 'swap stack unwound on dispose');
+    assert.equal(globalThis.__ccpSystemPromptOverride, 'BASE', 'persona restored on dispose');
+    // Agent registry cleared.
+    assert.equal(adk.getAgent('d-agent'), null, 'agent registry cleared on dispose');
+
+    // Idempotent — a second dispose must not throw.
+    assert.doesNotThrow(() => adk.dispose(), 'dispose is idempotent');
+  } finally {
+    restore();
+  }
+});
+
+// ── adk.toolStatuses() lifecycle view ─────────────────────────────────────────
+
+test('adk.toolStatuses() reports queued / live / failed', async () => {
+  const restore = isolateGlobals();
+  try {
+    // Live array present → a defined tool injects synchronously (status 'live').
+    globalThis.__ccpRawTools = [];
+    const adk = createAdk();
+    adk.defineTool({ name: 'live-tool', inputSchema: { type: 'object' }, execute: async () => 'x' });
+    const liveStatuses = adk.toolStatuses();
+    assert.deepEqual(
+      liveStatuses.find((s) => s.name === 'live-tool'),
+      { name: 'live-tool', status: 'live' },
+      'an injected tool reports status live',
+    );
+
+    // Array absent → a defined tool queues (status 'queued') until it times out.
+    delete globalThis.__ccpRawTools;
+    const realWarn = console.warn;
+    console.warn = () => {};
+    try {
+      const h = adk.defineTool({ name: 'pending-tool', inputSchema: { type: 'object' }, execute: async () => 'y' });
+      const queued = adk.toolStatuses().find((s) => s.name === 'pending-tool');
+      assert.equal(queued.status, 'queued', 'a never-injected tool starts queued');
+
+      // Drive it to the failed terminal state by exhausting the bounded poll.
+      const settled = await Promise.race([
+        h.ready.then((v) => ({ v })),
+        new Promise((r) => setTimeout(() => r({ timeout: true }), 8000)),
+      ]);
+      assert.deepEqual(settled, { v: false }, 'poll bounded → ready=false');
+      const failed = adk.toolStatuses().find((s) => s.name === 'pending-tool');
+      assert.equal(failed.status, 'failed', 'a timed-out tool reports status failed');
+    } finally {
+      console.warn = realWarn;
+    }
+  } finally {
+    restore();
+  }
+});
+
+// ── adk.tryAcquireSwap(): exclusive swap lock ─────────────────────────────────
+
+test('adk.tryAcquireSwap() returns a working token; a second instance is refused while held', () => {
+  const restore = isolateGlobals();
+  try {
+    globalThis.__ccpRawTools = [];
+    globalThis.__ccpSystemPromptOverride = 'BASE';
+    globalThis.__ccpGetSystemPrompt = () => globalThis.__ccpSystemPromptOverride;
+    globalThis.__ccpSetSystemPrompt = (s) => { globalThis.__ccpSystemPromptOverride = s; };
+
+    const a = createAdk();
+    const b = createAdk();
+
+    const tokenA = a.tryAcquireSwap();
+    assert.ok(tokenA, 'instance A acquires the swap lock');
+    assert.equal(tokenA.owned, true, 'A owns the lock');
+
+    // The token drives an in-place persona swap + LIFO restore.
+    tokenA.swap('PERSONA A');
+    assert.equal(globalThis.__ccpSystemPromptOverride, 'PERSONA A', 'token swap applied the persona');
+    assert.equal(a.swapDepth(), 1, 'A owns one swap-stack entry');
+
+    // A SECOND instance is refused while A holds the exclusive lock.
+    assert.equal(b.tryAcquireSwap(), null, 'B refused while A holds the lock');
+    // The DEFAULT top-level scope is likewise refused.
+    assert.equal(tryAcquireSwap(), null, 'DEFAULT scope refused while A holds the lock');
+
+    // Releasing A unwinds its swap footprint and frees the lock.
+    tokenA.release();
+    assert.equal(tokenA.owned, false, 'A no longer owns the released token');
+    assert.equal(globalThis.__ccpSystemPromptOverride, 'BASE', 'release restored the base persona');
+
+    // Now B can acquire.
+    const tokenB = b.tryAcquireSwap();
+    assert.ok(tokenB, 'B acquires after A releases');
+    tokenB.release();
   } finally {
     restore();
   }

@@ -1,7 +1,7 @@
 /**
  * adk-tools-hardening.test.mjs
  *
- * Coverage for the HARDENED tool-registry surface (findings 4/6/9/11/12 support):
+ * Coverage for the HARDENED tool-registry surface:
  *   - nonce-gated injection: defineTool routes through __ccpRegisterTool /
  *     __ccpUnregisterTool with the dispatch nonce; a wrong nonce throws.
  *   - fallback path: a bare `__ccpRawTools = []` (no registrar) still injects.
@@ -73,7 +73,7 @@ function installGatedRegistrar(nonce = 'NONCE-XYZ') {
   return raw;
 }
 
-// ── FINDING 4: nonce-gated injection path ─────────────────────────────────────
+// ── nonce-gated injection path ────────────────────────────────────────────────
 
 test('defineTool routes injection through the gated registrar with the dispatch nonce', () => {
   const restore = isolateGlobals();
@@ -123,7 +123,7 @@ test('a wrong dispatch nonce makes the gated registrar throw', () => {
   }
 });
 
-// ── FINDING 4: fallback (bare-array) path stays backward compatible ───────────
+// ── fallback (bare-array) path stays backward compatible ──────────────────────
 
 test('with only a bare __ccpRawTools (no registrar), tools still inject', () => {
   const restore = isolateGlobals();
@@ -142,7 +142,7 @@ test('with only a bare __ccpRawTools (no registrar), tools still inject', () => 
   }
 });
 
-// ── FINDING 6: strengthened validateInput + size ceiling ──────────────────────
+// ── strengthened validateInput + size ceiling ─────────────────────────────────
 
 test('validateInput: additionalProperties:false rejects unknown keys', () => {
   const schema = {
@@ -201,6 +201,43 @@ test('tool call() rejects oversized input BEFORE execute() runs', async () => {
   }
 });
 
+test('tool call() rejects an UNMEASURABLE (cyclic) input instead of executing it', async () => {
+  const restore = isolateGlobals();
+  try {
+    globalThis.__ccpRawTools = [];
+    const scope = createToolScope();
+    let ran = false;
+    defineToolIn(scope, {
+      name: 'cyclic',
+      inputSchema: { type: 'object' },
+      execute: async () => { ran = true; return 'should not run'; },
+    });
+    const t = globalThis.__ccpRawTools.find((x) => x.name === 'cyclic');
+
+    // A cyclic object — JSON.stringify throws, so inputByteSize() cannot measure
+    // it. The old 0-byte fallthrough let this slip past the MAX_INPUT_BYTES
+    // ceiling and reach execute(); the boundary must now REJECT it.
+    const cyclic = { a: 1 };
+    cyclic.self = cyclic;
+    const res = await t.call(cyclic);
+    assert.equal(ran, false, 'execute() was NOT called for an unmeasurable cyclic input');
+    assert.match(res[0].text, /could not be measured\/serialized/);
+
+    // A payload with a throwing toJSON is likewise rejected, not run.
+    const throwing = { toJSON() { throw new Error('nope'); } };
+    const res2 = await t.call(throwing);
+    assert.equal(ran, false, 'execute() still not called for a throwing-toJSON input');
+    assert.match(res2[0].text, /could not be measured\/serialized/);
+
+    // A normal small input still runs (the guard is surgical, not blanket).
+    const ok = await t.call({ a: 1 });
+    assert.equal(ran, true, 'a measurable input still executes');
+    assert.deepEqual(ok, [{ type: 'text', text: 'should not run' }]);
+  } finally {
+    restore();
+  }
+});
+
 test('tool call() enforces additionalProperties:false + enum at the boundary', async () => {
   const restore = isolateGlobals();
   try {
@@ -234,7 +271,7 @@ test('tool call() enforces additionalProperties:false + enum at the boundary', a
   }
 });
 
-// ── FINDING 11: onInjectFail / throwOnInjectFail on poll timeout ──────────────
+// ── onInjectFail / throwOnInjectFail on poll timeout ──────────────────────────
 
 test('onInjectFail fires when the bounded poll times out (no array ever)', async () => {
   const restore = isolateGlobals();
@@ -297,7 +334,7 @@ test('throwOnInjectFail rejects the .injected promise on timeout (.ready still f
   }
 });
 
-// ── FINDING 12 support: listTools introspection ──────────────────────────────
+// ── listTools introspection ───────────────────────────────────────────────────
 
 test('listToolsIn reflects injected then disposed state', () => {
   const restore = isolateGlobals();
@@ -330,7 +367,7 @@ test('createToolRegistry exposes a scope-bound listTools()', () => {
   }
 });
 
-// ── FINDING 2: load-bearing drift guard refuses a drifted gated path ──────────
+// ── load-bearing drift guard refuses a drifted gated path ─────────────────────
 
 test('proven toolDispatch contract drift refuses injection through the gated registrar', () => {
   const restore = isolateGlobals();
@@ -384,7 +421,7 @@ test('an UNREGISTERED toolDispatch contract leaves the gated path alone (fail-op
   }
 });
 
-// ── FINDING 4: exercise the GATED nonce path end-to-end (inject + dispose) ────
+// ── exercise the GATED nonce path end-to-end (inject + dispose) ───────────────
 
 test('gated nonce-shaped registrar path: inject then dispose end-to-end', () => {
   const restore = isolateGlobals();
@@ -410,7 +447,7 @@ test('gated nonce-shaped registrar path: inject then dispose end-to-end', () => 
   }
 });
 
-// ── FINDING 14: queued-then-timed-out is NOT live and shows status 'failed' ───
+// ── queued-then-timed-out is NOT live and shows status 'failed' ───────────────
 
 test('a queued-then-timed-out tool is not reported live and shows status failed', async () => {
   const restore = isolateGlobals();
@@ -444,7 +481,7 @@ test('a queued-then-timed-out tool is not reported live and shows status failed'
   }
 });
 
-// ── FINDING 12: pluggable custom validator hook ───────────────────────────────
+// ── pluggable custom validator hook ───────────────────────────────────────────
 
 test('custom validate() hook runs AFTER built-in validateInput at the call() boundary', async () => {
   const restore = isolateGlobals();
@@ -503,7 +540,7 @@ test('a throwing custom validate() is surfaced as a validation error', async () 
   }
 });
 
-// ── FINDING 15: disposeToolScope tears everything down (idempotent) ───────────
+// ── disposeToolScope tears everything down (idempotent) ───────────────────────
 
 test('disposeToolScope removes live tools, resolves pending false, and is idempotent', async () => {
   const restore = isolateGlobals();

@@ -16,8 +16,10 @@ import {
   defineHandoff,
   restoreSystemPrompt,
   listTools,
+  toolStatuses,
   swapDepth,
   currentPersona,
+  tryAcquireSwap,
   createMemory,
   capabilities,
   useAgentBus,
@@ -26,6 +28,8 @@ import {
   type Capabilities,
   type CapabilityDetail,
   type ToolHandle,
+  type ToolStatusEntry,
+  type SwapToken,
   type Memory,
   type Adk,
 } from '@adk';
@@ -65,9 +69,21 @@ const transfer: ToolHandle = defineHandoff({
 void transfer;
 const popped: boolean = restoreSystemPrompt();
 const toolNames: string[] = listTools();
+const statuses: ToolStatusEntry[] = toolStatuses();
+const firstStatus: 'queued' | 'live' | 'failed' | undefined = statuses[0]?.status;
 const depth: number = swapDepth();
 const persona: string | null = currentPersona();
-void popped; void toolNames; void depth; void persona; void agentName;
+void popped; void toolNames; void statuses; void firstStatus; void depth; void persona; void agentName;
+
+// Top-level exclusive swap lock.
+const lock: SwapToken | null = tryAcquireSwap();
+if (lock) {
+  lock.swap('temp persona');
+  const owned: boolean = lock.owned;
+  const restored: boolean = lock.restore();
+  lock.release();
+  void owned; void restored;
+}
 
 // ── Capabilities (booleans + detail/reason) ─────────────────────────────────--
 const caps: Capabilities = capabilities();
@@ -97,11 +113,14 @@ void snap; void keys; void flushed;
 const adk: Adk = createAdk();
 adk.defineAgent({ name: 'a' });
 const adkTools: string[] = adk.listTools();
+const adkStatuses: ToolStatusEntry[] = adk.toolStatuses();
 const adkDepth: number = adk.swapDepth();
 const adkPersona: string | null = adk.currentPersona();
 const adkCaps: Capabilities = adk.capabilities();
+const adkLock: SwapToken | null = adk.tryAcquireSwap();
 const router = new adk.AgentRouter({ maxTransitions: 10 });
-void adkTools; void adkDepth; void adkPersona; void adkCaps; void router;
+adk.dispose();
+void adkTools; void adkStatuses; void adkDepth; void adkPersona; void adkCaps; void adkLock; void router;
 
 // Top-level AgentRouter is also a value export.
 const topRouter = new AgentRouter();

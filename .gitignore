@@ -66,3 +66,6 @@ npm-debug.log*
 
 # Diagnostic JSONL logs — kept across `make clean` but not committed.
 storage/diagnostics/*.jsonl
+
+# ADK memory test scratch (path-sandbox forces stores under repo root)
+.tmp-adk-memory-tests/

@@ -28,13 +28,14 @@ import { defineTool as defineToolDefault } from './tool-registry.mjs';
  * createAdk() instances therefore CANNOT each own a private swap stack that
  * mirrors that one slot — interleaved swap/restore across instances would let one
  * instance's restore clobber another's live persona. We back ALL swaps with a
- * SINGLE module-global stack (`GLOBAL_SWAP_STACK`) whose entries record the
- * owning scope id and the prompt that was displaced. restoreSystemPromptIn(scope)
- * pops ONLY when the global stack's TOP entry is owned by THAT scope (honest
- * global LIFO); an out-of-order restore (top owned by another instance) refuses
- * to corrupt the slot — it emits `handoff.restore.skipped`, warns once, and
- * returns false. This keeps the single-slot reality honest while preserving each
- * instance's reversibility under well-nested (LIFO) usage.
+ * SINGLE shared stack owned by the module-level `SwapCoordinator`, whose entries
+ * record the owning scope id and the prompt that was displaced.
+ * restoreSystemPromptIn(scope) pops ONLY when the shared stack's TOP entry is
+ * owned by THAT scope (honest global LIFO); an out-of-order restore (top owned by
+ * another instance) refuses to corrupt the slot — it emits
+ * `handoff.restore.skipped`, warns once, and returns false. This keeps the
+ * single-slot reality honest while preserving each instance's reversibility under
+ * well-nested (LIFO) usage.
  *
  * The writer side is nonce-gated: expose_system_prompt now exposes
  * __ccpGetSystemPromptNonce() and __ccpSetSystemPrompt(nonce, value). We acquire
@@ -42,7 +43,7 @@ import { defineTool as defineToolDefault } from './tool-registry.mjs';
  * the legacy single-arg form when no nonce getter exists (so existing stubs keep
  * working).
  *
- * TRUST BOUNDARY (exclusive swap lock — FINDING 1): because there is exactly ONE
+ * TRUST BOUNDARY (exclusive swap lock): because there is exactly ONE
  * global persona slot shared by every createAdk() instance (above), per-instance
  * isolation of the swap surface is a CONVENIENT FICTION. The LIFO-ownership path
  * keeps well-nested cross-instance swaps honest, but it still silently REFUSES an
@@ -51,13 +52,13 @@ import { defineTool as defineToolDefault } from './tool-registry.mjs';
  * tryAcquireSwap returns null, so a caller that wants guaranteed sole control of
  * the live persona slot can detect contention up front instead of discovering it
  * at restore time. The token-driven API and the legacy LIFO path coexist on the
- * same GLOBAL_SWAP_STACK — the lock is advisory over that shared stack, not a
- * separate slot.
+ * SwapCoordinator's single shared stack — the lock is advisory over that shared
+ * stack, not a separate slot.
  */
 
 /**
  * @typedef {Object} HandoffScope
- * @property {string} id                 Stable unique scope id (GLOBAL_SWAP_STACK owner key).
+ * @property {string} id                 Stable unique scope id (SwapCoordinator stack owner key).
  * @property {number} seq                Monotonic handoff id counter.
  * @property {boolean} swapWarned        True once the degrade-to-delegate warning fired.
  * @property {boolean} [_restoreToolRegistered] Internal: transfer_back auto-registered.
@@ -65,21 +66,153 @@ import { defineTool as defineToolDefault } from './tool-registry.mjs';
  */
 
 /**
- * The SINGLE process-global swap stack shared across ALL handoff scopes. It
- * mirrors the host's single live persona slot. Each entry is
- * `{ owner: <scopeId>, prev: <capturedPrompt> }`: `owner` is the scope id that
- * pushed it, `prev` is the prompt that was live just before the swap (restored on
- * pop). Per-instance LIFO discipline is enforced by checking ownership of the TOP
- * entry on restore — see restoreSystemPromptIn().
- * @type {Array<{ owner: string, prev: (string|null) }>}
+ * SwapCoordinator — the FIRST-CLASS owner of the single shared persona slot.
+ *
+ * The host exposes exactly ONE live persona slot (__ccpSystemPromptOverride).
+ * Per-instance swap "isolation" is therefore a fiction over that one slot; rather
+ * than scatter the machinery that keeps the fiction honest (the global stack, the
+ * exclusive-lock owner, the LIFO-refusal/owner-tagging logic, the warn-once flag)
+ * across module globals, we consolidate it into THIS one named coordinator that
+ * instances BORROW. Every exported entry point (swapDepthIn, restoreSystemPromptIn,
+ * tryAcquireSwap, disposeHandoffScope, and the defineHandoff swap path) delegates
+ * here; none of them mutate the stack or lock directly.
+ *
+ * `stack` entries are `{ owner: <scopeId>, prev: <capturedPrompt> }`: `owner` is
+ * the scope id that pushed it, `prev` is the prompt that was live just before the
+ * swap (restored on pop). Per-instance LIFO discipline is enforced by checking
+ * ownership of the TOP entry on restore — see restore().
  */
-const GLOBAL_SWAP_STACK = [];
+const SwapCoordinator = {
+  /**
+   * The SINGLE process-global swap stack shared across ALL handoff scopes. It
+   * mirrors the host's single live persona slot.
+   * @type {Array<{ owner: string, prev: (string|null) }>}
+   */
+  stack: [],
+
+  /**
+   * The EXCLUSIVE swap-lock holder scope id, or null when the lock is free. The
+   * single global persona slot can only be exclusively owned by one scope at a
+   * time; tryAcquireSwap() sets this and refuses any other scope until release().
+   * Advisory over the SHARED stack — the legacy LIFO path does NOT consult it.
+   * @type {string|null}
+   */
+  lockOwner: null,
+
+  /** One-shot guard so the out-of-order restore warning fires at most once. */
+  restoreSkipWarned: false,
+
+  /**
+   * Number of stack entries owned by `scopeId` (that instance's current swap
+   * depth).
+   * @param {string} scopeId
+   * @returns {number}
+   */
+  depthOf(scopeId) {
+    return this.stack.reduce((n, e) => (e.owner === scopeId ? n + 1 : n), 0);
+  },
+
+  /** The top stack entry, or undefined when empty. */
+  top() {
+    return this.stack[this.stack.length - 1];
+  },
+
+  /** True when `scopeId` owns the TOP entry (i.e. may LIFO-restore). */
+  ownsTop(scopeId) {
+    const t = this.top();
+    return !!t && t.owner === scopeId;
+  },
+
+  /**
+   * Push a swap entry tagged with `scopeId`, capturing the currently-live prompt
+   * as the `prev` to restore on pop, then write the new persona. Same shape/order
+   * for both the legacy and token swap paths so restore()/depthOf() treat them
+   * identically.
+   * @param {string} scopeId
+   * @param {string} persona
+   */
+  push(scopeId, persona) {
+    this.stack.push({ owner: scopeId, prev: captureCurrentPrompt() });
+    setLiveSystemPrompt(persona);
+  },
+
+  /**
+   * Restore the most recently swapped-out prompt, honoring GLOBAL LIFO ownership.
+   * Pops ONLY when the TOP entry is owned by `scopeId`. An out-of-order restore
+   * (top owned by another instance) refuses to corrupt the slot — emits
+   * `handoff.restore.skipped`, warns once, returns false. No-op when the stack is
+   * empty or the writer primitive is unavailable.
+   * @param {string} scopeId
+   * @returns {boolean} true if a prompt was restored.
+   */
+  restore(scopeId) {
+    if (!this.stack.length) return false;
+    const top = this.top();
+    if (!top || top.owner !== scopeId) {
+      busEmit('handoff.restore.skipped', {
+        owner: top ? top.owner : null,
+        requestedBy: scopeId,
+        depth: this.stack.length,
+      });
+      if (!this.restoreSkipWarned) {
+        this.restoreSkipWarned = true;
+        try {
+          console.warn(
+            `[adk:handoff] restore skipped — top of the global swap stack is owned by "${top ? top.owner : null}", not "${scopeId}" (out-of-order restore across ADK instances)`,
+          );
+        } catch (_) {}
+      }
+      return false;
+    }
+    const setSP = globalThis.__ccpSetSystemPrompt;
+    if (typeof setSP !== 'function') return false;
+    // Pop only after we know the writer exists and the top is ours.
+    this.stack.pop();
+    try { setLiveSystemPrompt(top.prev); } catch (_) { return false; }
+    busEmit('handoff.restore', { restored: true, depth: this.depthOf(scopeId) });
+    return true;
+  },
+
+  /**
+   * LIFO-pop/restore every entry `scopeId` still owns from the TOP down, stopping
+   * at the first non-owned top (never clobbers another instance). Returns the
+   * count restored.
+   * @param {string} scopeId
+   * @returns {number}
+   */
+  restoreOwned(scopeId) {
+    let restored = 0;
+    while (this.ownsTop(scopeId)) {
+      if (!this.restore(scopeId)) break;
+      restored++;
+    }
+    return restored;
+  },
+
+  /**
+   * Try to take the exclusive lock for `scopeId`. Returns true when granted (lock
+   * free, or already held by this same scope — idempotent ownership); false when a
+   * DIFFERENT scope holds it.
+   * @param {string} scopeId
+   * @returns {boolean}
+   */
+  acquireLock(scopeId) {
+    if (this.lockOwner !== null && this.lockOwner !== scopeId) return false;
+    this.lockOwner = scopeId;
+    return true;
+  },
+
+  /** Release the exclusive lock IFF `scopeId` currently holds it. */
+  releaseLock(scopeId) {
+    if (this.lockOwner === scopeId) this.lockOwner = null;
+  },
+};
 
 /** Monotonic counter feeding stable, unique scope ids. */
 let _scopeSeq = 0;
 
 /**
- * FINDING 13 — cheap insurance on AgentRouter.start()'s submit. The trusted-code
+ * Cheap insurance on AgentRouter.start()'s submit. The trusted-code
  * model means a predicate's persona string is not adversarial, but an unbounded
  * or control-char-laden submit can still wedge the host's input pipeline. We cap
  * the submitted byte length and strip C0/C1 control characters (allowing only
@@ -89,7 +222,7 @@ const MAX_SUBMIT_BYTES = 128 * 1024;
 
 /**
  * Strip C0/C1 control characters from a submit string, preserving newline and
- * tab. Used by AgentRouter.start() (FINDING 13). Returns '' for a non-string.
+ * tab. Used by AgentRouter.start(). Returns '' for a non-string.
  * @param {unknown} s
  * @returns {string}
  */
@@ -99,25 +232,10 @@ function sanitizeSubmit(s) {
   return s.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, '');
 }
 
-/** One-shot guard so the out-of-order restore warning fires at most once. */
-let _restoreSkipWarned = false;
-
-/**
- * FINDING 1 — the EXCLUSIVE swap-lock holder, or null when the lock is free. The
- * single global persona slot can only be exclusively owned by one scope at a
- * time; tryAcquireSwap() sets this to the acquiring scope id and refuses any other
- * scope until release(). This is advisory over the SHARED GLOBAL_SWAP_STACK — it
- * makes "one slot, all instances" contention OBSERVABLE up front rather than at
- * restore time. The legacy LIFO path (defineHandoff swap, restoreSystemPromptIn)
- * does NOT consult this lock, so existing callers are unaffected.
- * @type {string|null}
- */
-let _swapLockOwner = null;
-
 /**
  * Build a fresh handoff scope. Each scope gets a stable unique `id` so its swap
  * entries can be distinguished from other instances' entries on the single
- * GLOBAL_SWAP_STACK.
+ * SwapCoordinator stack.
  * @returns {HandoffScope}
  */
 export function createHandoffScope() {
@@ -130,53 +248,74 @@ function busEmit(topic, payload) {
 }
 
 /**
- * Memoized result of the FINDING 2 drift handshake. `undefined` = not yet run;
- * once run it is `true` (proceed) and never re-evaluated — the contract registry
- * is fixed at boot, so consulting it more than once per process is pure overhead.
- * A PROVEN drift throws synchronously the first time (and is not memoized true).
+ * Memoized result of the drift handshake. `undefined` = not yet POSITIVELY
+ * validated; once a REGISTERED 'systemPrompt' contract has been validated it is
+ * set to `true` and never re-evaluated (the contract registry is fixed once it
+ * populates, so re-consulting a proven-good contract is pure overhead).
+ *
+ * The fail-OPEN decision (no require/inspect helper, or no contract registered
+ * yet) is deliberately NOT latched: a contract registry that populates AFTER the
+ * first swap must still be honored, so the guard keeps re-evaluating cheaply until
+ * a contract is actually present. A PROVEN drift throws synchronously EVERY time
+ * (and is never memoized true).
  * @type {boolean|undefined}
  */
 let _driftChecked;
 
 /**
- * FINDING 2 (call-site half) — make the drift guard load-bearing at handoff's
- * write call site. The build-time `verify { present }` and capabilities()'s
- * advisory handshake catch a drifted host, but the actual WRITE here is where a
- * present-but-broken `systemPrompt` contract would do real damage. Before the
- * first live write, consult __ccpRequire('systemPrompt', { minVersion: 2, shape:
- * ['getNonce'] }) — but ONLY when BOTH the require helper AND a registered
- * 'systemPrompt' contract exist (checked via __ccpInspectContracts). If
- * __ccpRequire THROWS, that is PROVEN drift: we refuse the write with a clear
- * thrown Error rather than calling the drifted global. If __ccpRequire is absent
- * OR the contract is not registered, we proceed unchanged — fail-open preserves
- * test stubs that set bare globals with no contract registry. Memoized so it runs
- * at most once per process.
+ * TEST SEAM ONLY. assertSystemPromptContract() memoizes once a registered
+ * contract validates; tests that exercise distinct contract-registry
+ * configurations within one process need to clear that latch between cases (and
+ * an earlier fail-open path must not leak into a later drift case). Mirrors
+ * tool-registry.mjs's __resetDriftGuardForTests(). Not part of the public ADK
+ * surface — do NOT surface in index.mjs / index.d.ts.
+ * @returns {void}
+ */
+export function __resetSystemPromptDriftGuardForTests() {
+  _driftChecked = undefined;
+}
+
+/**
+ * Make the drift guard load-bearing at handoff's write call site. The build-time
+ * `verify { present }` and capabilities()'s advisory handshake catch a drifted
+ * host, but the actual WRITE here is where a present-but-broken `systemPrompt`
+ * contract would do real damage. Before a live write, consult
+ * __ccpRequire('systemPrompt', { minVersion: 2, shape: ['getNonce'] }) — but ONLY
+ * when BOTH the require helper AND a registered 'systemPrompt' contract exist
+ * (checked via __ccpInspectContracts). If __ccpRequire THROWS, that is PROVEN
+ * drift: we refuse the write with a clear thrown Error rather than calling the
+ * drifted global. If __ccpRequire is absent OR the contract is not registered, we
+ * proceed unchanged — fail-open preserves test stubs that set bare globals with no
+ * contract registry.
+ *
+ * Memoization is asymmetric ON PURPOSE: we ONLY latch `_driftChecked = true` once
+ * a REGISTERED contract has positively validated. The fail-open branches (no
+ * helper / not registered yet) are NOT latched, so a contract registry that
+ * populates AFTER the first swap is still honored on a later write — the guard
+ * re-evaluates cheaply until a contract is actually present. Proven drift throws
+ * every time and is never memoized.
  */
 function assertSystemPromptContract() {
   if (_driftChecked) return;
   const require_ = globalThis.__ccpRequire;
   const inspect = globalThis.__ccpInspectContracts;
-  // Fail-open: no require helper, or no inspector to confirm the contract is
-  // registered, means a bare-global host/test stub — proceed unchanged.
-  if (typeof require_ !== 'function' || typeof inspect !== 'function') {
-    _driftChecked = true;
-    return;
-  }
+  // Fail-open (NOT latched): no require helper, or no inspector to confirm the
+  // contract is registered, means a bare-global host/test stub — proceed
+  // unchanged, but re-check on the next write in case the registry populates late.
+  if (typeof require_ !== 'function' || typeof inspect !== 'function') return;
   let registered = false;
   try {
     registered = inspect().some((e) => e && e.name === 'systemPrompt');
   } catch (_) {
-    // Inspector itself is broken/absent — treat as "not registered", fail-open.
-    _driftChecked = true;
+    // Inspector itself is broken/absent — treat as "not registered", fail-open
+    // (not latched, so a recovered inspector is honored later).
     return;
   }
-  if (!registered) {
-    _driftChecked = true;
-    return;
-  }
+  if (!registered) return; // unguarded boundary → fail open, re-check next time.
   // Contract IS registered → the handshake is now load-bearing. A throw here is
-  // proven drift; surface it (do NOT memoize true so a recovered host re-checks).
+  // proven drift; surface it (and do NOT latch, so a recovered host re-checks).
   require_('systemPrompt', { consumer: 'adk:handoff', minVersion: 2, shape: ['getNonce'] });
+  // Positively validated a registered contract → safe to memoize from here on.
   _driftChecked = true;
 }
 
@@ -188,7 +327,7 @@ function assertSystemPromptContract() {
  * is present (legacy host, or a test stub that only replaces __ccpSetSystemPrompt)
  * we fall back to the single-arg form so existing callers keep working.
  *
- * Before touching the raw global we run assertSystemPromptContract() (FINDING 2):
+ * Before touching the raw global we run assertSystemPromptContract():
  * a registered-but-drifted 'systemPrompt' contract refuses the write by throwing.
  * @param {string|null} value
  */
@@ -216,14 +355,14 @@ function hashPrompt(prompt) {
 }
 
 /**
- * Number of GLOBAL_SWAP_STACK entries owned by `scope` (this instance's current
- * swap depth). Introspection hook for the finalizer's adk.swapDepth().
+ * Number of SwapCoordinator stack entries owned by `scope` (this instance's
+ * current swap depth). Introspection hook for the finalizer's adk.swapDepth().
  * @param {HandoffScope} scope
  * @returns {number}
  */
 export function swapDepthIn(scope) {
   if (!scope || typeof scope.id !== 'string') return 0;
-  return GLOBAL_SWAP_STACK.reduce((n, e) => (e.owner === scope.id ? n + 1 : n), 0);
+  return SwapCoordinator.depthOf(scope.id);
 }
 
 /**
@@ -260,56 +399,31 @@ function toCcAgentDef(def) {
 
 /**
  * Restore the most recently swapped-out system prompt, honoring GLOBAL LIFO
- * ownership. Only pops when the GLOBAL_SWAP_STACK's TOP entry is owned by THIS
- * scope: that is the single-slot-honest definition of "the last swap" across all
+ * ownership. Only pops when the shared stack's TOP entry is owned by THIS scope:
+ * that is the single-slot-honest definition of "the last swap" across all
  * instances. If the top entry belongs to ANOTHER instance (an out-of-order
  * restore), we DO NOT corrupt it — popping would re-apply this scope's older
  * `prev` over a persona the other instance still owns. Instead we emit
  * `handoff.restore.skipped`, warn once, and return false. No-op when the stack is
- * empty or the writer primitive is unavailable.
+ * empty or the writer primitive is unavailable. Delegates to SwapCoordinator.
  * @param {HandoffScope} scope
  * @returns {boolean} true if a prompt was restored.
  */
 export function restoreSystemPromptIn(scope) {
-  if (!GLOBAL_SWAP_STACK.length) return false;
-  const top = GLOBAL_SWAP_STACK[GLOBAL_SWAP_STACK.length - 1];
-  // Out-of-order restore: the live slot is owned by a different instance. Refuse
-  // rather than clobber its persona.
-  if (!top || top.owner !== scope.id) {
-    busEmit('handoff.restore.skipped', {
-      owner: top ? top.owner : null,
-      requestedBy: scope.id,
-      depth: GLOBAL_SWAP_STACK.length,
-    });
-    if (!_restoreSkipWarned) {
-      _restoreSkipWarned = true;
-      try {
-        console.warn(
-          `[adk:handoff] restore skipped — top of the global swap stack is owned by "${top ? top.owner : null}", not "${scope.id}" (out-of-order restore across ADK instances)`,
-        );
-      } catch (_) {}
-    }
-    return false;
-  }
-  const setSP = globalThis.__ccpSetSystemPrompt;
-  if (typeof setSP !== 'function') return false;
-  // Pop only after we know the writer exists and the top is ours.
-  GLOBAL_SWAP_STACK.pop();
-  try { setLiveSystemPrompt(top.prev); } catch (_) { return false; }
-  busEmit('handoff.restore', { restored: true, depth: swapDepthIn(scope) });
-  return true;
+  if (!scope || typeof scope.id !== 'string') return false;
+  return SwapCoordinator.restore(scope.id);
 }
 
 /**
- * FINDING 1 — acquire the EXCLUSIVE swap lock for `scope`, making the "single
+ * Acquire the EXCLUSIVE swap lock for `scope`, making the "single
  * global persona slot, shared by every createAdk() instance" reality explicit and
  * opt-in. Returns a swap TOKEN when no OTHER scope currently holds the lock; else
  * returns null (the caller can then detect contention up front instead of finding
  * out at out-of-order-restore time). Re-acquiring from the SAME scope that already
  * holds the lock returns a fresh token bound to it (idempotent ownership).
  *
- * The token operates on the same SHARED GLOBAL_SWAP_STACK as the legacy LIFO path
- * — it is a coordination layer, not a private stack:
+ * The token operates on the same SHARED SwapCoordinator stack as the legacy LIFO
+ * path — it is a coordination layer, not a private stack:
  *   - token.swap(persona): push `{ owner: scope.id, prev: <live> }` and set the
  *     live prompt. Throws if the token has been released.
  *   - token.restore(): LIFO-pop/restore the top entry IFF this scope owns it
@@ -326,14 +440,13 @@ export function restoreSystemPromptIn(scope) {
 export function tryAcquireSwap(scope) {
   if (!scope || typeof scope.id !== 'string') return null;
   // Contended: a DIFFERENT scope holds the exclusive lock → refuse.
-  if (_swapLockOwner !== null && _swapLockOwner !== scope.id) return null;
+  if (!SwapCoordinator.acquireLock(scope.id)) return null;
 
-  _swapLockOwner = scope.id;
   let released = false;
   busEmit('handoff.swap.acquire', { owner: scope.id });
 
   const token = {
-    get owned() { return !released && _swapLockOwner === scope.id; },
+    get owned() { return !released && SwapCoordinator.lockOwner === scope.id; },
     swap(persona) {
       if (released) throw new Error('tryAcquireSwap: token released — re-acquire before swapping');
       if (typeof persona !== 'string') {
@@ -341,8 +454,7 @@ export function tryAcquireSwap(scope) {
       }
       // Same shape/order as the legacy swap path so restoreSystemPromptIn() and
       // swapDepthIn() treat token-pushed entries identically.
-      GLOBAL_SWAP_STACK.push({ owner: scope.id, prev: captureCurrentPrompt() });
-      setLiveSystemPrompt(persona);
+      SwapCoordinator.push(scope.id, persona);
     },
     restore() {
       if (released) return false;
@@ -353,13 +465,8 @@ export function tryAcquireSwap(scope) {
       released = true;
       // Restore any entries this scope still owns, honoring LIFO (only pops while
       // THIS scope owns the top — never clobbers another instance's persona).
-      while (
-        GLOBAL_SWAP_STACK.length &&
-        GLOBAL_SWAP_STACK[GLOBAL_SWAP_STACK.length - 1].owner === scope.id
-      ) {
-        if (!restoreSystemPromptIn(scope)) break;
-      }
-      if (_swapLockOwner === scope.id) _swapLockOwner = null;
+      SwapCoordinator.restoreOwned(scope.id);
+      SwapCoordinator.releaseLock(scope.id);
       busEmit('handoff.swap.release', { owner: scope.id });
     },
   };
@@ -367,16 +474,17 @@ export function tryAcquireSwap(scope) {
 }
 
 /**
- * FINDING 15 — tear down `scope`'s swap footprint per the instance-dispose
- * contract. LIFO-pops and restores every GLOBAL_SWAP_STACK entry OWNED by this
- * scope (restoring each `prev`), releases the exclusive swap lock if this scope
- * holds it, and unregisters the auto-registered `transfer_back` tool if present.
- * Idempotent. Returns the number of swap entries restored.
+ * Tear down `scope`'s swap footprint per the instance-dispose
+ * contract. LIFO-pops and restores every shared-stack entry OWNED by this scope
+ * (restoring each `prev`), releases the exclusive swap lock if this scope holds it,
+ * and unregisters the auto-registered `transfer_back` tool if present. Idempotent.
+ * Returns the number of swap entries restored. Delegates the stack/lock work to
+ * SwapCoordinator.
  *
  * NOTE (single global slot): entries owned by OTHER scopes are left untouched —
  * we never clobber another instance's live persona. An owned entry that is NOT at
  * the LIFO top (because another instance swapped on top of it) cannot be safely
- * popped without corrupting the slot, so it is left in place; restoreSystemPromptIn
+ * popped without corrupting the slot, so it is left in place; SwapCoordinator
  * stops at the first non-owned top. This mirrors the honest-LIFO refusal policy.
  *
  * @param {HandoffScope} scope
@@ -384,18 +492,11 @@ export function tryAcquireSwap(scope) {
  */
 export function disposeHandoffScope(scope) {
   if (!scope || typeof scope.id !== 'string') return 0;
-  let restored = 0;
   // Pop/restore only while THIS scope owns the top (honest LIFO; never clobbers
-  // another instance). Stops early if an out-of-order top blocks us.
-  while (
-    GLOBAL_SWAP_STACK.length &&
-    GLOBAL_SWAP_STACK[GLOBAL_SWAP_STACK.length - 1].owner === scope.id
-  ) {
-    if (!restoreSystemPromptIn(scope)) break;
-    restored++;
-  }
-  // Release the exclusive lock if held by this scope.
-  if (_swapLockOwner === scope.id) _swapLockOwner = null;
+  // another instance). Stops early if an out-of-order top blocks us. Then release
+  // the exclusive lock if held by this scope.
+  const restored = SwapCoordinator.restoreOwned(scope.id);
+  SwapCoordinator.releaseLock(scope.id);
   // Unregister the auto-registered transfer_back tool if it was installed. Prefer
   // the stashed ToolHandle.unregister() (sink-agnostic); fall back to splicing the
   // live __ccpRawTools array by name for the bare-array test path.
@@ -442,7 +543,7 @@ function captureCurrentPrompt() {
 /**
  * Build a scoped `defineHandoff` bound to a specific agent lookup + tool sink.
  *
- * Swap-mode TOCTOU pin (FINDING 5): `allowSwapTargets` only allowlists the target
+ * Swap-mode TOCTOU pin: `allowSwapTargets` only allowlists the target
  * NAME, but the persona is re-resolved at EXECUTE time via getAgent(target) — a
  * later defineAgent() could swap a hostile systemPrompt under an allowlisted
  * name. To close that window, a `swap` handoff whose target is ALREADY registered
@@ -494,19 +595,30 @@ export function createDefineHandoff({ scope, getAgent, defineTool }) {
       required: [promptKey],
     };
 
-    // FINDING 5 — persona PIN at DEFINITION time. If the swap target is already
+    // Persona PIN at DEFINITION time. If the swap target is already
     // registered, hash its systemPrompt now and close over it; execute-time will
     // refuse the swap if the live persona's hash has drifted. `pinnedHash` stays
     // null for delegate mode or an unregistered target (nothing to pin yet).
     //
-    // FINDING 10 — pin-on-first-resolve closes the deferred-case TOCTOU hole. When
-    // the target was UNREGISTERED at definition time, `pinDeferred` is set and
-    // nothing can be pinned yet. Rather than trusting whatever persona is
-    // registered on EVERY subsequent execute (guarded only by the name allowlist),
-    // the FIRST execute that resolves a live persona CAPTURES its sha256 into
-    // `pinnedHash` (mutated in the closure below) and treats it as the pin for all
-    // later executes — so a swapped-in persona that later drifts is refused with
+    // Pin-on-first-resolve narrows the deferred-case TOCTOU window. When the
+    // target was UNREGISTERED at definition time, `pinDeferred` is set and nothing
+    // can be pinned yet. Rather than trusting whatever persona is registered on
+    // EVERY subsequent execute (guarded only by the name allowlist), the FIRST
+    // execute that resolves a live persona CAPTURES its sha256 into `pinnedHash`
+    // (mutated in the closure below) and treats it as the pin for all later
+    // executes — so a swapped-in persona that later drifts is refused with
     // handoff.pin.mismatch exactly like the define-time-pinned case.
+    //
+    // RESIDUAL TRUST ASSUMPTION (TOCTOU not fully closed): the pin is captured at
+    // the FIRST execute, NOT at defineHandoff(). So whatever persona is registered
+    // under `target` in the window between defineHandoff() and that first execute
+    // is trusted IMPLICITLY — if an attacker re-defines the target before it is
+    // first invoked, pin-on-first-resolve will faithfully pin (and thereafter
+    // defend) the ALREADY-SUBSTITUTED persona. The name allowlist is the only guard
+    // across that initial window. We cannot close it here without a registered
+    // persona to hash at definition time; callers that need a hard guarantee should
+    // ensure the target is defined BEFORE the handoff (so the define-time pin above
+    // applies) rather than relying on the deferred path.
     let pinnedHash = null;
     let pinDeferred = false;
     if (mode === 'swap') {
@@ -557,7 +669,7 @@ export function createDefineHandoff({ scope, getAgent, defineTool }) {
             if (!def || typeof def.systemPrompt !== 'string') {
               throw new Error(`swap handoff: agent "${target}" has no systemPrompt (define it via defineAgent)`);
             }
-            // FINDING 5 — TOCTOU pin check. If we pinned the persona at definition
+            // TOCTOU pin check. If we pinned the persona at definition
             // time, refuse the swap when the live systemPrompt's hash has drifted
             // (a defineAgent() re-defined the target under the allowlisted name).
             if (pinnedHash !== null) {
@@ -574,22 +686,24 @@ export function createDefineHandoff({ scope, getAgent, defineTool }) {
                 return `Handoff to "${target}" refused: persona changed since handoff was defined; refusing swap.`;
               }
             } else if (pinDeferred) {
-              // FINDING 10 — pin-on-first-resolve. Target was unregistered at
-              // definition time, so this is the FIRST time a live persona has
-              // resolved. Capture its hash into the closure NOW and treat it as the
-              // pin for all subsequent executes. `handoff.pin.deferred` fires only
-              // for this very first resolve (subsequent executes take the pinned
-              // branch above); `handoff.pin.captured` records the capture itself.
+              // Pin-on-first-resolve. Target was unregistered at definition time,
+              // so this is the FIRST time a live persona has resolved. Capture its
+              // hash into the closure NOW and treat it as the pin for all subsequent
+              // executes. `handoff.pin.deferred` fires only for this very first
+              // resolve (subsequent executes take the pinned branch above);
+              // `handoff.pin.captured` records the capture itself. NOTE: this pins
+              // whatever was registered as of this first execute — see the residual
+              // TOCTOU note at definition time (the define→first-execute window is
+              // guarded only by the name allowlist).
               busEmit('handoff.pin.deferred', { id, target });
               pinnedHash = hashPrompt(def.systemPrompt);
               busEmit('handoff.pin.captured', { id, target, pinned: pinnedHash });
             }
             // REVERSIBLE SWAP: capture the prompt we're replacing onto the SINGLE
-            // global stack (tagged with this scope's id) BEFORE overwriting, so a
+            // shared stack (tagged with this scope's id) BEFORE overwriting, so a
             // LIFO-ordered restore() can pop back to it. A transfer_back tool is
             // auto-registered (once) to give the model a revert affordance.
-            GLOBAL_SWAP_STACK.push({ owner: scope.id, prev: captureCurrentPrompt() });
-            setLiveSystemPrompt(def.systemPrompt);
+            SwapCoordinator.push(scope.id, def.systemPrompt);
             ensureRestoreTool({ scope, defineTool });
             resultText = `Handed off to "${target}" — persona swapped in place. (call transfer_back to revert)`;
           } else {
@@ -729,7 +843,7 @@ export class AgentRouter extends EventEmitter {
         this.#announced = true;
         busEmit('router.active', { agent: agentName });
       }
-      // FINDING 13 — cheap insurance before submitting. Strip control chars
+      // Cheap insurance before submitting. Strip control chars
       // (keeping \n and \t) and enforce a MAX_SUBMIT_BYTES ceiling. Over the cap
       // we refuse THIS submit: fire router.submit.rejected, surface a router
       // 'error' event (only when observed, matching #emitError), and DO NOT

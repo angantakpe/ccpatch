@@ -11,9 +11,12 @@ mutates the running CC session in place. Because each exposed primitive comes fr
 a separate patch, the live surface is variable — always call `capabilities()` to
 preflight which primitives are actually wired before you depend on them.
 
-> Import paths below use the in-repo relative form (`../packages/adk/index.mjs`),
-> matching the existing tests. Published, the package is `@codehornets/adk`
-> (`main: index.mjs`, subpaths `./memory`, `./tool-registry`).
+> Examples below import from the published package specifier
+> **`@codehornets/adk`** (`main: index.mjs`), with the subpaths
+> `@codehornets/adk/memory` and `@codehornets/adk/tool-registry` where relevant —
+> so they copy-paste for anyone consuming the package. The in-repo tests use the
+> relative form (`../packages/adk/index.mjs`) instead; substitute that path if you
+> are working inside this repo rather than against the installed package.
 
 ## Quickstart
 
@@ -23,7 +26,7 @@ and preflight capabilities before relying on any of it.
 ```js
 import {
   defineAgent, defineTool, defineHandoff, capabilities,
-} from '../packages/adk/index.mjs';
+} from '@codehornets/adk';
 
 // Preflight: which __ccp* primitives are actually live this session?
 const caps = capabilities();
@@ -73,19 +76,84 @@ Tool injection is **nonce-gated**: the `expose_tool_dispatch` patch exposes
 live tools. The ADK routes through that registrar; it falls back to a direct array
 mutation only when the registrar is absent (e.g. a bare-array unit-test stub).
 
+### Tool input validation — the built-in check is SHALLOW and FAIL-OPEN
+
+> ⚠️ **Do not rely on `inputSchema` for security.** The ADK's built-in
+> `validateInput` is intentionally a *shallow, fail-open* subset of JSON Schema.
+> If it cannot interpret a keyword, it **accepts the input**. For any real
+> validation guarantee you MUST pass your own `validate(input) => string|null`
+> hook (wire in ajv/zod/etc.).
+
+What the built-in `validateInput` **does** check, at the **top level only**:
+
+- `type` (the five primitives: `string` / `number` / `boolean` / `object` / `array`)
+- `required` properties present
+- `additionalProperties: false` (only the literal `false` is honored — not a schema)
+- `enum` membership
+- `minLength` / `maxLength` on strings
+
+What it **does NOT** check (silently accepted):
+
+- **Nested object/array shapes.** A property typed `object`/`array` is checked
+  *only* for being an object/array — its **contents are completely unchecked**
+  (no recursion into sub-`properties`/`items`).
+- **Numeric bounds:** `minimum` / `maximum` / `exclusiveMinimum` /
+  `exclusiveMaximum` / `multipleOf`.
+- `pattern`, `format`, `const`, `oneOf` / `anyOf` / `allOf` / `not`, `$ref`.
+- Any keyword not in the "does check" list above → **silently ignored**.
+
+Anything it cannot interpret (an unknown schema, a non-`object` root type) is
+treated as valid (**fail-open**). Security therefore depends on the caller:
+
+```js
+import { z } from 'zod';
+
+const schema = z.object({ age: z.number().int().min(0).max(120) });
+
+defineTool({
+  name: 'set_age',
+  description: 'Record a person’s age.',
+  inputSchema: { type: 'object', properties: { age: { type: 'number' } }, required: ['age'] },
+  // DEEP check the built-in cannot do (numeric bounds, nested shapes, etc.).
+  // Runs AT THE call() BOUNDARY, AFTER the built-in. Return a string to reject,
+  // or null/undefined to accept; a thrown error is surfaced as a validation error.
+  validate: (input) => {
+    const r = schema.safeParse(input);
+    return r.success ? null : r.error.issues[0].message;
+  },
+  execute: async ({ age }) => `age set to ${age}`,
+});
+```
+
+Independently of schema, every tool call is also subject to a coarse
+**`MAX_INPUT_BYTES` ceiling (256 KB)** on the serialized input, enforced in the
+`call()` wrapper — an oversized payload is rejected before `validateInput` or your
+`validate` hook runs. That is a blunt oversized-input guard, **not** a substitute
+for the deep `validate` hook above.
+
 ### Introspection
 
 ```js
-import { listTools, swapDepth, currentPersona } from '../packages/adk/index.mjs';
+import { listTools, toolStatuses, swapDepth, currentPersona } from '@codehornets/adk';
 
-listTools();       // names of tools live/queued in the DEFAULT instance's scope
+listTools();       // names of tools that are LIVE in the DEFAULT instance's scope
+toolStatuses();    // FULL lifecycle view: [{ name, status }] — status is
+                   //   'queued' | 'live' | 'failed' (see below)
 swapDepth();       // swap-stack entries OWNED by the DEFAULT instance (0 if none)
 currentPersona();  // the live persona overlay (single global slot), or null
 ```
 
-`createAdk()` instances expose the same three as methods (`adk.listTools()`,
-`adk.swapDepth()`, `adk.currentPersona()`). `listTools`/`swapDepth` are per-scope;
-`currentPersona` reads the one global persona slot shared by every instance.
+`listTools()` reports **live tools only** — a tool that is still queued (registry
+not ready yet) or that ultimately **failed** to inject (its bounded poll timed out)
+is excluded. `toolStatuses()` complements it with the complete queued/live/failed
+lifecycle view, so a tool that never injected is observable rather than a silent
+no-op. Use `toolStatuses()` when you need to *diagnose* injection; `listTools()`
+when you just want the names that are actually callable right now.
+
+`createAdk()` instances expose the same four as methods (`adk.listTools()`,
+`adk.toolStatuses()`, `adk.swapDepth()`, `adk.currentPersona()`).
+`listTools`/`toolStatuses`/`swapDepth` are per-scope; `currentPersona` reads the
+one global persona slot shared by every instance.
 
 ## Memory
 
@@ -95,7 +163,7 @@ cache. Reads come from cache; writes are debounced (~100ms) to disk. Call
 need a durable on-disk read or before a controlled shutdown.
 
 ```js
-import { createMemory } from '../packages/adk/index.mjs';
+import { createMemory } from '@codehornets/adk';        // or '@codehornets/adk/memory'
 
 const mem = createMemory({ path: '.claude/adk-memory.json' }); // path is sandboxed
 mem.set('lastTopic', 'token budgets');
@@ -135,7 +203,7 @@ instances never share agent / tool / handoff registries. Use it for per-test or
 per-session isolation.
 
 ```js
-import { createAdk } from '../packages/adk/index.mjs';
+import { createAdk } from '@codehornets/adk';
 
 const adk = createAdk();
 adk.defineAgent({ name: 'planner', systemPrompt: 'You plan tasks.' });
@@ -153,11 +221,71 @@ adk.restoreSystemPrompt(); // pops THIS instance's swap stack only
 // A second instance shares nothing with the first:
 const other = createAdk();
 other.listAgents();        // [] — does not see 'planner'
+
+adk.dispose();             // tear the instance down — see below
 ```
 
 Note: `createMemory`, `capabilities`, and `useAgentBus` are intentionally
 instance-agnostic — they probe process-global `__ccp*` state / the filesystem, not
 per-instance registries, so the same function is reused on every instance.
+
+### `adk.dispose()` — tear an instance down
+
+`dispose()` tears down the instance: it unregisters/disposes its **tools**, pops
+and restores its **swap-stack entries** (releasing the exclusive swap lock if this
+instance holds it), and clears its **agent** registry. It is **idempotent** — safe
+to call more than once. Use it for per-test or per-session cleanup so a finished
+instance leaves no live tools or persona overlays behind.
+
+```js
+const adk = createAdk();
+// … define agents / tools / handoffs, run work …
+adk.dispose();             // tools removed, swaps restored, lock released, agents cleared
+```
+
+### `tryAcquireSwap()` — make swap contention explicit (single shared persona slot)
+
+Swap operates over a **single host persona slot shared by all instances**, so
+per-instance swap isolation is *cooperative / LIFO*: instances back their swaps
+with one process-global stack, and an out-of-order cross-instance restore is
+refused rather than allowed to clobber another instance's persona (it emits
+`handoff.restore.skipped` and returns `false`).
+
+`tryAcquireSwap()` (top-level **and** an instance method, `adk.tryAcquireSwap()`)
+makes that shared-slot contention **explicit and opt-in**. It acquires the
+exclusive swap lock and returns a **token**, or `null` when another scope already
+holds the lock — so a caller that needs guaranteed sole control of the live
+persona can detect contention *up front* instead of discovering it at restore time:
+
+```js
+import { tryAcquireSwap } from '@codehornets/adk';
+
+const token = tryAcquireSwap();   // null if another scope holds the lock
+if (token) {
+  try {
+    token.swap('You are the reviewer persona.'); // push prev + overlay this persona
+    // … run the swapped-in turn …
+    token.restore();                              // LIFO-restore the previous prompt
+  } finally {
+    token.release();                              // restore any remaining owned entries + drop the lock
+  }
+}
+```
+
+The token exposes:
+
+- `swap(persona)` — push the displaced prompt onto the shared stack and overlay
+  `persona`. Throws if the token has been released.
+- `restore()` — LIFO-restore the most recent entry **this** scope owns; returns a
+  boolean (false if the top isn't owned by this scope).
+- `release()` — restore every remaining entry this scope still owns (LIFO), drop
+  the lock, and emit `handoff.swap.release`. Idempotent.
+- `owned` — getter, `true` while this token still holds the lock.
+
+The lock is **advisory** over the same shared swap stack the legacy
+`defineHandoff` swap / `restoreSystemPrompt()` path uses — those callers do *not*
+consult it, so existing code is unaffected. `tryAcquireSwap()` is purely the opt-in
+way to coordinate when you care about exclusivity.
 
 ## The agent bus — `useAgentBus()`
 
@@ -167,7 +295,7 @@ silent no-op). Handoffs emit observability topics on it
 (`handoff.start`, `handoff.end`, `handoff.degraded`, `handoff.restore`).
 
 ```js
-import { useAgentBus } from '../packages/adk/index.mjs';
+import { useAgentBus } from '@codehornets/adk';
 
 const bus = useAgentBus();                       // throws if __ccpBus absent
 bus.on?.('handoff.degraded', ({ target, reason }) => {

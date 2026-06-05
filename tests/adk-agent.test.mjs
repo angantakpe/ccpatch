@@ -1,5 +1,5 @@
-// Targeted tests for packages/adk/agent.mjs — finding #5 (silent redefine /
-// freeze) and #15 (disposeAgentScope). Does NOT touch adk-core.test.mjs.
+// Targeted tests for packages/adk/agent.mjs — silent redefine / freeze and
+// disposeAgentScope. Does NOT touch adk-core.test.mjs.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
