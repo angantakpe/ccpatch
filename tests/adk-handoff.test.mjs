@@ -19,8 +19,17 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 
 import { defineAgent, getAgent, listAgents } from '../packages/adk/agent.mjs';
+import { createAgentScope, defineAgentIn, getAgentIn } from '../packages/adk/agent.mjs';
 import { defineTool } from '../packages/adk/tool-registry.mjs';
-import { defineHandoff, AgentRouter } from '../packages/adk/handoff.mjs';
+import {
+  defineHandoff,
+  AgentRouter,
+  createDefineHandoff,
+  createHandoffScope,
+  restoreSystemPromptIn,
+  swapDepthIn,
+  currentPersona,
+} from '../packages/adk/handoff.mjs';
 import expose from '../extensions/expose_system_prompt.mjs';
 
 // ── Shared test harness ───────────────────────────────────────────────────────
@@ -52,6 +61,9 @@ function resetGlobals() {
   delete globalThis.__ccp_path;
   delete globalThis.__ccpAgentTool;
   delete globalThis.__ccpSetSystemPrompt;
+  delete globalThis.__ccpGetSystemPrompt;
+  delete globalThis.__ccpGetSystemPromptNonce;
+  delete globalThis.__ccpSystemPromptOverride;
   delete globalThis.__ccpBus;
 }
 
@@ -349,7 +361,11 @@ test('expose_system_prompt scopes the overlay to main-loop queries via __ccp_pat
   }
 
   assert.equal(typeof sandbox.__ccpApplySystemPromptOverride, 'function');
-  sandbox.__ccpSetSystemPrompt('PERSONA');
+  // The writer is now nonce-gated — acquire the load-time nonce and pass it as
+  // the FIRST arg, mirroring how a trusted caller obtains it at startup.
+  assert.equal(typeof sandbox.__ccpGetSystemPromptNonce, 'function');
+  const spNonce = sandbox.__ccpGetSystemPromptNonce();
+  sandbox.__ccpSetSystemPrompt(spNonce, 'PERSONA');
 
   // Main loop: __ccp_path unset → overlay applied. (Assert field-by-field: the
   // block is constructed inside the vm realm, so its prototype is not
@@ -369,6 +385,200 @@ test('expose_system_prompt scopes the overlay to main-loop queries via __ccp_pat
 
   // Cleared overlay → never applied.
   sandbox.__ccp_path = 'root';
-  sandbox.__ccpSetSystemPrompt(null);
+  sandbox.__ccpSetSystemPrompt(spNonce, null);
   assert.equal(sandbox.__ccpApplySystemPromptOverride([]).length, 0);
+
+  // Wrong/absent nonce is rejected (writer is gated; reader is not).
+  assert.throws(() => sandbox.__ccpSetSystemPrompt('bogus', 'X'), /invalid nonce/);
+  assert.throws(() => sandbox.__ccpSetSystemPrompt('PERSONA'), /invalid nonce/);
+});
+
+// ── FINDING 4: nonce-gated swap writer (handoff side) ─────────────────────────
+
+test('swap uses the GATED writer — passes the nonce as the first arg', async () => {
+  resetGlobals();
+  captureBus();
+  // Model the nonce-gated host: a writer that REQUIRES the correct nonce.
+  const NONCE = 'sp-nonce-xyz';
+  let lastValue = 'ORIGINAL';
+  globalThis.__ccpGetSystemPromptNonce = () => NONCE;
+  globalThis.__ccpSetSystemPrompt = (callerNonce, value) => {
+    if (callerNonce !== NONCE) throw new Error('invalid nonce');
+    lastValue = value;
+    return value;
+  };
+  globalThis.__ccpGetSystemPrompt = () => lastValue;
+
+  defineAgent({ name: 'gated-writer', description: 'w', systemPrompt: 'GATED PERSONA' });
+  const def = defineHandoff({ target: 'gated-writer', mode: 'swap' });
+  const res = await def.execute({ task: 'x' });
+
+  assert.match(res, /persona swapped/i);
+  assert.equal(lastValue, 'GATED PERSONA', 'gated writer received the new persona with the right nonce');
+  assert.equal(currentPersona(), 'GATED PERSONA', 'currentPersona() reads the live overlay');
+});
+
+test('swap with the WRONG nonce throws inside the gated writer', async () => {
+  resetGlobals();
+  captureBus();
+  // A getter that lies — returns a nonce the writer will reject. This proves the
+  // handoff actually forwards getNonce()'s value (not a hardcoded one).
+  globalThis.__ccpGetSystemPromptNonce = () => 'WRONG';
+  globalThis.__ccpSetSystemPrompt = (callerNonce) => {
+    if (callerNonce !== 'RIGHT') throw new Error('__ccpSetSystemPrompt: invalid nonce. Call __ccpGetSystemPromptNonce() at startup.');
+  };
+  defineAgent({ name: 'bad-nonce', description: 'w', systemPrompt: 'P' });
+  const def = defineHandoff({ target: 'bad-nonce', mode: 'swap' });
+  const res = await def.execute({ task: 'x' });
+  // setLiveSystemPrompt throws → caught → readable failure tool_result.
+  assert.match(res, /failed:.*invalid nonce/i);
+});
+
+test('swap uses the LEGACY single-arg writer when no nonce getter exists', async () => {
+  resetGlobals();
+  captureBus();
+  // No __ccpGetSystemPromptNonce — the helper must fall back to single-arg.
+  const calls = [];
+  globalThis.__ccpSetSystemPrompt = (...args) => { calls.push(args); return args[0]; };
+  defineAgent({ name: 'legacy-writer', description: 'w', systemPrompt: 'LEGACY PERSONA' });
+  const def = defineHandoff({ target: 'legacy-writer', mode: 'swap' });
+  const res = await def.execute({ task: 'x' });
+
+  assert.match(res, /persona swapped/i);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0], ['LEGACY PERSONA'], 'legacy host called with a single (value) arg, no nonce');
+});
+
+// ── FINDING 1: cross-instance swap isolation over ONE global slot ─────────────
+
+test('two ADK instances share ONE live slot without clobbering each other (LIFO ownership)', async () => {
+  resetGlobals();
+  captureBus();
+  // Model the host's SINGLE live persona slot (legacy single-arg writer is fine).
+  globalThis.__ccpSystemPromptOverride = 'BASE';
+  globalThis.__ccpSetSystemPrompt = (s) => { globalThis.__ccpSystemPromptOverride = s; };
+  globalThis.__ccpGetSystemPrompt = () => globalThis.__ccpSystemPromptOverride ?? null;
+
+  // Two independent ADK instances: separate agent registries + handoff scopes,
+  // both writing through the SAME single slot.
+  const scopeA = createHandoffScope();
+  const scopeB = createHandoffScope();
+  const regA = createAgentScope();
+  const regB = createAgentScope();
+  defineAgentIn(regA, { name: 'persona-A', systemPrompt: 'PERSONA_A' });
+  defineAgentIn(regB, { name: 'persona-B', systemPrompt: 'PERSONA_B' });
+
+  const defA = createDefineHandoff({ scope: scopeA, getAgent: (n) => getAgentIn(regA, n), defineTool });
+  const defB = createDefineHandoff({ scope: scopeB, getAgent: (n) => getAgentIn(regB, n), defineTool });
+
+  // A swaps in PERSONA_A, then B swaps in PERSONA_B (well-nested: B is on top).
+  await defA({ target: 'persona-A', mode: 'swap' }).execute({ task: 't' });
+  assert.equal(globalThis.__ccpSystemPromptOverride, 'PERSONA_A');
+  await defB({ target: 'persona-B', mode: 'swap' }).execute({ task: 't' });
+  assert.equal(globalThis.__ccpSystemPromptOverride, 'PERSONA_B');
+
+  assert.equal(swapDepthIn(scopeA), 1, 'A owns exactly one global entry');
+  assert.equal(swapDepthIn(scopeB), 1, 'B owns exactly one global entry');
+
+  // OUT-OF-ORDER restore: A tries to restore while B owns the TOP. It must NOT
+  // clobber B's live persona — returns false, slot intact, B still owns its entry.
+  const realWarn = console.warn;
+  console.warn = () => {};
+  const aOutOfOrder = restoreSystemPromptIn(scopeA);
+  console.warn = realWarn;
+  assert.equal(aOutOfOrder, false, 'A cannot restore — it does not own the top of the stack');
+  assert.equal(globalThis.__ccpSystemPromptOverride, 'PERSONA_B', 'B’s live persona is untouched');
+  assert.equal(swapDepthIn(scopeB), 1, 'B still owns its entry after A’s refused restore');
+
+  // Proper LIFO: B restores first (pops B → reveals A), then A restores (→ BASE).
+  assert.equal(restoreSystemPromptIn(scopeB), true);
+  assert.equal(globalThis.__ccpSystemPromptOverride, 'PERSONA_A', 'B pop reveals A’s persona');
+  assert.equal(restoreSystemPromptIn(scopeA), true);
+  assert.equal(globalThis.__ccpSystemPromptOverride, 'BASE', 'A pop returns to BASE');
+});
+
+// ── FINDING 5: TOCTOU pin — persona changed after definition is refused ────────
+
+test('swap refuses when the target persona is mutated after the handoff is defined', async () => {
+  resetGlobals();
+  const events = captureBus();
+  globalThis.__ccpSystemPromptOverride = 'ORIGINAL';
+  globalThis.__ccpSetSystemPrompt = (s) => { globalThis.__ccpSystemPromptOverride = s; };
+  globalThis.__ccpGetSystemPrompt = () => globalThis.__ccpSystemPromptOverride ?? null;
+
+  const reg = createAgentScope();
+  defineAgentIn(reg, { name: 'pinned', systemPrompt: 'TRUSTED PERSONA' });
+  const define = createDefineHandoff({ scope: createHandoffScope(), getAgent: (n) => getAgentIn(reg, n), defineTool });
+
+  // Handoff defined NOW → pins sha256('TRUSTED PERSONA').
+  const handle = define({ target: 'pinned', mode: 'swap', allowSwapTargets: ['pinned'] });
+
+  // Attacker re-defines the same allowlisted name with a hostile persona.
+  defineAgentIn(reg, { name: 'pinned', systemPrompt: 'HOSTILE PERSONA' });
+
+  const realWarn = console.warn;
+  console.warn = () => {};
+  const res = await handle.execute({ task: 'x' });
+  console.warn = realWarn;
+  assert.match(res, /persona changed since handoff was defined; refusing swap/);
+  assert.equal(globalThis.__ccpSystemPromptOverride, 'ORIGINAL', 'live persona unchanged — swap refused');
+  assert.ok(topics(events).includes('handoff.pin.mismatch'), 'emits handoff.pin.mismatch');
+  assert.equal(payloadOf(events, 'handoff.end').ok, false, 'end event marked not-ok');
+});
+
+test('swap with an unchanged pinned persona still proceeds', async () => {
+  resetGlobals();
+  captureBus();
+  globalThis.__ccpSystemPromptOverride = 'ORIGINAL';
+  globalThis.__ccpSetSystemPrompt = (s) => { globalThis.__ccpSystemPromptOverride = s; };
+  globalThis.__ccpGetSystemPrompt = () => globalThis.__ccpSystemPromptOverride ?? null;
+
+  const reg = createAgentScope();
+  defineAgentIn(reg, { name: 'stable', systemPrompt: 'STABLE PERSONA' });
+  const define = createDefineHandoff({ scope: createHandoffScope(), getAgent: (n) => getAgentIn(reg, n), defineTool });
+  const handle = define({ target: 'stable', mode: 'swap' });
+
+  const res = await handle.execute({ task: 'x' });
+  assert.match(res, /persona swapped/i);
+  assert.equal(globalThis.__ccpSystemPromptOverride, 'STABLE PERSONA');
+});
+
+test('swap against an unregistered-at-define target emits handoff.pin.deferred', async () => {
+  resetGlobals();
+  const events = captureBus();
+  globalThis.__ccpSystemPromptOverride = 'ORIGINAL';
+  globalThis.__ccpSetSystemPrompt = (s) => { globalThis.__ccpSystemPromptOverride = s; };
+  globalThis.__ccpGetSystemPrompt = () => globalThis.__ccpSystemPromptOverride ?? null;
+
+  const reg = createAgentScope();
+  const define = createDefineHandoff({ scope: createHandoffScope(), getAgent: (n) => getAgentIn(reg, n), defineTool });
+  // Defined BEFORE the agent exists → nothing to pin.
+  const handle = define({ target: 'later', mode: 'swap' });
+  // Agent appears afterward.
+  defineAgentIn(reg, { name: 'later', systemPrompt: 'LATE PERSONA' });
+
+  const res = await handle.execute({ task: 'x' });
+  assert.match(res, /persona swapped/i);
+  assert.equal(globalThis.__ccpSystemPromptOverride, 'LATE PERSONA');
+  assert.ok(topics(events).includes('handoff.pin.deferred'), 'emits handoff.pin.deferred');
+});
+
+// ── FINDING 3: AgentRouter announces code-driven control on first submit ───────
+
+test('AgentRouter emits router.active on the bus the first time it submits', async () => {
+  const events = captureBus();
+  globalThis.__ccpSubmitInput = async () => {};
+  try {
+    const router = new AgentRouter();
+    router.register({ name: 'r-a', systemPrompt: 'A', handoff: () => 'r-b' });
+    router.register({ name: 'r-b', systemPrompt: 'B', handoff: () => null });
+    await router.start('r-a');
+    await tick();
+    const actives = events.filter((e) => e.topic === 'router.active');
+    assert.equal(actives.length, 1, 'router.active fires exactly once');
+    assert.equal(actives[0].payload.agent, 'r-a', 'announces the first driven agent');
+  } finally {
+    delete globalThis.__ccpSubmitInput;
+    delete globalThis.__ccpBus;
+  }
 });

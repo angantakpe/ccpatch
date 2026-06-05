@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { createHash } from 'node:crypto';
 import { getAgent as getAgentDefault } from './agent.mjs';
 import { defineTool as defineToolDefault } from './tool-registry.mjs';
 
@@ -6,39 +7,130 @@ import { defineTool as defineToolDefault } from './tool-registry.mjs';
  * handoff.mjs — tool-call-driven agent handoffs (delegate / swap) + AgentRouter.
  *
  * State model: per-instance state (the handoff sequence counter, the one-shot
- * swap-degradation warning flag, and the SWAP STACK used to make swaps
- * reversible) lives in a SCOPE created by `createHandoffScope()`. `createAdk()`
- * wires a scoped `getAgent`/`defineTool` into `createHandoffApi()` so a handoff
- * resolves agents from — and injects tools into — its OWN ADK instance. The
- * top-level `defineHandoff`/`AgentRouter` exports bind to the DEFAULT instance.
+ * swap-degradation warning flag, and a stable scope `id`) lives in a SCOPE
+ * created by `createHandoffScope()`. `createAdk()` wires a scoped
+ * `getAgent`/`defineTool` into `createHandoffApi()` so a handoff resolves agents
+ * from — and injects tools into — its OWN ADK instance. The top-level
+ * `defineHandoff`/`AgentRouter` exports bind to the DEFAULT instance.
  *
- * TRUST BOUNDARY: a `swap` handoff lets a MODEL-TRIGGERED tool call replace the
- * live system prompt with a registered agent's persona (defineAgent). That is a
- * privilege escalation surface — the model can flip "who it is" mid-session. We
- * mitigate with (a) an optional `allowSwapTargets` allowlist (a programmer error
- * if the target is not listed) and (b) a reversible swap stack so a swapped-in
- * persona can be popped back to the previous prompt. Audit every defineAgent
- * systemPrompt as security-sensitive.
+ * TRUST BOUNDARY (persona swap): a `swap` handoff lets a MODEL-TRIGGERED tool
+ * call replace the live system prompt with a registered agent's persona
+ * (defineAgent). That is a privilege escalation surface — the model can flip
+ * "who it is" mid-session. We mitigate with (a) an optional `allowSwapTargets`
+ * allowlist (a programmer error if the target is not listed), (b) a definition-
+ * time persona PIN (sha256 of the resolved systemPrompt) that refuses the swap if
+ * the target's persona was mutated after the handoff was defined (TOCTOU), and
+ * (c) a reversible swap stack so a swapped-in persona can be popped back to the
+ * previous prompt. Audit every defineAgent systemPrompt as security-sensitive.
+ *
+ * TRUST BOUNDARY (single global slot + LIFO ownership): the host exposes exactly
+ * ONE live persona slot (expose_system_prompt's __ccpSystemPromptOverride). Two
+ * createAdk() instances therefore CANNOT each own a private swap stack that
+ * mirrors that one slot — interleaved swap/restore across instances would let one
+ * instance's restore clobber another's live persona. We back ALL swaps with a
+ * SINGLE module-global stack (`GLOBAL_SWAP_STACK`) whose entries record the
+ * owning scope id and the prompt that was displaced. restoreSystemPromptIn(scope)
+ * pops ONLY when the global stack's TOP entry is owned by THAT scope (honest
+ * global LIFO); an out-of-order restore (top owned by another instance) refuses
+ * to corrupt the slot — it emits `handoff.restore.skipped`, warns once, and
+ * returns false. This keeps the single-slot reality honest while preserving each
+ * instance's reversibility under well-nested (LIFO) usage.
+ *
+ * The writer side is nonce-gated: expose_system_prompt now exposes
+ * __ccpGetSystemPromptNonce() and __ccpSetSystemPrompt(nonce, value). We acquire
+ * the nonce lazily at the call site via setLiveSystemPrompt() and fall back to
+ * the legacy single-arg form when no nonce getter exists (so existing stubs keep
+ * working).
  */
 
 /**
  * @typedef {Object} HandoffScope
+ * @property {string} id                 Stable unique scope id (GLOBAL_SWAP_STACK owner key).
  * @property {number} seq                Monotonic handoff id counter.
  * @property {boolean} swapWarned        True once the degrade-to-delegate warning fired.
- * @property {Array<string|null>} swapStack  Previous system prompts, for restore().
  */
 
 /**
- * Build a fresh handoff scope.
+ * The SINGLE process-global swap stack shared across ALL handoff scopes. It
+ * mirrors the host's single live persona slot. Each entry is
+ * `{ owner: <scopeId>, prev: <capturedPrompt> }`: `owner` is the scope id that
+ * pushed it, `prev` is the prompt that was live just before the swap (restored on
+ * pop). Per-instance LIFO discipline is enforced by checking ownership of the TOP
+ * entry on restore — see restoreSystemPromptIn().
+ * @type {Array<{ owner: string, prev: (string|null) }>}
+ */
+const GLOBAL_SWAP_STACK = [];
+
+/** Monotonic counter feeding stable, unique scope ids. */
+let _scopeSeq = 0;
+
+/** One-shot guard so the out-of-order restore warning fires at most once. */
+let _restoreSkipWarned = false;
+
+/**
+ * Build a fresh handoff scope. Each scope gets a stable unique `id` so its swap
+ * entries can be distinguished from other instances' entries on the single
+ * GLOBAL_SWAP_STACK.
  * @returns {HandoffScope}
  */
 export function createHandoffScope() {
-  return { seq: 0, swapWarned: false, swapStack: [] };
+  return { id: `hoscope-${++_scopeSeq}`, seq: 0, swapWarned: false };
 }
 
 function busEmit(topic, payload) {
   const bus = globalThis.__ccpBus;
   if (bus) try { bus.emit(topic, payload); } catch (_) {}
+}
+
+/**
+ * Write the live persona overlay through the host primitive. The writer is now
+ * NONCE-GATED (expose_system_prompt mirrors the dispatch-nonce pattern): when
+ * __ccpGetSystemPromptNonce() exists we acquire the nonce lazily and call the
+ * gated two-arg form `__ccpSetSystemPrompt(nonce, value)`. When no nonce getter
+ * is present (legacy host, or a test stub that only replaces __ccpSetSystemPrompt)
+ * we fall back to the single-arg form so existing callers keep working.
+ * @param {string|null} value
+ */
+function setLiveSystemPrompt(value) {
+  const getNonce = globalThis.__ccpGetSystemPromptNonce;
+  const setSP = globalThis.__ccpSetSystemPrompt;
+  if (typeof getNonce === 'function') {
+    setSP(getNonce(), value); // gated path
+  } else {
+    setSP(value); // legacy single-arg path
+  }
+}
+
+/**
+ * Stable sha256 hash of a persona prompt, used to PIN a swap target at
+ * definition time and detect a later mutation at execute time (TOCTOU). Returns
+ * null for a non-string so an unset persona never pins.
+ * @param {unknown} prompt
+ * @returns {string|null}
+ */
+function hashPrompt(prompt) {
+  if (typeof prompt !== 'string') return null;
+  return createHash('sha256').update(prompt).digest('hex');
+}
+
+/**
+ * Number of GLOBAL_SWAP_STACK entries owned by `scope` (this instance's current
+ * swap depth). Introspection hook for the finalizer's adk.swapDepth().
+ * @param {HandoffScope} scope
+ * @returns {number}
+ */
+export function swapDepthIn(scope) {
+  if (!scope || typeof scope.id !== 'string') return 0;
+  return GLOBAL_SWAP_STACK.reduce((n, e) => (e.owner === scope.id ? n + 1 : n), 0);
+}
+
+/**
+ * The live persona overlay currently applied, or null. Reads the ungated getter
+ * the host exposes. Introspection hook for the finalizer's adk.currentPersona().
+ * @returns {string|null}
+ */
+export function currentPersona() {
+  return globalThis.__ccpGetSystemPrompt?.() ?? null;
 }
 
 /**
@@ -65,19 +157,44 @@ function toCcAgentDef(def) {
 }
 
 /**
- * Restore the most recently swapped-out system prompt (LIFO). Pops the swap
- * stack and re-applies the previous prompt via __ccpSetSystemPrompt. No-op when
- * the stack is empty or the primitive is unavailable.
+ * Restore the most recently swapped-out system prompt, honoring GLOBAL LIFO
+ * ownership. Only pops when the GLOBAL_SWAP_STACK's TOP entry is owned by THIS
+ * scope: that is the single-slot-honest definition of "the last swap" across all
+ * instances. If the top entry belongs to ANOTHER instance (an out-of-order
+ * restore), we DO NOT corrupt it — popping would re-apply this scope's older
+ * `prev` over a persona the other instance still owns. Instead we emit
+ * `handoff.restore.skipped`, warn once, and return false. No-op when the stack is
+ * empty or the writer primitive is unavailable.
  * @param {HandoffScope} scope
  * @returns {boolean} true if a prompt was restored.
  */
 export function restoreSystemPromptIn(scope) {
-  if (!scope.swapStack.length) return false;
-  const prev = scope.swapStack.pop();
+  if (!GLOBAL_SWAP_STACK.length) return false;
+  const top = GLOBAL_SWAP_STACK[GLOBAL_SWAP_STACK.length - 1];
+  // Out-of-order restore: the live slot is owned by a different instance. Refuse
+  // rather than clobber its persona.
+  if (!top || top.owner !== scope.id) {
+    busEmit('handoff.restore.skipped', {
+      owner: top ? top.owner : null,
+      requestedBy: scope.id,
+      depth: GLOBAL_SWAP_STACK.length,
+    });
+    if (!_restoreSkipWarned) {
+      _restoreSkipWarned = true;
+      try {
+        console.warn(
+          `[adk:handoff] restore skipped — top of the global swap stack is owned by "${top ? top.owner : null}", not "${scope.id}" (out-of-order restore across ADK instances)`,
+        );
+      } catch (_) {}
+    }
+    return false;
+  }
   const setSP = globalThis.__ccpSetSystemPrompt;
   if (typeof setSP !== 'function') return false;
-  try { setSP(prev); } catch (_) { return false; }
-  busEmit('handoff.restore', { restored: true, depth: scope.swapStack.length });
+  // Pop only after we know the writer exists and the top is ours.
+  GLOBAL_SWAP_STACK.pop();
+  try { setLiveSystemPrompt(top.prev); } catch (_) { return false; }
+  busEmit('handoff.restore', { restored: true, depth: swapDepthIn(scope) });
   return true;
 }
 
@@ -106,6 +223,19 @@ function captureCurrentPrompt() {
 
 /**
  * Build a scoped `defineHandoff` bound to a specific agent lookup + tool sink.
+ *
+ * Swap-mode TOCTOU pin (FINDING 5): `allowSwapTargets` only allowlists the target
+ * NAME, but the persona is re-resolved at EXECUTE time via getAgent(target) — a
+ * later defineAgent() could swap a hostile systemPrompt under an allowlisted
+ * name. To close that window, a `swap` handoff whose target is ALREADY registered
+ * at definition time captures a PIN: the sha256 of the resolved systemPrompt,
+ * stored in the closure. At execute time, if the live persona's hash differs from
+ * the pin, the swap is REFUSED (emits `handoff.pin.mismatch`, warns once, returns
+ * a readable tool_result error) rather than applying a persona that changed since
+ * the handoff was defined. If the target was NOT registered at definition time
+ * there is nothing to pin — we emit `handoff.pin.deferred` and fall back to the
+ * unpinned (current) behavior.
+ *
  * @param {{ scope: HandoffScope, getAgent: (n:string)=>any, defineTool: Function }} deps
  * @returns {(opts: HandoffOptions) => import('./tool-registry.mjs').ToolHandle}
  */
@@ -146,6 +276,22 @@ export function createDefineHandoff({ scope, getAgent, defineTool }) {
       required: [promptKey],
     };
 
+    // FINDING 5 — persona PIN at DEFINITION time. If the swap target is already
+    // registered, hash its systemPrompt now and close over it; execute-time will
+    // refuse the swap if the live persona's hash has drifted. `pinnedHash` stays
+    // null for delegate mode or an unregistered target (nothing to pin yet).
+    let pinnedHash = null;
+    let pinDeferred = false;
+    if (mode === 'swap') {
+      const defAtDefine = getAgent(target);
+      if (defAtDefine && typeof defAtDefine.systemPrompt === 'string') {
+        pinnedHash = hashPrompt(defAtDefine.systemPrompt);
+      } else {
+        // Can't pin what doesn't exist yet — note it for the execute path.
+        pinDeferred = true;
+      }
+    }
+
     return defineTool({
       name,
       description: description || `Hand off the current work to the "${target}" agent.`,
@@ -184,11 +330,32 @@ export function createDefineHandoff({ scope, getAgent, defineTool }) {
             if (!def || typeof def.systemPrompt !== 'string') {
               throw new Error(`swap handoff: agent "${target}" has no systemPrompt (define it via defineAgent)`);
             }
-            // REVERSIBLE SWAP: capture the prompt we're replacing onto the stack
-            // BEFORE overwriting, so restore() can pop back to it. A transfer_back
-            // tool is auto-registered (once) to give the model a revert affordance.
-            scope.swapStack.push(captureCurrentPrompt());
-            globalThis.__ccpSetSystemPrompt(def.systemPrompt);
+            // FINDING 5 — TOCTOU pin check. If we pinned the persona at definition
+            // time, refuse the swap when the live systemPrompt's hash has drifted
+            // (a defineAgent() re-defined the target under the allowlisted name).
+            if (pinnedHash !== null) {
+              const liveHash = hashPrompt(def.systemPrompt);
+              if (liveHash !== pinnedHash) {
+                busEmit('handoff.pin.mismatch', { id, target, pinned: pinnedHash, live: liveHash });
+                if (!scope.swapWarned) {
+                  scope.swapWarned = true;
+                  try {
+                    console.warn(`[adk:handoff] swap refused — persona for "${target}" changed since the handoff was defined (pin mismatch)`);
+                  } catch (_) {}
+                }
+                busEmit('handoff.end', { id, target, mode: effectiveMode, ok: false, ms: Date.now() - startMs });
+                return `Handoff to "${target}" refused: persona changed since handoff was defined; refusing swap.`;
+              }
+            } else if (pinDeferred) {
+              // Target was unregistered at definition time — nothing was pinned.
+              busEmit('handoff.pin.deferred', { id, target });
+            }
+            // REVERSIBLE SWAP: capture the prompt we're replacing onto the SINGLE
+            // global stack (tagged with this scope's id) BEFORE overwriting, so a
+            // LIFO-ordered restore() can pop back to it. A transfer_back tool is
+            // auto-registered (once) to give the model a revert affordance.
+            GLOBAL_SWAP_STACK.push({ owner: scope.id, prev: captureCurrentPrompt() });
+            setLiveSystemPrompt(def.systemPrompt);
             ensureRestoreTool({ scope, defineTool });
             resultText = `Handed off to "${target}" — persona swapped in place. (call transfer_back to revert)`;
           } else {
@@ -244,14 +411,25 @@ function ensureRestoreTool({ scope, defineTool }) {
 }
 
 /**
- * AgentRouter — the SECONDARY, predicate-driven handoff path.
+ * AgentRouter — the SECONDARY, LOWER-AUTHORITY, TRUSTED-CODE-ONLY handoff path.
  *
- * The PRIMARY protocol is tool-call-driven `defineHandoff` (delegate/swap); reach
- * for that first. AgentRouter exists for *code-decided* orchestration: register
- * agents that each expose a `handoff(context) -> nextName|null` predicate, call
- * `start(name)`, and after each agent is installed its predicate picks the next
- * one. The next persona is injected via `__ccpSubmitInput` as a *user* message
- * (lower authority than a swap), which is why this is not the default surface.
+ * This is NOT the primary protocol. The primary protocol is tool-call-driven
+ * `defineHandoff` (delegate/swap) — reach for that first. AgentRouter exists for
+ * *code-decided* orchestration: register agents that each expose a
+ * `handoff(context) -> nextName|null` predicate, call `start(name)`, and after
+ * each agent is installed its predicate picks the next one.
+ *
+ * AUTHORITY MODEL (read before using): AgentRouter drives the CLI by injecting
+ * the next persona through `__ccpSubmitInput` as a synthetic USER message. That
+ * is strictly LOWER authority than a swap (which rewrites the system prompt) —
+ * the model is free to ignore a user message. More importantly, the PREDICATES
+ * and the set of REACHABLE AGENTS are not model-controlled and not sandboxed:
+ * they are TRUSTED CODE. A predicate can submit arbitrary text into the live
+ * session, so registering an agent / predicate here is granting it the right to
+ * steer the session. Never wire untrusted input into a predicate or an agent's
+ * systemPrompt reachable from one. The first time start() actually submits via
+ * __ccpSubmitInput, a `router.active` bus event fires so operators can observe
+ * that code (not the user) is now driving session control.
  *
  * Hardening over the original stub:
  *   - transitions are capped (`maxTransitions`, default 50) so a predicate that
@@ -262,7 +440,8 @@ function ensureRestoreTool({ scope, defineTool }) {
  *     EventEmitter) instead of being silently swallowed;
  *   - `stop()` halts the chain; `active` exposes the current agent.
  *
- * Events: `transition` {from,to} · `error` {phase,error} · `limit` {transitions}.
+ * Events: `router.active` {agent} (bus, first real submit) · `transition`
+ *   {from,to} · `error` {phase,error} · `limit` {transitions}.
  */
 export class AgentRouter extends EventEmitter {
   #agents = new Map();
@@ -271,6 +450,7 @@ export class AgentRouter extends EventEmitter {
   #maxTransitions;
   #stopped = false;
   #getAgent;
+  #announced = false;
 
   /**
    * @param {{ maxTransitions?: number, getAgent?: (n:string)=>any }} [opts]
@@ -305,6 +485,13 @@ export class AgentRouter extends EventEmitter {
 
     const submit = globalThis.__ccpSubmitInput;
     if (typeof submit === 'function') {
+      // RUNTIME NOTE: the first time the router actually drives the session via
+      // __ccpSubmitInput, announce `router.active` on the bus once so operators
+      // can observe that CODE (not the user) is now steering session control.
+      if (!this.#announced) {
+        this.#announced = true;
+        busEmit('router.active', { agent: agentName });
+      }
       try {
         await submit(def.systemPrompt);
       } catch (err) {
@@ -360,7 +547,10 @@ const _defaultScope = createHandoffScope();
  *   __ccpAgentTool.invoke and return its final text into the caller's tool_result.
  * mode 'swap': true in-place persona swap — gated on globalThis.__ccpSetSystemPrompt.
  *   When that primitive is absent, degrades to 'delegate' and emits handoff.degraded.
- *   Reversible via the auto-registered `transfer_back` tool / restoreSystemPrompt().
+ *   The persona is PINNED (sha256) at definition time when the target is already
+ *   registered; a later persona change is refused at execute time (handoff.pin.mismatch).
+ *   Swaps push onto a SINGLE process-global stack tagged by scope id; reversible via
+ *   the auto-registered `transfer_back` tool / restoreSystemPrompt() under LIFO order.
  *
  * @type {(opts: HandoffOptions) => import('./tool-registry.mjs').ToolHandle}
  */
@@ -371,7 +561,10 @@ export const defineHandoff = createDefineHandoff({
 });
 
 /**
- * Restore the previous system prompt in the DEFAULT instance (pop swap stack).
+ * Restore the previous system prompt in the DEFAULT instance. Pops the SINGLE
+ * global swap stack only when its top entry is owned by the default scope (LIFO
+ * ownership — see restoreSystemPromptIn). Returns false on an out-of-order
+ * restore (top owned by another instance) without clobbering the live persona.
  * @returns {boolean}
  */
 export function restoreSystemPrompt() {

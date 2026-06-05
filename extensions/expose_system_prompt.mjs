@@ -7,12 +7,24 @@
  * system authority, not as a low-authority synthetic user message.
  *
  * ── Exposed globals ──────────────────────────────────────────────────────────
- *   globalThis.__ccpSetSystemPrompt(str|null)
+ *   globalThis.__ccpSetSystemPrompt(callerNonce, str|null)
  *     Set (or clear, with null/"") the persona overlay. Subsequent queries
  *     append `str` as a trailing system text block. Idempotent.
+ *     NONCE-GATED: `callerNonce` (first arg) must equal the value returned by
+ *     __ccpGetSystemPromptNonce(); a wrong/absent nonce throws. Flipping the live
+ *     persona is HIGHER authority than tool dispatch (it changes "who the agent
+ *     is" mid-session), so the writer mirrors the expose_tool_dispatch nonce gate
+ *     to keep unguarded in-process code (e.g. a compromised MCP server) from
+ *     silently reassigning the persona.
+ *
+ *   globalThis.__ccpGetSystemPromptNonce()
+ *     Returns the load-time nonce __ccpSetSystemPrompt requires as its first
+ *     argument. Trusted callers acquire this once at startup and pass it on every
+ *     write. Mirrors __ccpGetDispatchNonce() from expose_tool_dispatch.
  *
  *   globalThis.__ccpGetSystemPrompt()
- *     Returns the current overlay string, or null.
+ *     Returns the current overlay string, or null. UNGATED — reading the active
+ *     persona is not a privilege escalation, only writing is.
  *
  *   globalThis.__ccpApplySystemPromptOverride(arr)
  *     Internal — wraps the bundle's system-prompt array builder. Pushes the
@@ -51,7 +63,20 @@ const BOOT = `
   globalThis.__ccpSystemPromptExposed_v1 = true;
   if (globalThis.__ccpSystemPromptOverride === undefined) globalThis.__ccpSystemPromptOverride = null;
 
-  globalThis.__ccpSetSystemPrompt = function (s) {
+  // Load-time nonce — generated once when the patch runs. The persona-swap
+  // writer (__ccpSetSystemPrompt) is HIGHER authority than tool dispatch, so it
+  // is gated exactly like __ccpInvokeTool: any caller that did not acquire the
+  // nonce via __ccpGetSystemPromptNonce() at startup is rejected, preventing
+  // unguarded in-process code (e.g. a compromised MCP server) from flipping the
+  // live persona.
+  var _ccpSysPromptNonce = [0, 0, 0, 0].map(function () { return Math.random().toString(36).slice(2); }).join('');
+  // Nonce getter — trusted callers call this once at startup and cache the result.
+  globalThis.__ccpGetSystemPromptNonce = function () { return _ccpSysPromptNonce; };
+
+  // Persona-overlay writer. Requires callerNonce as its FIRST argument (obtained
+  // via __ccpGetSystemPromptNonce()). Wrong/absent nonce throws.
+  globalThis.__ccpSetSystemPrompt = function (callerNonce, s) {
+    if (callerNonce !== _ccpSysPromptNonce) throw new Error('__ccpSetSystemPrompt: invalid nonce. Call __ccpGetSystemPromptNonce() at startup.');
     globalThis.__ccpSystemPromptOverride = (typeof s === 'string' && s) ? s : null;
     return globalThis.__ccpSystemPromptOverride;
   };
@@ -81,10 +106,14 @@ const BOOT = `
   if (typeof globalThis.__ccpProvide === 'function') {
     try {
       globalThis.__ccpProvide('systemPrompt', {
-        version: 1,
+        version: 2,
         producer: 'expose_system_prompt',
-        shape: ['set', 'get'],
-        value: { set: globalThis.__ccpSetSystemPrompt, get: globalThis.__ccpGetSystemPrompt },
+        shape: ['set', 'get', 'getNonce'],
+        value: {
+          set: globalThis.__ccpSetSystemPrompt,
+          get: globalThis.__ccpGetSystemPrompt,
+          getNonce: globalThis.__ccpGetSystemPromptNonce,
+        },
       });
     } catch (_) {}
   }
@@ -100,6 +129,9 @@ export default {
     // BOOT references the sentinel twice (guard + assignment); the anchor
     // rewrite adds one __ccpApplySystemPromptOverride( call site. Total = 3.
     count: { present: 3 },
+    // Nonce getter must be present after the patch is applied (advisory — like
+    // expose_tool_dispatch's also_present, this documents the contract surface).
+    also_present: ['__ccpGetSystemPromptNonce'],
   },
   apply: (code) => {
     if (code.includes('__ccpSystemPromptExposed_v1')) return code; // idempotent
