@@ -128,12 +128,35 @@ const SwapCoordinator = {
    * as the `prev` to restore on pop, then write the new persona. Same shape/order
    * for both the legacy and token swap paths so restore()/depthOf() treat them
    * identically.
+   * When `allow` (the target agent's `tools` allowlist) restricts the surface,
+   * the live tool set is narrowed to it (restrictLiveTools) and the hidden tools
+   * are recorded on the stack entry so restore() re-adds exactly them. The
+   * restriction runs AFTER the depth check so a depth-cap refusal hides nothing;
+   * `allow` is null/omitted for the manual token.swap path (no tool change).
+   *
+   * Throws when THIS scope already owns MAX_SWAP_DEPTH entries (a runaway,
+   * never-reverted swap chain) — refuse the swap rather than grow the stack
+   * unbounded. Counted per-scope (depthOf) so one instance's depth never refuses
+   * another's swap. The currently-live prompt is captured BEFORE the new write so
+   * a depth-cap refusal leaves the live persona untouched.
    * @param {string} scopeId
    * @param {string} persona
+   * @param {string[]|null} [allow]  target agent's tool allowlist (null = no restriction).
+   * @returns {Array<object>|null} tool objects hidden by this swap (for the bus event).
    */
-  push(scopeId, persona) {
-    this.stack.push({ owner: scopeId, prev: captureCurrentPrompt() });
+  push(scopeId, persona, allow = null) {
+    const depth = this.depthOf(scopeId);
+    if (depth >= MAX_SWAP_DEPTH) {
+      busEmit('handoff.swap.depthExceeded', { owner: scopeId, depth, max: MAX_SWAP_DEPTH });
+      throw new Error(
+        `swap refused — scope at MAX_SWAP_DEPTH (${MAX_SWAP_DEPTH}); revert with transfer_back / restoreSystemPrompt before swapping again`,
+      );
+    }
+    const prev = captureCurrentPrompt();
+    const removedTools = restrictLiveTools(allow); // null when unrestricted
+    this.stack.push({ owner: scopeId, prev, removedTools });
     setLiveSystemPrompt(persona);
+    return removedTools;
   },
 
   /**
@@ -169,6 +192,9 @@ const SwapCoordinator = {
     // Pop only after we know the writer exists and the top is ours.
     this.stack.pop();
     try { setLiveSystemPrompt(top.prev); } catch (_) { return false; }
+    // Re-add any tools this swap hid (LIFO-correct: each entry restores exactly
+    // what IT removed from the live surface at its swap time).
+    restoreLiveTools(top.removedTools);
     busEmit('handoff.restore', { restored: true, depth: this.depthOf(scopeId) });
     return true;
   },
@@ -219,6 +245,20 @@ let _scopeSeq = 0;
  * newline `\n` and tab `\t`) before handing the string to __ccpSubmitInput.
  */
 const MAX_SUBMIT_BYTES = 128 * 1024;
+
+/**
+ * Hard ceiling on PER-SCOPE swap depth. Swaps are MODEL-TRIGGERED tool calls
+ * (transfer_to_<target>), so a model that repeatedly hands off without reverting
+ * could grow the swap stack unbounded — leaking the displaced prompts it
+ * captures. The runaway always accumulates within ONE scope (the instance whose
+ * handoff tools the model is calling), so the cap is per-scope (counted via
+ * SwapCoordinator.depthOf) rather than over the shared stack — this bounds each
+ * instance without one instance's residue refusing another's swaps. Mirrors
+ * AgentRouter.maxTransitions, which bounds the sibling code-driven path. Past the
+ * cap, SwapCoordinator.push() throws; the execute() path turns that into a
+ * readable tool_result error rather than a crash.
+ */
+const MAX_SWAP_DEPTH = 64;
 
 /**
  * Strip C0/C1 control characters from a submit string, preserving newline and
@@ -343,6 +383,65 @@ function setLiveSystemPrompt(value) {
 }
 
 /**
+ * Tools that a swap-mode tool restriction must NEVER hide, regardless of the
+ * agent's allowlist — without `transfer_back` the model would be trapped in the
+ * swapped-in persona with no affordance to revert.
+ */
+const SWAP_TOOL_KEEP = new Set(['transfer_back']);
+
+/**
+ * Enforce a swapped-in agent's `tools` allowlist on the LIVE tool surface. A
+ * `swap` overlays the persona but, unlike `delegate`, does NOT make Claude Code
+ * apply that agent's tool allowlist — so without this a read-only persona would
+ * still see every live tool. We hide every `__ccpRawTools` entry whose name is
+ * NOT in the allowlist (always keeping SWAP_TOOL_KEEP), returning the removed
+ * objects so restore() can re-add EXACTLY them (loss-less, LIFO-correct under
+ * nested swaps). Enforcement is a RESTRICTION, never a grant — a tool the persona
+ * lists but that isn't live is not added.
+ *
+ * Returns null (no-op) when there is nothing to enforce: the allowlist is absent,
+ * empty, or contains '*' (matches toCcAgentDef treating those as unrestricted),
+ * or __ccpRawTools is not a live array.
+ *
+ * @param {string[]|undefined} allow  the agent's `tools` allowlist.
+ * @returns {Array<object>|null} removed tool objects, or null if nothing removed.
+ */
+function restrictLiveTools(allow) {
+  if (!Array.isArray(allow) || allow.length === 0 || allow.includes('*')) return null;
+  const raw = globalThis.__ccpRawTools;
+  if (!Array.isArray(raw)) return null;
+  const permit = new Set(allow);
+  for (const k of SWAP_TOOL_KEEP) permit.add(k);
+  const removed = [];
+  // Walk back-to-front so splices don't disturb not-yet-visited indices.
+  for (let i = raw.length - 1; i >= 0; i--) {
+    const t = raw[i];
+    if (t && typeof t.name === 'string' && !permit.has(t.name)) {
+      removed.push(t);
+      raw.splice(i, 1);
+    }
+  }
+  return removed.length ? removed : null;
+}
+
+/**
+ * Re-add tool objects previously hidden by restrictLiveTools() (the restore
+ * half). Idempotent per name — never double-adds a tool that re-appeared
+ * meanwhile. No-op for a null/empty list or an absent live array.
+ * @param {Array<object>|null|undefined} removed
+ */
+function restoreLiveTools(removed) {
+  if (!Array.isArray(removed) || !removed.length) return;
+  const raw = globalThis.__ccpRawTools;
+  if (!Array.isArray(raw)) return;
+  for (const t of removed) {
+    if (t && typeof t.name === 'string' && !raw.some((x) => x && x.name === t.name)) {
+      raw.push(t);
+    }
+  }
+}
+
+/**
  * Stable sha256 hash of a persona prompt, used to PIN a swap target at
  * definition time and detect a later mutation at execute time (TOCTOU). Returns
  * null for a non-string so an unset persona never pins.
@@ -425,7 +524,8 @@ export function restoreSystemPromptIn(scope) {
  * The token operates on the same SHARED SwapCoordinator stack as the legacy LIFO
  * path — it is a coordination layer, not a private stack:
  *   - token.swap(persona): push `{ owner: scope.id, prev: <live> }` and set the
- *     live prompt. Throws if the token has been released.
+ *     live prompt. Throws if the token has been released, or if this scope
+ *     already owns MAX_SWAP_DEPTH entries (a runaway, never-reverted chain).
  *   - token.restore(): LIFO-pop/restore the top entry IFF this scope owns it
  *     (delegates to restoreSystemPromptIn). Returns the boolean it returns.
  *   - token.release(): restore every remaining entry this scope still owns (LIFO),
@@ -699,12 +799,23 @@ export function createDefineHandoff({ scope, getAgent, defineTool }) {
               pinnedHash = hashPrompt(def.systemPrompt);
               busEmit('handoff.pin.captured', { id, target, pinned: pinnedHash });
             }
-            // REVERSIBLE SWAP: capture the prompt we're replacing onto the SINGLE
-            // shared stack (tagged with this scope's id) BEFORE overwriting, so a
-            // LIFO-ordered restore() can pop back to it. A transfer_back tool is
-            // auto-registered (once) to give the model a revert affordance.
-            SwapCoordinator.push(scope.id, def.systemPrompt);
+            // REVERSIBLE SWAP: a transfer_back tool is auto-registered (once)
+            // FIRST so the revert affordance survives the tool restriction below,
+            // then we capture the prompt we're replacing onto the SINGLE shared
+            // stack (tagged with this scope's id) BEFORE overwriting, so a
+            // LIFO-ordered restore() can pop back to it. push() also narrows the
+            // live tool surface to the agent's `tools` allowlist (unlike delegate,
+            // a swap does not get CC's native allowlist enforcement) and records
+            // the hidden tools on the stack entry so restore() re-adds them.
             ensureRestoreTool({ scope, defineTool });
+            const removed = SwapCoordinator.push(scope.id, def.systemPrompt, def.tools);
+            if (removed && removed.length) {
+              busEmit('handoff.tools.restricted', {
+                id, target,
+                removed: removed.map((t) => t && t.name).filter(Boolean),
+                allow: def.tools,
+              });
+            }
             resultText = `Handed off to "${target}" — persona swapped in place. (call transfer_back to revert)`;
           } else {
             const agentTool = globalThis.__ccpAgentTool;

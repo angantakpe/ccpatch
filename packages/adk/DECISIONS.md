@@ -83,11 +83,12 @@ Findings present: 1, 2, 5, 10, 13, 15.
 
 ### handoff FINDING 1 — exclusive swap lock over the single global persona slot
 There is exactly ONE global persona slot shared by every `createAdk()` instance,
-so per-instance swap isolation is a convenient fiction backed by a single
-`GLOBAL_SWAP_STACK` with LIFO ownership. `tryAcquireSwap(scope)` makes the
-single-ownership reality EXPLICIT and opt-in: while one scope holds the exclusive
-lock (`_swapLockOwner`), another scope's `tryAcquireSwap` returns null, so a
-caller can detect contention up front instead of at out-of-order-restore time. It
+so per-instance swap isolation is a convenient fiction backed by a single shared
+stack (`SwapCoordinator.stack`) with LIFO ownership. `tryAcquireSwap(scope)` makes
+the single-ownership reality EXPLICIT and opt-in: while one scope holds the
+exclusive lock (`SwapCoordinator.lockOwner`), another scope's `tryAcquireSwap`
+returns null, so a caller can detect contention up front instead of at
+out-of-order-restore time. It
 returns a token `{ swap(persona), restore(), release(), owned }`; the lock is
 advisory over the shared stack — the legacy LIFO path does NOT consult it, so
 existing callers are unaffected.
@@ -129,8 +130,8 @@ the string to `__ccpSubmitInput`.
 
 ### handoff FINDING 15 — dispose a scope's swap footprint
 `disposeHandoffScope()` tears down a scope's swap footprint per the
-instance-dispose contract: LIFO-pop/restore every `GLOBAL_SWAP_STACK` entry OWNED
-by this scope, release the exclusive swap lock if held, and unregister the
+instance-dispose contract: LIFO-pop/restore every `SwapCoordinator.stack` entry
+OWNED by this scope, release the exclusive swap lock if held, and unregister the
 auto-registered `transfer_back` tool if present. Idempotent; returns the count of
 entries restored. Entries owned by OTHER scopes are left untouched (single global
 slot — never clobber another instance's live persona); an owned entry not at the
