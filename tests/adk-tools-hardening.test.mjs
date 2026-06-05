@@ -421,6 +421,89 @@ test('an UNREGISTERED toolDispatch contract leaves the gated path alone (fail-op
   }
 });
 
+// ── schema foot-gun: warn at definition for keywords validateInput won't enforce ─
+
+test('defineTool warns (debug) when inputSchema has keywords validateInput ignores, and not when a validate hook is given', () => {
+  const restore = isolateGlobals();
+  const realWarn = console.warn;
+  const warnings = [];
+  console.warn = (...a) => warnings.push(a.join(' '));
+  globalThis.__ccpDebug = true; // route debug() to console.warn
+  globalThis.__ccpRawTools = []; // live array → tools inject (no "queued" debug noise)
+  // The schema-warning is the only debug line containing this phrase.
+  const schemaWarn = (toolName) => warnings.find((w) => w.includes(`tool "${toolName}"`) && w.includes('does NOT enforce'));
+  try {
+    const scope = createToolScope();
+
+    // Schema with deep keywords the built-in cannot enforce.
+    defineToolIn(scope, {
+      name: 'deep',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          age: { type: 'number', minimum: 0, maximum: 120 },
+          name: { type: 'string', pattern: '^[a-z]+$' },
+          nested: { type: 'object', properties: { x: { type: 'string' } } },
+        },
+      },
+      execute: async () => 'x',
+    });
+    const msg = schemaWarn('deep');
+    assert.ok(msg, 'a warning was emitted for the un-enforced schema');
+    assert.ok(msg.includes('properties.age.minimum'), 'names the numeric bound');
+    assert.ok(msg.includes('properties.name.pattern'), 'names the pattern');
+    assert.ok(msg.includes('nested object not recursed'), 'names the nested shape');
+
+    // A pluggable validate hook suppresses the warning (the documented escape hatch).
+    defineToolIn(scope, {
+      name: 'guarded',
+      inputSchema: { type: 'object', properties: { age: { type: 'number', minimum: 0 } } },
+      validate: () => null,
+      execute: async () => 'x',
+    });
+    assert.equal(schemaWarn('guarded'), undefined, 'no warning when validate hook present');
+
+    // A schema with only enforced keywords does not warn.
+    defineToolIn(scope, {
+      name: 'shallow',
+      inputSchema: { type: 'object', properties: { s: { type: 'string', minLength: 1 } }, required: ['s'], additionalProperties: false },
+      execute: async () => 'x',
+    });
+    assert.equal(schemaWarn('shallow'), undefined, 'no warning for an all-enforced schema');
+  } finally {
+    console.warn = realWarn;
+    restore();
+  }
+});
+
+test('a fail-open inject does NOT latch — a later-registered drifted contract is still caught', () => {
+  const restore = isolateGlobals();
+  __resetDriftGuardForTests();
+  try {
+    const raw = installGatedRegistrar('NONCE-XYZ');
+    // FIRST inject: helpers present but NO 'toolDispatch' contract yet → fail open.
+    // The old guard latched _driftOk=true here, blinding it to later drift.
+    globalThis.__ccpInspectContracts = () => [];
+    globalThis.__ccpRequire = () => { throw new Error('should not be consulted while unregistered'); };
+    const scope = createToolScope();
+    defineToolIn(scope, { name: 'early', inputSchema: { type: 'object' }, execute: async () => 'x' });
+    assert.ok(raw.some((t) => t.name === 'early'), 'fail-open while contract unregistered');
+
+    // The contract registry populates LATER and the registrar is now drifted.
+    globalThis.__ccpInspectContracts = () => [{ name: 'toolDispatch', version: 1, shape: ['somethingElse'] }];
+    globalThis.__ccpRequire = () => { throw new Error('contract "toolDispatch" missing required path "registerTool"'); };
+
+    // A SECOND inject must re-evaluate (not reuse the fail-open latch) and refuse.
+    const h = defineToolIn(scope, { name: 'late', inputSchema: { type: 'object' }, execute: async () => 'x' });
+    assert.equal(raw.some((t) => t.name === 'late'), false, 'drifted contract caught on the later inject');
+    assert.equal(toolStatusesIn(scope).find((s) => s.name === 'late')?.status, 'queued', 'refused tool not live');
+    h.dispose();
+  } finally {
+    restore();
+    __resetDriftGuardForTests();
+  }
+});
+
 // ── exercise the GATED nonce path end-to-end (inject + dispose) ───────────────
 
 test('gated nonce-shaped registrar path: inject then dispose end-to-end', () => {

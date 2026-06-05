@@ -54,60 +54,68 @@ function debug(msg) {
 }
 
 /**
- * Load-bearing drift guard for the gated injection path (call-site half). Runs
- * AT MOST ONCE per process (memoized). When the typed contract
- * registry is present AND advertises a 'toolDispatch' contract, we positively
- * re-validate its shape through __ccpRequire BEFORE routing an injection through
- * the (possibly drifted) __ccpRegisterTool global. If __ccpRequire THROWS, that
- * is proven drift — we latch a refusal and tryInject() fails closed.
+ * Load-bearing drift guard for the gated injection path (call-site half). When
+ * the typed contract registry is present AND advertises a 'toolDispatch'
+ * contract, we positively re-validate its shape through __ccpRequire BEFORE
+ * routing an injection through the (possibly drifted) __ccpRegisterTool global.
+ * If __ccpRequire THROWS, that is proven drift — tryInject() fails closed.
  *
- * Fail-OPEN by design when there is nothing to prove: if __ccpRequire is absent
- * OR no 'toolDispatch' contract is registered, we leave the gated path alone
- * (this is what keeps the bare-array / fake-registrar test stubs working — they
- * never register a contract).
+ * Memoization is ASYMMETRIC ON PURPOSE (mirrors handoff.mjs's
+ * assertSystemPromptContract): we latch `_driftChecked = true` ONLY once a
+ * REGISTERED contract has positively validated — after that the gated path is
+ * proven safe and re-consulting a fixed contract is pure overhead. The fail-OPEN
+ * branches (no require/inspect helper, or no 'toolDispatch' contract registered
+ * yet) are NOT latched, so a contract registry that populates AFTER the first
+ * injection is still honored on a later one — previously a fail-open first call
+ * latched the gated path trusted forever and a late-registered drifted contract
+ * went undetected. Proven drift returns false WITHOUT latching, so a recovered
+ * host re-checks. Fail-open keeps the bare-array / fake-registrar test stubs
+ * working — they never register a contract.
  *
  * @returns {boolean} true if the gated path is SAFE to use; false if drift proven.
  */
-let _driftChecked = false;
-let _driftOk = true;
+let _driftChecked = false; // latched true ONLY after a registered contract validates.
 function gatedPathTrusted() {
-  if (_driftChecked) return _driftOk;
-  _driftChecked = true;
+  if (_driftChecked) return true;
 
-  const require = globalThis.__ccpRequire;
+  const require_ = globalThis.__ccpRequire;
   const inspect = globalThis.__ccpInspectContracts;
-  // Nothing to prove → fail open (preserve bare-array / stub test paths).
-  if (typeof require !== 'function' || typeof inspect !== 'function') return _driftOk;
+  // Nothing to prove → fail open, NOT latched (a late contract registry must
+  // still be honored on a later injection). Preserves bare-array / stub paths.
+  if (typeof require_ !== 'function' || typeof inspect !== 'function') return true;
 
   let registered = false;
   try {
     registered = inspect().some((e) => e && e.name === 'toolDispatch');
   } catch (_) {
-    // Inspect itself is advisory; if it blows up we cannot prove drift.
-    return _driftOk;
+    // Inspect itself is advisory; if it blows up we cannot prove drift. Fail
+    // open without latching so a recovered inspector is honored later.
+    return true;
   }
-  if (!registered) return _driftOk; // unguarded boundary → fail open.
+  if (!registered) return true; // unguarded boundary → fail open, re-check next time.
 
   try {
-    require('toolDispatch', { consumer: 'adk:tools', shape: ['registerTool'] });
+    require_('toolDispatch', { consumer: 'adk:tools', shape: ['registerTool'] });
   } catch (err) {
     // Proven drift: the registered global does NOT match the contract shape.
-    _driftOk = false;
+    // Refuse, but do NOT latch — a recovered host re-checks on the next inject.
     debug(`[adk:tools] refusing injection — toolDispatch contract drift: ${err?.message ?? err}`);
+    return false;
   }
-  return _driftOk;
+  // Positively validated a registered contract → safe to memoize from here on.
+  _driftChecked = true;
+  return true;
 }
 
 /**
- * TEST SEAM ONLY. The drift guard above memoizes at most once per process (by
- * design); tests that exercise distinct contract-registry configurations within
- * one process need to clear that latch between cases. Not part of the public ADK
- * surface — do not surface in index.mjs / index.d.ts.
+ * TEST SEAM ONLY. The drift guard above memoizes once a registered contract
+ * validates; tests that exercise distinct contract-registry configurations
+ * within one process need to clear that latch between cases. Not part of the
+ * public ADK surface — do not surface in index.mjs / index.d.ts.
  * @returns {void}
  */
 export function __resetDriftGuardForTests() {
   _driftChecked = false;
-  _driftOk = true;
 }
 
 /**
@@ -303,6 +311,46 @@ export function validateInput(schema, input) {
     }
   }
   return null;
+}
+
+/**
+ * Collect the schema keywords PRESENT in `schema` that validateInput silently
+ * IGNORES (see its comment block). Used to warn an author at defineTool() time
+ * when they wrote a schema that LOOKS validating but isn't — so the shallow /
+ * fail-open built-in stops being a silent foot-gun. Suppressed when the author
+ * passes a `validate` hook (the documented escape hatch for deep checks). Scans
+ * the root + immediate properties (one level deep); not a full recursive walk.
+ * @param {any} schema
+ * @returns {string[]} sorted unique keyword labels (empty when all-enforced).
+ */
+function unenforcedSchemaKeywords(schema) {
+  if (!schema || typeof schema !== 'object') return [];
+  // A non-object root means validateInput fails open ENTIRELY (validates nothing).
+  if (schema.type !== 'object') return ['non-object root type (nothing is validated)'];
+
+  const IGNORED = [
+    'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf',
+    'pattern', 'format', 'const', 'oneOf', 'anyOf', 'allOf', 'not', '$ref',
+  ];
+  const found = new Set();
+  const scan = (node, where) => {
+    if (!node || typeof node !== 'object') return;
+    for (const k of IGNORED) if (k in node) found.add(`${where}${k}`);
+  };
+  scan(schema, ''); // root-level combinators / $ref
+  // additionalProperties as a SCHEMA (object) — only the literal `false` is honored.
+  if (schema.additionalProperties && typeof schema.additionalProperties === 'object') {
+    found.add('additionalProperties-as-schema (only `false` is honored)');
+  }
+  const props = schema.properties && typeof schema.properties === 'object' ? schema.properties : {};
+  for (const [key, spec] of Object.entries(props)) {
+    if (!spec || typeof spec !== 'object') continue;
+    scan(spec, `properties.${key}.`);
+    // Nested shapes are NOT recursed into — their contents go unchecked.
+    if (spec.type === 'object' && spec.properties) found.add(`properties.${key}.properties (nested object not recursed)`);
+    if (spec.type === 'array' && spec.items) found.add(`properties.${key}.items (array items not recursed)`);
+  }
+  return [...found].sort();
 }
 
 /** Build a tool_result error block (no execute() call happened). */
@@ -666,6 +714,23 @@ export function defineToolIn(scope, { name, description, inputSchema, execute, o
   }
   if (validate !== undefined && typeof validate !== 'function') {
     throw new Error(`defineTool("${name}"): \`validate\` must be a function`); // PROGRAMMER error
+  }
+
+  // SCHEMA FOOT-GUN SIGNAL: validateInput is a shallow, fail-open subset of JSON
+  // Schema — keywords it cannot interpret (numeric bounds, pattern, nested
+  // shapes, combinators, …) are silently accepted. An author who wrote such a
+  // schema likely THINKS it validates. When no pluggable `validate` hook was
+  // supplied (the documented escape hatch), warn (debug-gated) naming exactly the
+  // keywords that will NOT be enforced, so the gap is observable at definition
+  // time instead of silent at call time.
+  if (typeof validate !== 'function') {
+    const unenforced = unenforcedSchemaKeywords(inputSchema);
+    if (unenforced.length) {
+      debug(
+        `[adk:tools] tool "${name}": inputSchema contains keyword(s) the built-in validateInput does NOT enforce: ${unenforced.join(', ')}. ` +
+        'Pass a validate(input)=>string|null hook (ajv/zod/etc.) to deep-check them.',
+      );
+    }
   }
 
   const def = { name, description, inputSchema, execute, onInjectFail, throwOnInjectFail: !!throwOnInjectFail, validate };

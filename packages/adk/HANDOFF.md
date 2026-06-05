@@ -104,6 +104,14 @@ emits `handoff.restore.skipped`, warns once, and returns `false`. So `createAdk(
 swap isolation is honest *but shares one global slot* — each instance owns its own
 stack entries while they all mirror the same single live persona.
 
+**Tool-allowlist enforcement.** `delegate` gets CC's native per-agent tool
+allowlist; a `swap` does not (it only overlays the persona), so the ADK enforces
+it. When the swapped-in agent's `tools` is a concrete allowlist (non-empty, not
+`['*']`), the swap hides every live `__ccpRawTools` entry not on it and re-adds
+exactly those on revert (LIFO-correct under nested swaps). `transfer_back` is
+always preserved so the persona is never trapped; the hidden set is reported on
+`handoff.tools.restricted`. Enforcement is a restriction, never a grant.
+
 **Allowlist.** Pass `allowSwapTargets: [...]` to restrict which personas a swap may
 flip to. A swap whose `target` is not listed throws at definition time (a
 programmer error), so a disallowed persona flip can never silently occur.
@@ -139,6 +147,8 @@ Emitted on `__ccpBus` for observability (additive to the documented topic set):
 | `handoff.pin.deferred` | `{ id, target }` | target unregistered at define → nothing pinned |
 | `handoff.restore` | `{ restored, depth }` | swap stack popped (`restoreSystemPrompt` / `transfer_back`) |
 | `handoff.restore.skipped` | `{ owner, requestedBy, depth }` | out-of-order cross-instance restore refused |
+| `handoff.swap.depthExceeded` | `{ owner, depth, max }` | swap refused — scope at `MAX_SWAP_DEPTH` (revert before swapping again) |
+| `handoff.tools.restricted` | `{ id, target, removed, allow }` | swap narrowed the live tool surface to the agent's `tools` allowlist |
 
 `id` is a per-handoff string; `from` is `globalThis.__ccp_path` at call time so
 handoffs thread into the same agent-path tree the lifecycle patch builds.

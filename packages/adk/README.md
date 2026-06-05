@@ -83,6 +83,13 @@ mutation only when the registrar is absent (e.g. a bare-array unit-test stub).
 > If it cannot interpret a keyword, it **accepts the input**. For any real
 > validation guarantee you MUST pass your own `validate(input) => string|null`
 > hook (wire in ajv/zod/etc.).
+>
+> To make this gap observable rather than silent, `defineTool` **warns at
+> definition time** (debug-gated — `CLAUDE_DEBUG` / `__ccpDebug`) when your
+> `inputSchema` contains keywords the built-in ignores (numeric bounds, `pattern`,
+> nested shapes, combinators, …) **and** you did not pass a `validate` hook. The
+> warning names exactly which keywords will not be enforced. Passing a `validate`
+> hook suppresses it.
 
 What the built-in `validateInput` **does** check, at the **top level only**:
 
@@ -343,6 +350,16 @@ the model can change "who it is" in place. Mitigations:
   of its `systemPrompt`. At execute time, if the live persona's hash has drifted the
   swap is **refused** (emits `handoff.pin.mismatch`, returns a readable tool_result
   error) rather than applying a persona that changed since the handoff was defined.
+- **Tool-allowlist enforcement.** Unlike `delegate` (where Claude Code applies the
+  target agent's `tools` allowlist natively), a `swap` only overlays the persona —
+  so without help a read-only agent would still see every live tool. When the
+  swapped-in agent's `tools` is a concrete allowlist (non-empty and not `['*']`),
+  the swap **hides every live tool not on it** from `__ccpRawTools` and re-adds
+  exactly those on revert (LIFO-correct under nested swaps). `transfer_back` is
+  always kept so the revert affordance survives the restriction; the hidden set is
+  reported on `handoff.tools.restricted`. An empty / `['*']` allowlist is
+  unrestricted. Enforcement is a *restriction*, never a grant — a tool the persona
+  lists but that isn't live is not added.
 - **Reversible (single global slot, LIFO ownership).** The host exposes exactly ONE
   live persona slot, so swaps from all instances are backed by a **single
   process-global swap stack** whose entries record the owning scope. Before

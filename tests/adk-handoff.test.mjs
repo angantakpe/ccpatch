@@ -662,6 +662,82 @@ test('tryAcquireSwap token.restore honors LIFO over the shared stack', async () 
   tok.release();
 });
 
+test('swap stack is capped at MAX_SWAP_DEPTH — a runaway swap chain is refused', async () => {
+  resetGlobals();
+  const events = captureBus();
+  globalThis.__ccpSystemPromptOverride = 'BASE';
+  globalThis.__ccpSetSystemPrompt = (s) => { globalThis.__ccpSystemPromptOverride = s; };
+  globalThis.__ccpGetSystemPrompt = () => globalThis.__ccpSystemPromptOverride ?? null;
+
+  const scope = createHandoffScope();
+  const tok = tryAcquireSwap(scope);
+  // MAX_SWAP_DEPTH is 64 (not exported); push to the cap, then expect refusal.
+  for (let i = 0; i < 64; i++) tok.swap(`P${i}`);
+  assert.equal(swapDepthIn(scope), 64, 'stack filled to the cap');
+
+  // The 65th swap is refused (throws) and does NOT change the live persona.
+  const beforeRefusal = globalThis.__ccpSystemPromptOverride;
+  assert.throws(() => tok.swap('OVERFLOW'), /MAX_SWAP_DEPTH/);
+  assert.equal(globalThis.__ccpSystemPromptOverride, beforeRefusal, 'refused swap left the live persona untouched');
+  assert.equal(swapDepthIn(scope), 64, 'depth unchanged by the refused swap');
+  assert.ok(topics(events).includes('handoff.swap.depthExceeded'), 'emits handoff.swap.depthExceeded');
+
+  tok.release();
+  assert.equal(globalThis.__ccpSystemPromptOverride, 'BASE', 'release unwinds the whole stack');
+});
+
+// ── swap enforces the agent tools allowlist on the live tool surface ──────────
+
+test('swap restricts the live tool surface to the agent tools allowlist and restores on revert', async () => {
+  resetGlobals();
+  const events = captureBus();
+  globalThis.__ccpSystemPromptOverride = 'BASE';
+  globalThis.__ccpSetSystemPrompt = (s) => { globalThis.__ccpSystemPromptOverride = s; };
+  globalThis.__ccpGetSystemPrompt = () => globalThis.__ccpSystemPromptOverride ?? null;
+  // Seed the live surface with a host tool the read-only persona must NOT keep.
+  globalThis.__ccpRawTools.push({ name: 'Bash', call: async () => [] }, { name: 'Read', call: async () => [] });
+
+  const reg = createAgentScope();
+  defineAgentIn(reg, { name: 'reader', systemPrompt: 'READER', tools: ['Read'] });
+  const scope = createHandoffScope();
+  const define = createDefineHandoff({ scope, getAgent: (n) => getAgentIn(reg, n), defineTool });
+
+  await define({ target: 'reader', mode: 'swap' }).execute({ task: 'go' });
+  const names = () => globalThis.__ccpRawTools.map((t) => t.name);
+  assert.equal(globalThis.__ccpSystemPromptOverride, 'READER', 'persona swapped in');
+  assert.ok(names().includes('Read'), 'allowlisted tool kept');
+  assert.ok(!names().includes('Bash'), 'disallowed host tool hidden');
+  assert.ok(names().includes('transfer_back'), 'revert affordance always kept regardless of allowlist');
+
+  const restricted = payloadOf(events, 'handoff.tools.restricted');
+  assert.ok(restricted, 'emits handoff.tools.restricted');
+  assert.ok(restricted.removed.includes('Bash'), 'event lists the hidden tool');
+  assert.ok(!restricted.removed.includes('Read'), 'event does not list a kept tool');
+
+  // Revert re-adds exactly what the swap hid.
+  assert.equal(restoreSystemPromptIn(scope), true);
+  assert.equal(globalThis.__ccpSystemPromptOverride, 'BASE', 'persona reverted');
+  assert.ok(names().includes('Bash'), 'hidden tool re-added on revert');
+});
+
+test('swap with a wildcard / empty tools allowlist does NOT restrict the live surface', async () => {
+  resetGlobals();
+  captureBus();
+  globalThis.__ccpSystemPromptOverride = 'BASE';
+  globalThis.__ccpSetSystemPrompt = (s) => { globalThis.__ccpSystemPromptOverride = s; };
+  globalThis.__ccpGetSystemPrompt = () => globalThis.__ccpSystemPromptOverride ?? null;
+  globalThis.__ccpRawTools.push({ name: 'Bash', call: async () => [] });
+
+  const reg = createAgentScope();
+  defineAgentIn(reg, { name: 'wild', systemPrompt: 'WILD', tools: ['*'] });
+  const scope = createHandoffScope();
+  const define = createDefineHandoff({ scope, getAgent: (n) => getAgentIn(reg, n), defineTool });
+
+  await define({ target: 'wild', mode: 'swap' }).execute({ task: 'go' });
+  assert.ok(globalThis.__ccpRawTools.some((t) => t.name === 'Bash'), 'wildcard allowlist leaves the surface intact');
+  restoreSystemPromptIn(scope);
+});
+
 // ── pin-on-first-resolve for the deferred case ────────────────────────────────
 
 test('deferred-pin captures the persona on first resolve and refuses later drift', async () => {
