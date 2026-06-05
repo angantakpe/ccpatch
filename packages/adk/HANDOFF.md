@@ -2,6 +2,11 @@
 
 Status: **delegate and swap both shipping.** Delegate resolves native *and*
 ADK-defined agents; swap is unblocked by the `expose_system_prompt` patch.
+Swap is now **reversible** (auto-registered `transfer_back` tool /
+`restoreSystemPrompt()`) and **allowlistable** (`allowSwapTargets`). Injected
+tools are disposable (`handle.dispose()`) and their liveness is observable
+(`handle.ready`). Call `capabilities()` to preflight the live `__ccp*` surface
+before depending on any mode — see [Trust](#trust).
 
 A *handoff* lets the model move work from the active agent to another agent. The
 protocol is **tool-call driven** — the LLM decides when to hand off by calling a
@@ -76,6 +81,16 @@ which appends the persona as a trailing system block on every main-loop query.
 overlay. When the patch is not enabled (`__ccpSetSystemPrompt` absent), `swap`
 logs once and falls back to `delegate`.
 
+**Reversible.** Before overwriting, the prompt being replaced is captured onto a
+per-scope swap stack and a `transfer_back` tool is auto-registered (once) so the
+model has a revert affordance. Pop the stack programmatically with
+`restoreSystemPrompt()` (DEFAULT instance) or `adk.restoreSystemPrompt()` (a
+`createAdk()` instance); a `handoff.restore` bus event fires on success.
+
+**Allowlist.** Pass `allowSwapTargets: [...]` to restrict which personas a swap may
+flip to. A swap whose `target` is not listed throws at definition time (a
+programmer error), so a disallowed persona flip can never silently occur.
+
 The base Claude Code system prompt (tools, environment, harness rules) always
 remains — only the persona overlay changes. Swapping again replaces the overlay;
 `__ccpSetSystemPrompt(null)` clears it. The overlay is **scoped by query source**:
@@ -94,6 +109,7 @@ Emitted on `__ccpBus` for observability (additive to the documented topic set):
 | `handoff.start` | `{ id, from, target, mode }` | tool invoked |
 | `handoff.end` | `{ id, target, mode, ok, ms }` | transfer resolved |
 | `handoff.degraded` | `{ id, target, requested: 'swap', used: 'delegate', reason }` | swap fell back |
+| `handoff.restore` | `{ restored, depth }` | swap stack popped (`restoreSystemPrompt` / `transfer_back`) |
 
 `id` is a per-handoff string; `from` is `globalThis.__ccp_path` at call time so
 handoffs thread into the same agent-path tree the lifecycle patch builds.
@@ -128,8 +144,34 @@ defineHandoff({
   toolName = `transfer_to_${target}`,
   inputSchema,                  // JSON Schema; default { task: string (required) }
   promptKey = 'task',           // which input field becomes the subagent prompt
+  allowSwapTargets,             // optional string[]; swap to a target ∉ it throws (TRUST)
 })
 ```
 
-Returns the injected tool definition. Registering N handoffs injects N tools; the
-model picks among them like any other tool.
+Returns the injected tool *handle* — the def plus `.ready` (`Promise<boolean>`:
+true once live in `__ccpRawTools`, false on the ~5s poll timeout) and `.dispose()`
+(removes it from the live array / cancels its pending queue entry). Registering N
+handoffs injects N tools; the model picks among them like any other tool.
+`restoreSystemPrompt()` pops the swap stack to revert the most recent swap.
+
+## Preflight — `capabilities()`
+
+Call `capabilities()` before depending on a mode: it probes the `__ccp*` globals
+and returns `{ tools, delegate, swap, router, bus }` (each a boolean), so you can
+branch on what is actually wired this session instead of failing at call time. It
+is pure / side-effect-free and, where a typed contract is registered
+(`core/contracts.mjs`), cross-checks shape so a present-but-drifted global is not
+reported as usable.
+
+## Trust
+
+A `swap` handoff lets a **model-triggered** tool call replace the live system
+prompt with a registered agent's persona — a privilege-escalation surface (the
+model can change "who it is" mid-session). Audit every `defineAgent` `systemPrompt`
+as security-sensitive: registering an agent grants it the right to become the
+active persona. Mitigations: `allowSwapTargets` (disallowed flip = programmer
+error) and the reversible swap stack (`transfer_back` / `restoreSystemPrompt()`).
+`AgentRouter` drives the live CLI via `__ccpSubmitInput` (lower-authority *user*
+message, but still programmatic session control) — treat router predicates and the
+agents they reach as trusted code. See `README.md` and the project-wide
+`../../THREAT_MODEL.md`.
