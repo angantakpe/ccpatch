@@ -2,7 +2,6 @@ const queue = [];
 let drained = false;
 
 function tryInject(toolDef) {
-  const dispatch = globalThis.__ccpInvokeTool;
   const getRaw = globalThis.__ccpRawTools;
   // __ccpRawTools is an array reference stashed by expose_tool_dispatch.
   // Mutating it in-place makes the injected tool visible to the live formatter

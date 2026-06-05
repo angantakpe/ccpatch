@@ -14,7 +14,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { createHash } from 'node:crypto';
-import { pathToFileURL } from 'node:url';
 
 import { PROJECT_ROOT } from './paths.mjs';
 import { classifyRisk } from './manifest.mjs';

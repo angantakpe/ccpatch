@@ -33,6 +33,7 @@ modules/
 # Local Claude Code caches / tool artifacts
 .cc/
 .specstory/
+.ast-cache/
 
 # Local environment
 .env

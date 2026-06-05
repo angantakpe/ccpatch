@@ -147,6 +147,8 @@ export interface Overlay {
 export interface Anchor {
   literal: string;
   byteOffset?: number;
+  /** When true, regex anchors are permitted for this patch. Requires maintainer approval. */
+  allowRegex?: boolean;
 }
 
 /** @At selector — declarative anchor. */

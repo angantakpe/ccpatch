@@ -3,7 +3,6 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import readline from 'node:readline';
 
 /** Bytes → human-readable string. */
 function fmtSize(bytes) {
@@ -148,7 +147,7 @@ export async function runOutputsClear(ctx) {
           logger.log(`  rotated  ${rel} — kept ${kept} line(s), dropped ${dropped}, now ${fmtSize(newSize)} (was ${fmtSize(size)})`);
           ok++;
         } else {
-          const { action, newSize } = rotateJson(file, keepBytes, logger);
+          const { action } = rotateJson(file, keepBytes, logger);
           if (action === 'kept') {
             logger.log(`  skipped  ${rel} — within limit (${fmtSize(size)})`);
           } else {

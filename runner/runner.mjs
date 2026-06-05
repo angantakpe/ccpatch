@@ -16,8 +16,6 @@ import {
   writeApplyArtifacts,
 } from './apply-artifacts.mjs';
 import {
-  applyFallbackDiff,
-  detectDrift,
   applySinglePatch,
   recordStage,
   makeVerifyFlusher,
@@ -461,7 +459,7 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
   // Conflicts are reported to the logger and a JSONL sidecar regardless of
   // strict mode; in strict mode they become fatal unless allowlisted.
   // Delegated to detectAndRecordOverlaps() — independently testable.
-  const { allConflicts, failures: overlapFailures } = detectAndRecordOverlaps(
+  const { failures: overlapFailures } = detectAndRecordOverlaps(
     phaseTraces, frame, globalStrict, logger, warnStorageOnce, storageRoot,
   );
   for (const f of overlapFailures) failures.push(f);
