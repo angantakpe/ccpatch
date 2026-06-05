@@ -64,6 +64,17 @@ export interface ToolDef {
   inputSchema: object;
   /** Returns string | tool_result blocks (sync or async). */
   execute: (input: any) => ToolResult | Promise<ToolResult>;
+  /**
+   * Optional callback fired once when the bounded poll times out and the tool was
+   * never injected (the same moment `.ready` resolves false). Lets authors surface
+   * the silent-failure case.
+   */
+  onInjectFail?: (name: string) => void;
+  /**
+   * When true, a timed-out injection also REJECTS the handle's separate
+   * `.injected` promise (default: it resolves false, mirroring `.ready`).
+   */
+  throwOnInjectFail?: boolean;
 }
 
 /**
@@ -71,17 +82,25 @@ export interface ToolDef {
  * lifecycle handles.
  */
 export interface ToolHandle extends ToolDef {
-  /** Resolves true once injected live in __ccpRawTools; false on poll timeout. */
+  /** Resolves true once injected live in __ccpRawTools; false on poll timeout (never rejects). */
   ready: Promise<boolean>;
+  /**
+   * Like `ready`, but REJECTS on poll timeout when `throwOnInjectFail` is set
+   * (otherwise resolves false). An opt-in hard signal for never-injected tools.
+   */
+  injected: Promise<boolean>;
   /** Unregister: remove from __ccpRawTools / cancel a pending queue entry. Returns true if a live tool was removed. */
   dispose: () => boolean;
 }
 
 /**
  * Define + inject a tool into the DEFAULT instance. The returned handle carries
- * `.ready` (Promise<boolean>) and `.dispose()`.
+ * `.ready` (Promise<boolean>), `.injected` (Promise<boolean>) and `.dispose()`.
  */
 export function defineTool(spec: ToolDef): ToolHandle;
+
+/** Names of tools currently live/queued in the DEFAULT instance. */
+export function listTools(): string[];
 
 // ── Handoffs ──────────────────────────────────────────────────────────────────
 
@@ -109,8 +128,21 @@ export interface HandoffOptions {
 /** Register a tool-call-driven handoff to `target` in the DEFAULT instance. */
 export function defineHandoff(opts: HandoffOptions): ToolHandle;
 
-/** Restore the previous system prompt in the DEFAULT instance (pop swap stack). */
+/**
+ * Restore the previous system prompt in the DEFAULT instance (pop the single
+ * process-global swap stack, LIFO-owned by the default scope). Returns false on an
+ * out-of-order cross-instance restore without clobbering the live persona.
+ */
 export function restoreSystemPrompt(): boolean;
+
+/**
+ * Swap-stack depth owned by the DEFAULT instance — entries this instance pushed
+ * onto the single process-global swap stack. 0 when nothing is swapped in.
+ */
+export function swapDepth(): number;
+
+/** The live persona overlay currently applied (single global slot), or null. */
+export function currentPersona(): string | null;
 
 // ── AgentRouter ───────────────────────────────────────────────────────────────
 
@@ -184,12 +216,19 @@ export interface Memory {
   delete(key: string): void;
   /** List keys (from cache). */
   keys(): string[];
-  /** Shallow copy of the whole store (from cache). */
+  /** DEEP copy of the whole store (from cache); nested mutations cannot leak back into the live store. */
   snapshot(): Record<string, any>;
   /** Drop every key (cache + debounced async persist). */
   clear(): void;
   /** Force-persist any pending write, awaitable. */
   flush(): Promise<void>;
+  /**
+   * Detach from the module exit registry and cancel any pending debounce timer.
+   * Idempotent. Pending dirty data is NOT auto-flushed — call flush() first if you
+   * need it persisted. After dispose() the instance still works but won't
+   * auto-persist on process exit.
+   */
+  dispose(): void;
 }
 
 /** Options for createMemory. */
@@ -203,6 +242,28 @@ export function createMemory(opts?: CreateMemoryOptions): Memory;
 
 // ── Capabilities & bus ────────────────────────────────────────────────────────
 
+/** Per-capability remediation detail returned in Capabilities.detail. */
+export interface CapabilityDetail {
+  /** Mirrors the top-level boolean for this capability. */
+  live: boolean;
+  /** The patch name that provides this capability. */
+  patch: string;
+  /**
+   * Set only when the version/shape contract handshake DOWNGRADED `live` to false
+   * (e.g. "contract systemPrompt v1 < required v2" or "shape missing getNonce").
+   */
+  reason?: string;
+}
+
+/** Per-capability detail map (one CapabilityDetail per capability). */
+export interface CapabilityDetailMap {
+  tools: CapabilityDetail;
+  delegate: CapabilityDetail;
+  swap: CapabilityDetail;
+  router: CapabilityDetail;
+  bus: CapabilityDetail;
+}
+
 /** Which ADK primitives are live, per the __ccp* global probe. */
 export interface Capabilities {
   /** __ccpRawTools is a live array (expose_tool_dispatch). */
@@ -215,9 +276,19 @@ export interface Capabilities {
   router: boolean;
   /** __ccpBus is present (event_bus / fetch_interceptor). */
   bus: boolean;
+  /**
+   * Per-capability remediation detail: `{ live, patch, reason? }`. `live` mirrors
+   * the boolean; `patch` names the providing patch; `reason` is present only when
+   * the contract version/shape handshake downgraded the capability to false.
+   */
+  detail: CapabilityDetailMap;
 }
 
-/** Probe the __ccp* globals and report which ADK capabilities are live. */
+/**
+ * Probe the __ccp* globals and report which ADK capabilities are live. Booleans
+ * stay stable for `if (caps.swap)`; `caps.detail` adds remediation info and a
+ * version/shape contract handshake that downgrades a drifted host loudly.
+ */
 export function capabilities(): Capabilities;
 
 /** The ccpatch event bus surface returned by useAgentBus. */
@@ -243,8 +314,14 @@ export interface Adk {
   listAgents(): AgentDef[];
   defineTool(spec: ToolDef): ToolHandle;
   defineHandoff(opts: HandoffOptions): ToolHandle;
-  /** Pop this instance's swap stack. */
+  /** Pop this instance's swap stack (LIFO ownership on the single global stack). */
   restoreSystemPrompt(): boolean;
+  /** Names of tools currently live/queued in this instance's tool scope. */
+  listTools(): string[];
+  /** Swap-stack entries owned by this instance (its current swap depth). */
+  swapDepth(): number;
+  /** The live persona overlay currently applied (single global slot), or null. */
+  currentPersona(): string | null;
   /** Router pre-bound to this instance's agents. */
   AgentRouter: new (opts?: AgentRouterOptions) => AgentRouter;
   createMemory(opts?: CreateMemoryOptions): Memory;

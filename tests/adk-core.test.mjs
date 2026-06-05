@@ -22,7 +22,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createAdk, capabilities } from '../packages/adk/index.mjs';
+import {
+  createAdk, capabilities, listTools, swapDepth, currentPersona, defineTool,
+} from '../packages/adk/index.mjs';
 import { defineToolIn, createToolScope, validateInput } from '../packages/adk/tool-registry.mjs';
 
 // ── shared global hygiene ─────────────────────────────────────────────────────
@@ -378,12 +380,30 @@ test('allowSwapTargets enforces the allowlist at definition time (programmer err
 
 // ── capabilities() against stubbed globals ────────────────────────────────────
 
+/** Assert the booleans match `bools` and that detail mirrors them (no reasons). */
+function assertCapsBooleans(caps, bools) {
+  assert.equal(caps.tools, bools.tools);
+  assert.equal(caps.delegate, bools.delegate);
+  assert.equal(caps.swap, bools.swap);
+  assert.equal(caps.router, bools.router);
+  assert.equal(caps.bus, bools.bus);
+  for (const cap of ['tools', 'delegate', 'swap', 'router', 'bus']) {
+    assert.equal(caps.detail[cap].live, bools[cap], `detail.${cap}.live mirrors the boolean`);
+    assert.equal(typeof caps.detail[cap].patch, 'string', `detail.${cap}.patch is a name`);
+  }
+}
+
 test('capabilities() reports all false with no __ccp* globals present', () => {
   const restore = isolateGlobals();
   try {
-    assert.deepEqual(capabilities(), {
+    const caps = capabilities();
+    assertCapsBooleans(caps, {
       tools: false, delegate: false, swap: false, router: false, bus: false,
     });
+    // No drift handshake ran → no reasons attached.
+    for (const cap of ['tools', 'delegate', 'swap', 'router', 'bus']) {
+      assert.equal(caps.detail[cap].reason, undefined);
+    }
   } finally {
     restore();
   }
@@ -397,9 +417,23 @@ test('capabilities() reports each capability true against its live primitive', (
     globalThis.__ccpSetSystemPrompt = () => {};
     globalThis.__ccpSubmitInput = async () => {};
     globalThis.__ccpBus = { emit: () => {} };
-    assert.deepEqual(capabilities(), {
+    assertCapsBooleans(capabilities(), {
       tools: true, delegate: true, swap: true, router: true, bus: true,
     });
+  } finally {
+    restore();
+  }
+});
+
+test('capabilities().detail names the providing patch for each capability', () => {
+  const restore = isolateGlobals();
+  try {
+    const { detail } = capabilities();
+    assert.equal(detail.tools.patch, 'expose_tool_dispatch');
+    assert.equal(detail.delegate.patch, 'expose_agent_tool');
+    assert.equal(detail.swap.patch, 'expose_system_prompt');
+    assert.equal(detail.router.patch, 'expose_submit_input');
+    assert.equal(detail.bus.patch, 'event_bus / fetch_interceptor');
   } finally {
     restore();
   }
@@ -415,16 +449,75 @@ test('capabilities() downgrades delegate when the agentTool contract proves shap
     ];
     const caps = capabilities();
     assert.equal(caps.delegate, false, 'contract drift flips delegate true→false');
+    assert.equal(caps.detail.delegate.live, false, 'detail mirrors the downgrade');
+    assert.match(caps.detail.delegate.reason, /invoke/, 'records why it was downgraded');
 
     // A contract whose shape DOES include invoke leaves the probe result intact.
     globalThis.__ccpInspectContracts = () => [
       { name: 'agentTool', version: 1, producer: 'x', shape: ['invoke', 'run'] },
     ];
-    assert.equal(capabilities().delegate, true, 'matching shape keeps delegate=true');
+    const ok = capabilities();
+    assert.equal(ok.delegate, true, 'matching shape keeps delegate=true');
+    assert.equal(ok.detail.delegate.reason, undefined, 'no reason when shape is fine');
 
     // No contract entry → probe is authoritative (stays true).
     globalThis.__ccpInspectContracts = () => [];
     assert.equal(capabilities().delegate, true, 'absent contract → probe wins');
+  } finally {
+    restore();
+  }
+});
+
+test('capabilities() downgrades swap on a stale systemPrompt contract (v1 < required v2)', () => {
+  const restore = isolateGlobals();
+  try {
+    globalThis.__ccpSetSystemPrompt = () => {}; // probe says swap=true
+    // A drifted host advertises the OLD v1 systemPrompt contract (no nonce gate).
+    globalThis.__ccpInspectContracts = () => [
+      { name: 'systemPrompt', version: 1, producer: 'expose_system_prompt', shape: ['set', 'get'] },
+    ];
+    const caps = capabilities();
+    assert.equal(caps.swap, false, 'stale systemPrompt v1 downgrades swap true→false');
+    assert.equal(caps.detail.swap.live, false);
+    assert.match(caps.detail.swap.reason, /v1 < required v2/, 'reason cites the version gap');
+
+    // v2 present but shape missing getNonce → downgraded for shape drift instead.
+    globalThis.__ccpInspectContracts = () => [
+      { name: 'systemPrompt', version: 2, producer: 'expose_system_prompt', shape: ['set', 'get'] },
+    ];
+    const shapeDrift = capabilities();
+    assert.equal(shapeDrift.swap, false, 'v2 but no getNonce still downgrades');
+    assert.match(shapeDrift.detail.swap.reason, /getNonce/);
+
+    // A current v2 contract advertising getNonce keeps swap=true.
+    globalThis.__ccpInspectContracts = () => [
+      { name: 'systemPrompt', version: 2, producer: 'expose_system_prompt', shape: ['set', 'get', 'getNonce'] },
+    ];
+    const fresh = capabilities();
+    assert.equal(fresh.swap, true, 'fresh v2 + getNonce keeps swap=true');
+    assert.equal(fresh.detail.swap.reason, undefined);
+  } finally {
+    restore();
+  }
+});
+
+test('capabilities() downgrades tools when toolDispatch shape lacks registerTool', () => {
+  const restore = isolateGlobals();
+  try {
+    globalThis.__ccpRawTools = []; // probe says tools=true
+    // Old toolDispatch contract without the nonce-gated registrar.
+    globalThis.__ccpInspectContracts = () => [
+      { name: 'toolDispatch', version: 1, producer: 'expose_tool_dispatch', shape: ['getTools', 'invokeTool'] },
+    ];
+    const caps = capabilities();
+    assert.equal(caps.tools, false, 'missing registerTool downgrades tools');
+    assert.match(caps.detail.tools.reason, /registerTool/);
+
+    // Current shape with registerTool keeps tools=true.
+    globalThis.__ccpInspectContracts = () => [
+      { name: 'toolDispatch', version: 2, producer: 'expose_tool_dispatch', shape: ['getTools', 'registerTool', 'unregisterTool'] },
+    ];
+    assert.equal(capabilities().tools, true, 'registerTool present → tools stays true');
   } finally {
     restore();
   }
@@ -450,6 +543,72 @@ test('createAdk() handoff bridges only its OWN registered agent into agentDef', 
     // Instance B does NOT know it → treats it as a native subagent (no agentDef).
     await b.defineHandoff({ target: 'shared-name' }).execute({ task: 't' });
     assert.equal(calls[1].agentDef, undefined, 'B has no record → no synthetic agentDef');
+  } finally {
+    restore();
+  }
+});
+
+// ── introspection: listTools / swapDepth / currentPersona ─────────────────────
+
+test('listTools() reflects an instance scope; instances do not share tool listings', () => {
+  const restore = isolateGlobals();
+  try {
+    globalThis.__ccpRawTools = []; // present → synchronous inject
+    const a = createAdk();
+    const b = createAdk();
+
+    a.defineTool({ name: 'a-only', inputSchema: { type: 'object' }, execute: async () => 'x' });
+
+    assert.deepEqual(a.listTools(), ['a-only'], 'A lists its own tool');
+    assert.deepEqual(b.listTools(), [], 'B does NOT see A’s tool in its scope');
+
+    const h = b.defineTool({ name: 'b-only', inputSchema: { type: 'object' }, execute: async () => 'y' });
+    assert.deepEqual(b.listTools(), ['b-only']);
+    h.dispose();
+    assert.deepEqual(b.listTools(), [], 'dispose() drops the tool from the listing');
+  } finally {
+    restore();
+  }
+});
+
+test('top-level listTools() reflects the DEFAULT instance scope', () => {
+  const restore = isolateGlobals();
+  try {
+    globalThis.__ccpRawTools = [];
+    const before = listTools();
+    const h = defineTool({ name: 'top-level-probe', inputSchema: { type: 'object' }, execute: async () => 'z' });
+    assert.ok(listTools().includes('top-level-probe'), 'DEFAULT listTools sees the new tool');
+    h.dispose();
+    assert.deepEqual(listTools(), before, 'dispose() restores the prior DEFAULT listing');
+  } finally {
+    restore();
+  }
+});
+
+test('swapDepth()/currentPersona() track swaps on default + createAdk instances', async () => {
+  const restore = isolateGlobals();
+  try {
+    globalThis.__ccpRawTools = [];
+    globalThis.__ccpSystemPromptOverride = 'BASE';
+    globalThis.__ccpGetSystemPrompt = () => globalThis.__ccpSystemPromptOverride;
+    globalThis.__ccpSetSystemPrompt = (s) => { globalThis.__ccpSystemPromptOverride = s; };
+
+    const adk = createAdk();
+    adk.defineAgent({ name: 'persona-a', systemPrompt: 'PERSONA A' });
+
+    assert.equal(adk.swapDepth(), 0, 'no swaps yet → depth 0');
+    assert.equal(adk.currentPersona(), 'BASE', 'currentPersona reads the live slot');
+
+    await adk.defineHandoff({ target: 'persona-a', mode: 'swap' }).execute({ task: 't' });
+    assert.equal(adk.swapDepth(), 1, 'one swap owned by this instance');
+    assert.equal(adk.currentPersona(), 'PERSONA A', 'persona reflects the swap');
+    // The DEFAULT instance owns NO entries on the global stack.
+    assert.equal(swapDepth(), 0, 'DEFAULT swapDepth unaffected by another instance');
+    assert.equal(currentPersona(), 'PERSONA A', 'top-level currentPersona reads the same global slot');
+
+    adk.restoreSystemPrompt();
+    assert.equal(adk.swapDepth(), 0, 'restore drops this instance’s depth back to 0');
+    assert.equal(adk.currentPersona(), 'BASE', 'persona restored');
   } finally {
     restore();
   }

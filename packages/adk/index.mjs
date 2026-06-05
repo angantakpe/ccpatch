@@ -26,14 +26,48 @@ import {
 } from './tool-registry.mjs';
 import {
   createHandoffScope, createDefineHandoff, restoreSystemPromptIn,
+  swapDepthIn, currentPersona, _defaultHandoffScope,
   AgentRouter,
 } from './handoff.mjs';
 import { createMemory } from './memory.mjs';
 
 export { defineAgent, getAgent, listAgents } from './agent.mjs';
-export { defineTool } from './tool-registry.mjs';
+export { defineTool, listTools } from './tool-registry.mjs';
 export { createMemory } from './memory.mjs';
 export { AgentRouter, defineHandoff, restoreSystemPrompt } from './handoff.mjs';
+
+// Introspection (FINDING 12) — top-level mirrors bound to the DEFAULT instance.
+// `listTools` re-exports the DEFAULT-scoped variant straight from tool-registry
+// (above). `swapDepth`/`currentPersona` bind here: the swap depth is per-handoff-
+// scope (DEFAULT = _defaultHandoffScope) while the live persona is a single global
+// slot (currentPersona reads it directly).
+export { currentPersona } from './handoff.mjs';
+
+/**
+ * Swap-stack depth owned by the DEFAULT ADK instance (entries this instance
+ * pushed onto the single process-global swap stack). 0 when nothing is swapped in.
+ * @returns {number}
+ */
+export function swapDepth() {
+  return swapDepthIn(_defaultHandoffScope);
+}
+
+/**
+ * @typedef {Object} CapabilityDetail
+ * @property {boolean} live   Mirrors the top-level boolean for this capability.
+ * @property {string} patch   The patch name that provides this capability.
+ * @property {string} [reason] Set when the contract handshake DOWNGRADED `live`
+ *   to false (e.g. "contract systemPrompt v1 < required v2").
+ */
+
+/**
+ * @typedef {Object} CapabilityDetailMap
+ * @property {CapabilityDetail} tools
+ * @property {CapabilityDetail} delegate
+ * @property {CapabilityDetail} swap
+ * @property {CapabilityDetail} router
+ * @property {CapabilityDetail} bus
+ */
 
 /**
  * @typedef {Object} Capabilities
@@ -42,17 +76,37 @@ export { AgentRouter, defineHandoff, restoreSystemPrompt } from './handoff.mjs';
  * @property {boolean} swap      __ccpSetSystemPrompt is callable (expose_system_prompt).
  * @property {boolean} router    __ccpSubmitInput is callable (drives AgentRouter).
  * @property {boolean} bus       __ccpBus is present (event_bus / fetch_interceptor).
+ * @property {CapabilityDetailMap} detail  Per-capability remediation detail:
+ *   `{ live, patch, reason? }`. `live` mirrors the boolean; `patch` names the
+ *   providing patch; `reason` is present only when the contract handshake
+ *   downgraded the capability.
  */
+
+/** The patch that provides each capability — surfaced in caps.detail[cap].patch. */
+const CAPABILITY_PATCH = {
+  tools: 'expose_tool_dispatch',
+  delegate: 'expose_agent_tool',
+  swap: 'expose_system_prompt',
+  router: 'expose_submit_input',
+  bus: 'event_bus / fetch_interceptor',
+};
 
 /**
  * Probe the __ccp* globals and report which ADK capabilities are live. Pure /
  * side-effect-free — safe to call before wiring anything up.
  *
- * Where a typed contract is registered (core/contracts.mjs), we cross-check via
- * __ccpInspectContracts so a present-but-shape-drifted global is not reported as
- * usable. The direct global probe remains the source of truth (contracts are
- * opt-in per boundary); the contract check only DOWNGRADES a capability it can
- * positively prove broken.
+ * VERSION/SHAPE HANDSHAKE (FINDING 2): where a typed contract is registered
+ * (core/contracts.mjs — capabilities() is the ADK's drift-refusal consumer), we
+ * cross-check ALL contracted capabilities via __ccpInspectContracts so a
+ * present-but-shape/version-drifted global is not reported as usable. The direct
+ * global probe remains the source of truth (contracts are opt-in per boundary):
+ * a capability with NO registered contract keeps its probe result. The contract
+ * check only ever DOWNGRADES a capability it can positively prove broken (never
+ * invents one) and records why in `detail[cap].reason`. Required minimums:
+ *   - swap  → contract 'systemPrompt' minVersion 2 AND shape includes 'getNonce'
+ *   - tools → contract 'toolDispatch' shape includes 'registerTool'
+ *   - delegate → contract 'agentTool' shape includes 'invoke'
+ * It is fully defensive (wrapped in try/catch; advisory only, never throws).
  *
  * @returns {Capabilities}
  */
@@ -65,19 +119,52 @@ export function capabilities() {
     bus: !!globalThis.__ccpBus,
   };
 
-  // Optional cross-check against the typed contract registry. Only ever flips a
-  // capability true→false (never invents one) so the global probe stays primary.
+  // FINDING 13 — remediation detail. `live` mirrors each boolean; `patch` names
+  // the providing patch so a caller seeing `false` knows what to enable.
+  const detail = {};
+  for (const cap of Object.keys(CAPABILITY_PATCH)) {
+    detail[cap] = { live: caps[cap], patch: CAPABILITY_PATCH[cap] };
+  }
+  caps.detail = detail;
+
+  // FINDING 2 — version/shape handshake against the typed contract registry. Only
+  // ever flips a capability true→false (and records a reason); a missing contract
+  // entry leaves the direct probe authoritative.
   const inspect = globalThis.__ccpInspectContracts;
   if (typeof inspect === 'function') {
     try {
       const known = new Map(inspect().map((e) => [e.name, e]));
-      // A registered contract whose advertised shape is empty/missing the path we
-      // rely on signals drift; absence of an entry means "not contracted" → keep
-      // the direct probe result.
+
+      // Downgrade `cap` to false + record `reason` (idempotent on the boolean).
+      const downgrade = (cap, reason) => {
+        caps[cap] = false;
+        detail[cap].live = false;
+        detail[cap].reason = reason;
+      };
+
+      // tools → 'toolDispatch' must advertise the nonce-gated registrar.
+      if (caps.tools && known.has('toolDispatch')) {
+        const e = known.get('toolDispatch');
+        if (Array.isArray(e.shape) && e.shape.length && !e.shape.includes('registerTool')) {
+          downgrade('tools', 'shape missing registerTool');
+        }
+      }
+
+      // delegate → 'agentTool' must advertise invoke.
       if (caps.delegate && known.has('agentTool')) {
         const e = known.get('agentTool');
         if (Array.isArray(e.shape) && e.shape.length && !e.shape.includes('invoke')) {
-          caps.delegate = false;
+          downgrade('delegate', 'shape missing invoke');
+        }
+      }
+
+      // swap → 'systemPrompt' must be v>=2 AND advertise getNonce.
+      if (caps.swap && known.has('systemPrompt')) {
+        const e = known.get('systemPrompt');
+        if (typeof e.version === 'number' && e.version < 2) {
+          downgrade('swap', `contract systemPrompt v${e.version} < required v2`);
+        } else if (Array.isArray(e.shape) && e.shape.length && !e.shape.includes('getNonce')) {
+          downgrade('swap', 'shape missing getNonce');
         }
       }
     } catch (_) { /* contract probe is advisory only */ }
@@ -104,6 +191,9 @@ export function useAgentBus() {
  * @property {(spec:any)=>import('./tool-registry.mjs').ToolHandle} defineTool
  * @property {(opts:any)=>import('./tool-registry.mjs').ToolHandle} defineHandoff
  * @property {() => boolean} restoreSystemPrompt  Pop this instance's swap stack.
+ * @property {() => string[]} listTools  Tools live/queued in this instance's scope.
+ * @property {() => number} swapDepth    Swap-stack entries owned by this instance.
+ * @property {() => (string|null)} currentPersona  The live persona overlay (single global slot).
  * @property {new (opts?:any)=>AgentRouter} AgentRouter  Router pre-bound to this instance's agents.
  * @property {typeof createMemory} createMemory
  * @property {() => Capabilities} capabilities
@@ -140,6 +230,12 @@ export function createAdk() {
     defineTool: toolApi.defineTool,
     defineHandoff: defineHandoffScoped,
     restoreSystemPrompt: () => restoreSystemPromptIn(handoffScope),
+    // Introspection (FINDING 12): listTools is this instance's tool scope;
+    // swapDepth counts entries THIS instance owns on the single global swap stack;
+    // currentPersona reads the one global persona slot (shared by all instances).
+    listTools: toolApi.listTools,
+    swapDepth: () => swapDepthIn(handoffScope),
+    currentPersona,
     // Router bound to this instance's agent registry (falls back to it on start).
     AgentRouter: class extends AgentRouter {
       constructor(opts = {}) {

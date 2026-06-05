@@ -223,6 +223,43 @@ the token (SIGHUP re-reads it) if it may have leaked. The compare path is
 constant-time and length-independent, but that only protects the token, not the
 blast radius behind it.
 
+### Persona-swap and tool-injection are nonce-gated
+
+Two ADK-facing write surfaces let *in-process* code change session behavior:
+**tool injection** (`expose_tool_dispatch`'s `__ccpRegisterTool` /
+`__ccpUnregisterTool`) and **persona swap** (`expose_system_prompt`'s
+`__ccpSetSystemPrompt`). Both are now **nonce-gated**, mirroring the existing
+`__ccpInvokeTool` dispatch gate:
+
+- `expose_tool_dispatch` generates a load-time dispatch nonce and exposes it via
+  `__ccpGetDispatchNonce()`. `__ccpInvokeTool`, `__ccpRegisterTool`, and
+  `__ccpUnregisterTool` all require that nonce as their first argument — tool
+  *invocation* and tool *registration* share one trust domain.
+- `expose_system_prompt` generates its **own** load-time nonce
+  (`__ccpGetSystemPromptNonce()`); `__ccpSetSystemPrompt(nonce, value)` requires
+  it. Reading the active persona (`__ccpGetSystemPrompt()`) stays ungated —
+  reading is not a privilege escalation, only writing is. Flipping the live
+  persona is treated as *higher* authority than tool dispatch (it changes "who
+  the agent is" mid-session), which is why it gets a distinct gate.
+
+The gate stops **unguarded in-process code** — e.g. a compromised MCP server, or
+any module that did not participate in the patch load — from silently registering
+a tool or reassigning the persona by poking a global. It is *not* a defense
+against the patches' intended trusted callers (the ADK, the bridge): a caller
+that legitimately holds the nonce has full authority, so the bridge-token caveats
+above still apply.
+
+**Persona swap is a single global slot.** The host exposes exactly ONE live
+persona override slot. The ADK backs *all* swaps — across every `createAdk()`
+instance — with a single process-global LIFO stack whose entries record the
+owning scope, so an out-of-order cross-instance restore is **refused** rather than
+allowed to clobber another instance's live persona. Per-instance swap "isolation"
+is therefore honest but shares that one slot: two instances cannot each privately
+own the live persona simultaneously. The swap target is also **pinned** (sha256 of
+its `systemPrompt`) at definition time so a later `defineAgent()` cannot rebind a
+hostile persona under an allowlisted name (TOCTOU); a drifted hash refuses the
+swap. See `packages/adk/HANDOFF.md` for the full ADK persona-swap trust model.
+
 ### `--allow-capabilities=all` is a full bypass
 
 `--allow-capabilities=all` **disables the entire per-patch capability

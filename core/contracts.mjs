@@ -39,6 +39,18 @@
  *     no-op INVISIBLY; it does not alter tee/fan-out semantics or the
  *     __ccpOnFetch / __ccpOnFetchBefore / __ccpOnFetchStream registration API.
  *
+ * ── ADK drift-refusal handshake (consumer) ───────────────────────────────────
+ * The ccpatch ADK's capabilities() (packages/adk/index.mjs) is a CONSUMER of this
+ * registry: it calls __ccpInspectContracts() and cross-checks every contracted
+ * capability's advertised `version`/`shape` against the minimums it relies on
+ * (swap → systemPrompt v>=2 + shape 'getNonce'; tools → toolDispatch shape
+ * 'registerTool'; delegate → agentTool shape 'invoke'). A drifted host is refused
+ * loudly — the matching capability boolean is downgraded to false with a reason —
+ * rather than handing back a present-but-broken global. The check is advisory and
+ * never throws; a capability with NO registered contract keeps its direct probe
+ * result. A coarse top-level marker (globalThis.__ccpAdkContract.version) is also
+ * published below so capabilities() can read a single ADK-handshake version.
+ *
  * ── Scope ────────────────────────────────────────────────────────────────────
  * Lightweight on purpose: dotted-path probes, integer versions, no schema DSL.
  * Producers MAY skip __ccpProvide and consumers MAY skip __ccpRequire — this
@@ -145,6 +157,14 @@ if (!globalThis.__ccpRegistry) {
     });
     return out;
   };
+
+  // Coarse top-level ADK handshake marker. capabilities() (packages/adk) may read
+  // globalThis.__ccpAdkContract.version as a single drift signal in addition to
+  // the per-capability shape/version checks above. Advisory only — bump when the
+  // __ccp* contract surface the ADK relies on changes shape incompatibly.
+  if (globalThis.__ccpAdkContract === undefined) {
+    globalThis.__ccpAdkContract = { version: 2 };
+  }
 }
 
 `;

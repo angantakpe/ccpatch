@@ -23,6 +23,32 @@ The following `__ccp*` globals are injected into `globalThis` at patch-apply tim
 | `__ccpCovHit(marker)` | `coverage_kernel` | `pre` phase | Increment the hit counter for `marker`. Called automatically by injected coverage instrumentation — extension authors rarely need to call this directly. |
 | `__ccpBunShim` | `bun_shim` | `pre` phase | Truthy when the Bun runtime compatibility shim has been installed. Indicates `require`/`process` polyfills are active. |
 | `__ccpBootBanner` | `boot_banner` | `pre` phase | Truthy after the boot-banner hook has run. Used to prevent double-installation. |
+| `__ccpAdkContract` | `contracts` | `pre` phase | Coarse top-level ADK handshake marker: `{ version: <int> }` (currently `2`). The ADK's `capabilities()` may read `__ccpAdkContract.version` as a single drift signal in addition to the per-capability shape/version checks. Advisory only. |
+| `__ccpGetDispatchNonce()` | `expose_tool_dispatch` | after patch | Returns the load-time **dispatch nonce**. Trusted callers acquire it once at startup and pass it as the first argument to `__ccpInvokeTool`, `__ccpRegisterTool`, and `__ccpUnregisterTool`. |
+| `__ccpInvokeTool(nonce, name, input, signal?)` | `expose_tool_dispatch` | after patch | Dispatch a tool call through the live tool object. First arg must equal `__ccpGetDispatchNonce()`; wrong/absent nonce throws. |
+| `__ccpRegisterTool(nonce, toolObj)` | `expose_tool_dispatch` | after patch | **Nonce-gated** upsert of `toolObj` into `__ccpRawTools` keyed by `toolObj.name`. Same nonce as `__ccpInvokeTool` (registration + dispatch are one trust domain). Returns `true`. Lets the ADK inject tools through a guarded boundary instead of mutating the raw array. |
+| `__ccpUnregisterTool(nonce, name)` | `expose_tool_dispatch` | after patch | **Nonce-gated** splice-by-name from `__ccpRawTools`. Returns `true` if removed, `false` if no match. Wrong/absent nonce throws. |
+| `__ccpGetSystemPromptNonce()` | `expose_system_prompt` | after patch | Returns the load-time **system-prompt nonce** (distinct from the dispatch nonce — persona writes are higher authority). Trusted callers acquire it once and pass it to `__ccpSetSystemPrompt`. |
+| `__ccpSetSystemPrompt(nonce, str\|null)` | `expose_system_prompt` | after patch | **Nonce-gated** persona-overlay writer (was single-arg `(str)` pre-v0.2.2). First arg must equal `__ccpGetSystemPromptNonce()`; wrong/absent nonce throws. Set/clear (with `null`/`""`) the trailing system-prompt overlay. |
+| `__ccpGetSystemPrompt()` | `expose_system_prompt` | after patch | **Ungated** reader for the current persona overlay (or `null`). Reading the active persona is not a privilege escalation; only writing is gated. |
+
+## Registered contracts
+
+The expose-internals patches register typed contracts (`__ccpProvide`) so consumers
+can probe version + dotted-path shape. The ADK's `capabilities()` consumes these as
+a drift-refusal handshake (a present-but-drifted global is reported unusable).
+
+| Contract | Producer | Version | Shape paths |
+|---|---|---|---|
+| `toolDispatch` | `expose_tool_dispatch` | `2` | `getTools`, `invokeTool`, `buildToolContext`, `mcpHealth`, `getDispatchNonce`, `registerTool`, `unregisterTool` |
+| `systemPrompt` | `expose_system_prompt` | `2` | `set`, `get`, `getNonce` |
+
+Both bumped to **v2** when the nonce-gated registrar / writer landed:
+`toolDispatch` v2 adds `registerTool`/`unregisterTool` to the shape; `systemPrompt`
+v2 changes `set` to the two-arg `(nonce, value)` form and adds `getNonce`. The ADK
+requires `systemPrompt` **minVersion 2 with shape `getNonce`** for `swap`, and
+`toolDispatch` shape `registerTool` for `tools` — a host advertising the old v1
+shape is downgraded loudly in `capabilities().detail[cap].reason`.
 
 ## Authoring an extension
 
@@ -83,3 +109,4 @@ Note: when using the companion file convention, `validateManifest` will emit a w
 
 - **v0.2.0** — Initial API documentation.
 - **v0.2.1** — Preload companion `.preload.mjs` file convention (#9).
+- **v0.2.2** — Nonce-gated ADK write surfaces. `expose_tool_dispatch` adds `__ccpRegisterTool`/`__ccpUnregisterTool` (dispatch-nonce gated) and bumps the `toolDispatch` contract to **v2**. `expose_system_prompt` makes `__ccpSetSystemPrompt` two-arg `(nonce, value)`, adds `__ccpGetSystemPromptNonce()`, and bumps the `systemPrompt` contract to **v2** (shape `['set','get','getNonce']`). `contracts` publishes the coarse `__ccpAdkContract` marker. **Breaking:** the old single-arg `__ccpSetSystemPrompt(str)` is superseded; the ADK keeps a legacy fallback for hosts/stubs without the nonce getter.
