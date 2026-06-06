@@ -101,10 +101,10 @@ describe('runner — reverse-diff & coverage capture after onAfterApply', () => 
     const { code: out } = await applyNamedPatches('seed', patches, ['p'], silent, { captureReverse });
     assert.ok(out.endsWith('APPLIEDAFTERHOOK'), `final code missing hook mutation: ${out}`);
     assert.equal(captureReverse.length, 1);
-    // The reverse diff restores the final patched code back to the original seed.
-    const { applyPatch } = await import('diff');
-    const restored = applyPatch(out, captureReverse[0].reverseDiff);
-    assert.equal(restored, 'seed', 'reverse diff must restore the original from the FINAL (post-hook) code');
+    // The reverse splice restores the final patched code back to the original seed.
+    const { at, removeLen, insert } = captureReverse[0].splice;
+    const restored = out.slice(0, at) + insert + out.slice(at + removeLen);
+    assert.equal(restored, 'seed', 'reverse splice must restore the original from the FINAL (post-hook) code');
   });
 
   it('coverage marker is injected against the post-onAfterApply code', async () => {

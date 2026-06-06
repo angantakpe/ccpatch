@@ -29,6 +29,11 @@ import { readFileSync, existsSync, statSync, createReadStream } from 'node:fs';
 import { resolve } from 'node:path';
 
 const SKIP = process.env.CCPATCH_SKIP_SHA_CHECK === '1';
+// Loud stderr warning when the skip gate is armed — this runs unconditionally
+// at startup so even tarball-only invocations are covered.
+if (SKIP) {
+  process.stderr.write(`\x1b[1;33m⚠ [verify-bundle-sha] integrity checks BYPASSED via env: CCPATCH_SKIP_SHA_CHECK\x1b[0m\n`);
+}
 
 function fail(msg) {
   process.stderr.write(`\n\x1b[1;31m[verify-bundle-sha] INTEGRITY FAILURE\x1b[0m\n${msg}\n\n`);
@@ -126,12 +131,8 @@ function loadRegistry(path) {
 }
 
 function pinHint() {
-  return `  To pin this version, add to ${registryPath} under "versions":\n` +
-    `    "${version || '<x.y.z>'}": {\n` +
-    `      "cliSha256": "${computed}",\n` +
-    `      "sizeBytes": ${size},\n` +
-    `      "source": "describe origin (npm cli.cjs | bun-native)"\n` +
-    `    }`;
+  return `  Run \`ccpatch pin ${version || '<x.y.z>'}\` to record this sha and suppress future TOFU warnings.\n` +
+    `  (To see the raw JSON entry, add --verbose to that command.)`;
 }
 
 async function main() {
@@ -161,11 +162,11 @@ async function main() {
 
   if (!pinned) {
     // TOFU: unknown/new version — warn loudly, but proceed so new versions work.
-    warn(`UNKNOWN version v${version} — no pinned sha in ${registryPath} (Trust On First Use).`);
-    warn(`  computed sha256: ${computed}  (${size} bytes)`);
-    if (SKIP) warn(`  CCPATCH_SKIP_SHA_CHECK=1 set.`);
+    // The npm tarball sha512-vs-registry check already ran above (primary defense).
+    warn(`TOFU: v${version} is not yet pinned — tarball integrity already verified against npm registry.`);
+    warn(`  bundle sha256: ${computed}  (${size} bytes)`);
     process.stderr.write(pinHint() + '\n');
-    warn(`Proceeding (new version). Pin the sha above once you trust this bundle.`);
+    warn(`Proceeding. Run \`ccpatch pin ${version}\` to suppress this warning on future builds.`);
     return done();
   }
 

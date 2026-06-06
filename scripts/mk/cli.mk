@@ -17,7 +17,7 @@ verify_bundle_sha = $(NODE) $(VERIFY_SHA_TOOL) "$(1)" --version "$(VERSION)" --r
         coverage bun-all all beautify beautify-fast patch \
         patch-claude-code patch-list doctor heal print-patch anchor-catalog \
         anchor-catalog-missing anchor-catalog-changed anchor-report repatch release run-extracted \
-        start \
+        start start-unsafe verify \
         patch-claude-code-native \
         clean clean-patched clean-identifiers clean-all \
         test-patches patch-coverage new-patch
@@ -360,6 +360,38 @@ start: ## Run the patched CLI, building first if needed: make start [VERSION=x.y
 		$(MAKE) patch-claude-code VERSION=$(VERSION); \
 	fi
 	node $(OUTPUT) $(CLI_ARGS)
+
+start-unsafe: ## Run the patched CLI with --dangerously-skip-permissions (opt-in unsafe mode): make start-unsafe [VERSION=x.y.z] [CLI_ARGS='...']
+	@echo "[start-unsafe] WARNING: running with --dangerously-skip-permissions — tool calls execute without prompts."
+	@if [ ! -d node_modules/react ]; then \
+		echo "[start-unsafe] react not found — running npm install..."; \
+		npm install --silent; \
+	fi
+	@if [ ! -f $(OUTPUT) ]; then \
+		echo "$(OUTPUT) not found — building..."; \
+		$(MAKE) patch-claude-code VERSION=$(VERSION); \
+	fi
+	node $(OUTPUT) $(CLI_ARGS) --dangerously-skip-permissions
+
+# ── Extraction cache guard ────────────────────────────────────────────────────
+# $(CJS_EXTRACTED) is content-addressed per version: the path already encodes
+# VERSION (storage/archives/claude-code-v$(VERSION)/cli.v$(VERSION).cjs).
+# If the file exists we skip re-extraction; `make clean` preserves
+# storage/archives/ so the cache survives clean cycles.
+$(CJS_EXTRACTED):
+	@echo "[extract-cache] $(CJS_EXTRACTED) not found — running extract-from-binary..."
+	$(MAKE) extract-from-binary VERSION=$(VERSION)
+
+verify: ## Build → coverage → boot-smoke in one command: make verify [VERSION=x.y.z]
+	@echo "[verify] stage 1/3 — patch-claude-code"
+	$(MAKE) patch-claude-code VERSION=$(VERSION) PROFILE=$(PROFILE)
+	@echo "[verify] stage 2/3 — coverage"
+	@$(NODE) bin/patch-cli.mjs coverage $(OUTPUT) --cc-version $(VERSION) || \
+		(echo "[verify] ERROR: coverage stage failed" && exit 1)
+	@echo "[verify] stage 3/3 — boot-smoke"
+	node --test tests/boot-smoke.test.mjs || \
+		(echo "[verify] ERROR: boot-smoke stage failed" && exit 1)
+	@echo "[verify] all stages passed ✓"
 
 run-extracted: ## Run the extracted (unpatched) CLI directly: make run-extracted [VERSION=x.y.z]
 	@test -f $(CJS_EXTRACTED) || (echo "Error: $(CJS_EXTRACTED) not found. Run 'make extract-from-binary VERSION=$(VERSION)' first" && exit 1)

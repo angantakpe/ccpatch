@@ -122,6 +122,28 @@ Concrete guidance for placement-sensitive patches:
   misplacement. Verify is the backstop that the string survived; the anchor is
   what makes sure it survived in the right spot.
 
+### RTK shell hook and subshell tool rewrites
+
+If you have the [RTK](https://github.com/anthropic-ai/rtk) token-saving shell hook active, it transparently rewrites common shell commands (`cat`, `grep`, `find`, etc.) to token-optimised proxies (`ugrep`, `bfs`, etc.). This is invisible in interactive shells but **breaks Makefile recipes and subshell invocations** that rely on POSIX flag compatibility — for example, `grep -oE` may fail with `ugrep: bad option` or `find -name` may fail with `bfs: bad option`.
+
+If you hit unexplained option errors in `make` recipes:
+
+1. **Bypass for a single command** — prefix it with `rtk proxy`: e.g. `rtk proxy grep -oE '[0-9]+' file`.
+2. **Bypass for a make session** — unset the hook for that shell: `env -u RTK_HOOK make patch-claude-code`.
+3. **Verify the hook is active** — `rtk --version` and `which grep` will show whether the shim is in play.
+
+The hook is opt-in from the user profile; other contributors who don't run RTK are unaffected.
+
+---
+
+### packages/adk boundary — decision point
+
+`packages/adk/` lives in the monorepo as a workspace package. It provides the Agent Development Kit layer that underpins the patch runner's agent-loop hooks. It is **not a separate npm package** today — it's developed here for velocity.
+
+This is a deliberate but revisable decision: if the ADK grows its own release cadence, third-party consumers, or a test matrix that conflicts with the patch framework's, it should be extracted to a sibling repository (e.g. `@anthropic-ai/ccpatch-adk`) and consumed via a workspace protocol or semver range. If you're adding features to `packages/adk` that don't directly serve the patch runner, open an issue to discuss whether the extraction milestone has arrived rather than expanding the in-repo surface.
+
+---
+
 ### Debugging a network/fetch subscriber
 
 If you're writing a patch that registers a subscriber on the shared fetch

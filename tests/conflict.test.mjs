@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { structuredPatch } from 'diff';
 import { applyNamedPatches } from '../runner/runner.mjs';
 import { diffSpansFromPatch, resetLineStartsCache } from '../runner/conflict.mjs';
+import { changedWindow } from '../runner/text-span.mjs';
 import { validateManifest } from '../runner/manifest.mjs';
 
 const silent = { log() {}, warn() {}, error() {} };
@@ -16,6 +17,38 @@ function mkLogger() {
     error() {},
   };
 }
+
+describe('overlap spans — must use the full-bundle diff, not a windowed one', () => {
+  // Regression guard. A tempting perf idea is to line-diff only the changed
+  // window (via changedWindow) instead of the full ~15MB bundle. That is SAFE
+  // for the revert splice (byte-exact, see reversible.test.mjs) but UNSAFE for
+  // overlap detection: diffSpansFromPatch is line-based, so when a patch edits
+  // within ONE long line — the norm in a minified bundle — a byte-window cuts
+  // that line and the line-based span tightening diverges from the full-bundle
+  // result, potentially UNDER-covering the touched range and making the strict
+  // overlap gate miss a real conflict. So the overlap path must keep diffing the
+  // full bundle. This pins that contract.
+  it('conflict.mjs exposes no windowed-diff span helper', async () => {
+    const mod = await import('../runner/conflict.mjs');
+    assert.equal(mod.diffSpansWindowed, undefined,
+      'overlap detection must keep using the full-bundle structuredPatch path');
+  });
+
+  it('changedWindow can cut a long line mid-way (the reason windowing is unsafe here)', () => {
+    // A single line with two separate edits: the window spans only first..last
+    // changed byte, dropping the rest of the line that the line-based full diff
+    // would still consider.
+    const pre = 'aaa first=1; bbb last=2; ccc';
+    const post = 'aaa first=11; bbb last=22; ccc';
+    const win = changedWindow(pre, post);
+    assert.ok(win.preWin.length < pre.length, 'window should be a strict sub-slice of the line');
+    // The window spans from the first changed byte to the last, so it contains
+    // the unchanged 'bbb' BETWEEN the two edits — but a line-based diff would
+    // also weigh the line bytes the window trimmed off each end.
+    assert.ok(win.preWin.includes('bbb'),
+      'window spans across both edit sites (covers the text between them)');
+  });
+});
 
 // Build a runnable patch object — verify is required by manifest.
 function mkPatch({ description = 't', apply, verify, dependsOn, priority, phase, allowOverlapWith, at } = {}) {

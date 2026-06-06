@@ -22,19 +22,42 @@ export async function runRevert(options, logger = console) {
   }
   const { sidecar } = read;
 
-  const { applyPatch } = await import('diff');
   let current = fs.readFileSync(patchedPath, 'utf8');
+  // v1 sidecars store a unified-diff string applied via the `diff` library; v2
+  // stores a minimal splice applied directly. Load applyPatch lazily, only if a
+  // legacy record actually needs it.
+  let applyPatch = null;
 
-  // Apply reverse diffs in reverse order: last-applied patch is undone first.
+  // Apply reverse records in reverse order: last-applied patch is undone first.
   const inOrder = sidecar.patches.slice().reverse();
   for (const entry of inOrder) {
     const beforeSha = sha256(current);
     if (entry.postSha256 && entry.postSha256 !== beforeSha) {
       logger.warn(`  [!] sha mismatch before reverting "${entry.name}": expected ${entry.postSha256.slice(0, 12)}, got ${beforeSha.slice(0, 12)} — proceeding, but the bundle may have been edited since patching.`);
     }
-    const restored = applyPatch(current, entry.reverseDiff);
-    if (restored === false) {
-      logger.error(`Error: failed to apply reverse diff for "${entry.name}". The patched bundle has been modified since apply, or the sidecar is corrupted.`);
+    let restored;
+    if (entry.splice) {
+      // v2: exact splice. Replace the patched middle with the original middle.
+      const { at, removeLen, insert } = entry.splice;
+      if (
+        !Number.isInteger(at) || !Number.isInteger(removeLen) ||
+        at < 0 || removeLen < 0 || at + removeLen > current.length ||
+        typeof insert !== 'string'
+      ) {
+        logger.error(`Error: malformed splice record for "${entry.name}" (at=${at}, removeLen=${removeLen}, bundle=${current.length}). The sidecar is corrupted or the bundle was modified since apply.`);
+        return 1;
+      }
+      restored = current.slice(0, at) + insert + current.slice(at + removeLen);
+    } else if (typeof entry.reverseDiff === 'string') {
+      // v1 legacy: unified-diff string.
+      if (!applyPatch) ({ applyPatch } = await import('diff'));
+      restored = applyPatch(current, entry.reverseDiff);
+      if (restored === false) {
+        logger.error(`Error: failed to apply reverse diff for "${entry.name}". The patched bundle has been modified since apply, or the sidecar is corrupted.`);
+        return 1;
+      }
+    } else {
+      logger.error(`Error: revert record for "${entry.name}" has neither a splice nor a reverseDiff — sidecar is corrupted or from an unsupported version.`);
       return 1;
     }
     if (entry.preSha256 && sha256(restored) !== entry.preSha256) {
