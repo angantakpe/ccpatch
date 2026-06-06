@@ -143,6 +143,7 @@ patches:
   expose_submit_input: false      # React submit callback via __ccpSubmitInput
   expose_agent_tool: false        # native AgentTool via __ccpAgentTool
   expose_system_prompt: false     # __ccpSetSystemPrompt persona overlay (ADK swap handoff)
+  policy_gate: false              # host-driven behavior gate: soft steer + outbound allow/scrub/block (CCP_POLICY_GATE_MODULE)
   prime_agent_tool_on_boot: false # prime AgentTool at React mount (no user input needed)
   capture_interactive_request: false # capture first /v1/messages shape for reuse
 
