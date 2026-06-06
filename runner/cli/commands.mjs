@@ -35,6 +35,7 @@ import path from 'node:path';
 // can import it directly here without creating a cycle.
 import { runExplain } from './cmd-explain.mjs';
 import { runOutputsClear } from './cmd-outputs.mjs';
+import { runPin } from './cmd-pin.mjs';
 
 export const DEFAULT_KEY = '__build__';
 
@@ -299,6 +300,30 @@ export function buildCommandTable(impl) {
         return { explain: true, requestedPatches, profile, json };
       },
       run: (ctx) => runExplain(ctx),
+    },
+    {
+      name: 'pin',
+      resultKey: 'pin',
+      helpKey: 'pin',
+      needsPatches: false,
+      parse(rest) {
+        if (rest.length < 1 || rest[0].startsWith('-')) {
+          return { error: 'Usage: ccpatch pin <version> [--source "<desc>"] [--force] [--input <path>] [--verbose]' };
+        }
+        const pinVersion = rest[0];
+        let pinSource = null;
+        let pinForce = false;
+        let pinInput = null;
+        let pinVerbose = false;
+        for (let i = 1; i < rest.length; i++) {
+          if ((rest[i] === '--source' || rest[i] === '-s') && rest[i + 1]) pinSource = rest[++i];
+          else if (rest[i] === '--force' || rest[i] === '-f') pinForce = true;
+          else if (rest[i] === '--input' && rest[i + 1]) pinInput = rest[++i];
+          else if (rest[i] === '--verbose' || rest[i] === '-v') pinVerbose = true;
+        }
+        return { pin: true, pinVersion, pinSource, pinForce, pinInput, pinVerbose };
+      },
+      run: (ctx) => runPin(ctx),
     },
     {
       name: 'outputs',
