@@ -25,8 +25,8 @@ import assert from 'node:assert/strict';
 import {
   createAdk, capabilities, listTools, swapDepth, currentPersona, defineTool,
   tryAcquireSwap,
-} from '../packages/adk/index.mjs';
-import { defineToolIn, createToolScope, validateInput } from '../packages/adk/tool-registry.mjs';
+} from '../index.mjs';
+import { defineToolIn, createToolScope, validateInput } from '../tool-registry.mjs';
 
 // ── shared global hygiene ─────────────────────────────────────────────────────
 

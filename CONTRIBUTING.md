@@ -138,9 +138,30 @@ The hook is opt-in from the user profile; other contributors who don't run RTK a
 
 ### packages/adk boundary — decision point
 
-`packages/adk/` lives in the monorepo as a workspace package. It provides the Agent Development Kit layer that underpins the patch runner's agent-loop hooks. It is **not a separate npm package** today — it's developed here for velocity.
+`packages/adk/` lives in the monorepo as a workspace package, but it is now a
+**cleanly self-contained unit**: it owns its sources (`*.mjs` + `index.d.ts`),
+its own `tests/` (run with `npm test -w @codehornets/adk`, or via the root
+`npm run test:adk`), its `tsconfig.json`, `LICENSE`, and a `files`-scoped
+`package.json`. It is published-ready (`@codehornets/adk`) but still developed
+here for velocity. Keep that boundary clean when you touch it:
 
-This is a deliberate but revisable decision: if the ADK grows its own release cadence, third-party consumers, or a test matrix that conflicts with the patch framework's, it should be extracted to a sibling repository (e.g. `@anthropic-ai/ccpatch-adk`) and consumed via a workspace protocol or semver range. If you're adding features to `packages/adk` that don't directly serve the patch runner, open an issue to discuss whether the extraction milestone has arrived rather than expanding the in-repo surface.
+- **Source must not import from the monorepo.** ADK runtime code depends only on
+  `node:*` and its own files; it consumes ccpatch via the `__ccp*` `globalThis`
+  contract, never via a static import. Do not add `../../core` / `../../runner`
+  imports.
+- **One sanctioned cross-boundary edge.** `tests/adk-handoff.test.mjs`
+  integration-checks the live `extensions/expose_system_prompt.mjs` shim the ADK
+  consumes, importing it at `../../../extensions/...`. That is the *only* path
+  reaching back into the monorepo; if the ADK is ever split into its own repo,
+  that shim must be vendored or the test split.
+
+This remains a revisable arrangement: if the ADK grows its own release cadence,
+third-party consumers, or a conflicting test matrix, the next step is a sibling
+repository (e.g. `ccpatch-adk`) consumed via a workspace protocol or semver
+range. The self-contained layout above is intended to make that extraction a
+near-mechanical move. If you're adding features to `packages/adk` that don't
+directly serve the patch runner, open an issue to discuss whether the extraction
+milestone has arrived rather than expanding the in-repo surface.
 
 ---
 

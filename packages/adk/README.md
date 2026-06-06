@@ -1,5 +1,25 @@
 # ccpatch ADK — Agent Development Kit
 
+> **Status: Experimental / not wired into the shipped patch pipeline.**
+>
+> The ADK is a standalone companion toolkit, **not part of the default
+> `make patch-claude-code` build**. Nothing in `core/`, `extensions/`,
+> `runner/`, or `ccpatch.yml` imports or invokes it — the only in-repo
+> consumers are this package's own `tests/adk-*.test.mjs` suites
+> (`packages/adk/tests/`, run via `npm test -w @codehornets/adk` or the root
+> `npm run test:adk`). It is a *consumer* of the
+> globals that shipped patches expose onto `globalThis` (see the handshake
+> notes in `core/contracts.mjs` and `extensions/expose_system_prompt.mjs`),
+> but it does not ship as a patch itself. Treat the API below as aspirational /
+> evolving; do not assume it is loaded in a patched session unless you have
+> explicitly arranged to load it. Always call `capabilities()` to preflight.
+>
+> Because of this deliberate experimental status, the repo's `knip.json` lists
+> `packages/adk/**` under `ignore` on purpose — so knip's dead-code reporting
+> does not flag the ADK's test-only sources/exports as accidentally unused.
+> Remove that ignore (and this banner) if/when the ADK is promoted into the
+> default build.
+
 The ADK is a small, dependency-free (ESM, Node 20+, no build step) toolkit for
 **defining, registering, and orchestrating agents inside a live Claude Code
 session**. It does not talk to the model API directly — instead it sits on top of

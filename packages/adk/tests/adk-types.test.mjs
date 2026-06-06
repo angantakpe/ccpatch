@@ -27,11 +27,13 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
-import * as runtime from '../packages/adk/index.mjs';
+import * as runtime from '../index.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+// ROOT is the ADK package root (packages/adk); the monorepo root is two up.
 const ROOT = resolve(__dirname, '..');
-const DTS_PATH = resolve(ROOT, 'packages/adk/index.d.ts');
+const REPO_ROOT = resolve(ROOT, '../..');
+const DTS_PATH = resolve(ROOT, 'index.d.ts');
 
 /**
  * Parse the names of VALUE exports declared in a .d.ts (functions/classes/const).
@@ -94,8 +96,11 @@ test('introspection + handshake additions are declared in index.d.ts', () => {
 /** Locate a runnable tsc binary, or null if none is available. */
 function findTsc() {
   const candidates = [
+    // package-local (if the ADK ever installs its own deps), then hoisted root.
     resolve(ROOT, 'node_modules/.bin/tsc'),
     resolve(ROOT, 'node_modules/typescript/bin/tsc'),
+    resolve(REPO_ROOT, 'node_modules/.bin/tsc'),
+    resolve(REPO_ROOT, 'node_modules/typescript/bin/tsc'),
   ];
   return candidates.find((p) => existsSync(p)) ?? null;
 }
@@ -106,7 +111,7 @@ test('TS fixture compiles clean against index.d.ts (signature drift guard)', (t)
     t.skip('no tsc binary found — structural cross-check still covers drift');
     return;
   }
-  const tsconfig = resolve(ROOT, 'tests/fixtures/tsconfig.adk-types.json');
+  const tsconfig = resolve(__dirname, 'fixtures/tsconfig.adk-types.json');
   // tsc binaries under node_modules/.bin are Node scripts; invoke via node for
   // portability across platforms (the .bin shim may not be +x in all checkouts).
   const isJs = tsc.endsWith('.js') || tsc.includes('/typescript/bin/');

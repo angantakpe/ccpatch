@@ -31,7 +31,7 @@ import {
 import { join, relative } from 'node:path';
 import { cwd, platform } from 'node:process';
 
-import { createMemory } from '../packages/adk/memory.mjs';
+import { createMemory } from '../memory.mjs';
 
 // A scratch dir UNDER the project root so the path sandbox accepts it.
 const SCRATCH_ROOT = join(cwd(), '.tmp-adk-memory-tests');

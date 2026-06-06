@@ -18,9 +18,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 
-import { defineAgent, getAgent, listAgents } from '../packages/adk/agent.mjs';
-import { createAgentScope, defineAgentIn, getAgentIn } from '../packages/adk/agent.mjs';
-import { defineTool } from '../packages/adk/tool-registry.mjs';
+import { defineAgent, getAgent, listAgents } from '../agent.mjs';
+import { createAgentScope, defineAgentIn, getAgentIn } from '../agent.mjs';
+import { defineTool } from '../tool-registry.mjs';
 import {
   defineHandoff,
   AgentRouter,
@@ -32,8 +32,11 @@ import {
   tryAcquireSwap,
   disposeHandoffScope,
   __resetSystemPromptDriftGuardForTests,
-} from '../packages/adk/handoff.mjs';
-import expose from '../extensions/expose_system_prompt.mjs';
+} from '../handoff.mjs';
+// Cross-boundary: integration-checks the live ccpatch shim the ADK consumes at
+// runtime. The ADK package does not vendor it; this path reaches back into the
+// monorepo's extensions/ (repo-root, three levels up from this test file).
+import expose from '../../../extensions/expose_system_prompt.mjs';
 
 // ── Shared test harness ───────────────────────────────────────────────────────
 
