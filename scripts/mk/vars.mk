@@ -66,3 +66,21 @@ BUN_OUT         ?= storage/outputs/bun-decompile-v$(VERSION)
 BUN_ARGS        ?= --version
 
 PROMPT          ?= "Say hello as JSON"
+
+# ── VERBOSE — two-tier build output ──────────────────────────────────────────
+# The build is COMPACT by default: phase headers, one ✨ line per patch, the
+# summary box, and any warnings. Per-patch / per-shim sub-chatter (anchor
+# matches, feature-unhide enumerations, shim notes) is hidden.
+#
+#   make patch-claude-code            # compact (default)
+#   make patch-claude-code VERBOSE=1  # full detail (doctor table + every patch line)
+#
+# VERBOSE=1 exports CCPATCH_LOG_LEVEL=debug for the whole recipe so BOTH the
+# doctor pre-pass (a separate process) and the patch CLI agree, and passes the
+# friendly --verbose flag to the patch CLI.
+ifdef VERBOSE
+  export CCPATCH_LOG_LEVEL := debug
+  CCP_VERBOSE_FLAG := --verbose
+else
+  CCP_VERBOSE_FLAG :=
+endif

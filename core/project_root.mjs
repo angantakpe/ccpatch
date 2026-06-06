@@ -1,3 +1,4 @@
+import { ccpLog } from '../runner/cli/style.mjs';
 
 export default {
     category: 'fix',
@@ -39,7 +40,7 @@ export default {
       ];
       for (const [marker, replacement] of variants) {
         if (code.includes(marker)) {
-          console.log(`  [project_root] patched ${marker.slice(9,11)}() to fall back to originalCwd`);
+          ccpLog(`  [project_root] patched ${marker.slice(9,11)}() to fall back to originalCwd`);
           return code.split(marker).join(replacement);
         }
       }
@@ -52,7 +53,7 @@ export default {
       if (m) {
         const [whole, fnName, prefix, varName] = m;
         const replacement = `function ${fnName}(){return ${prefix}${varName}.projectRoot??${varName}.originalCwd}`;
-        console.log(`  [project_root] patched ${fnName}() to fall back to originalCwd (nullish-coalescing variant)`);
+        ccpLog(`  [project_root] patched ${fnName}() to fall back to originalCwd (nullish-coalescing variant)`);
         return code.replace(whole, replacement);
       }
       console.warn('  [!] project_root: marker not found — patch skipped');

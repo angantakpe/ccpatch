@@ -50,6 +50,12 @@ export function extractGlobalFlags(args) {
       level = 'error';
       continue;
     }
+    // --verbose / -v: the friendly name for full detail. Promotes to the debug
+    // level, which is what un-gates per-patch and per-shim sub-chatter (ccpLog).
+    if (a === '--verbose' || a === '-v') {
+      level = 'debug';
+      continue;
+    }
     if (a === '--json') {
       json = true;
       continue;

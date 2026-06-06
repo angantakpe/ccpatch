@@ -30,6 +30,8 @@ const rows = [
   ['make patch-list', 'list available patches'],
   ['make clean', 'wipe releases/ + outputs (keeps archives)'],
   null,
+  'Output is compact by default — add VERBOSE=1 for full per-patch detail.',
+  null,
   '⚠ Unofficial — may break when Claude Code updates.',
   '⚠ --dangerously-skip-permissions skips all tool prompts.',
   '⚠ Review THREAT_MODEL.md before enabling network/env patches.',

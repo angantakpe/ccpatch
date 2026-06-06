@@ -1,3 +1,5 @@
+import { ccpLog } from '../runner/cli/style.mjs';
+
 export default {
   category: 'fix',
 
@@ -36,7 +38,7 @@ export default {
       const guarded = `(typeof ${C}==="string"&&${C}.length>${MAX}?${C}.slice(0,${MAX})+"\\u2026[truncated "+(${C}.length-${MAX})+" chars]":${C})`;
       const patched2 = `${COMP},{content:${guarded},addMargin:${AM},dot:${DOT},color:${COL},dimColor:${DC}}`;
       result2 = result.split(anchor2).join(patched2);
-      console.log(`  [large-content-guard] ${COMP} general content path protected (max ${MAX} chars)`);
+      ccpLog(`  [large-content-guard] ${COMP} general content path protected (max ${MAX} chars)`);
     } else {
       console.warn('  [!] large-content-guard: general content anchor not found — content path unprotected');
     }
@@ -47,7 +49,7 @@ export default {
     const patched3 = `N6.createElement(k,{dimColor:!0,italic:!0},(typeof q.content==="string"&&q.content.length>${MAX}?q.content.slice(0,${MAX})+"\\u2026[truncated "+(q.content.length-${MAX})+" chars]":q.content))`;
     const result3 = result2.split(anchor3).join(patched3);
     if (result3 !== result2) {
-      console.log('  [large-content-guard] raw away_summary italic branch protected (max ' + MAX + ' chars)');
+      ccpLog('  [large-content-guard] raw away_summary italic branch protected (max ' + MAX + ' chars)');
     }
     return result3;
   },

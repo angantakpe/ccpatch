@@ -264,7 +264,9 @@ export function resolveEffectivePatches({ patches, requested, profile, yamlPath 
       if (unknown.length > 0) {
         notices.push(`  [config] profile "${profile}": ${unknown.length} unknown patch name(s) skipped: ${unknown.join(', ')}`);
       }
-      notices.push(`[ccpatch] profile=${profile} patches=${enabled.length}`);
+      // (The profile + patch count is already shown prominently in the build
+      // banner; a second `[ccpatch] profile=… patches=…` notice here was pure
+      // duplication, so it's intentionally dropped from the human stream.)
       const enabledSet = new Set(enabled);
       for (const name of allNames) {
         reasons[name] = enabledSet.has(name)

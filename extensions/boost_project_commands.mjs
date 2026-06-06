@@ -1,3 +1,4 @@
+import { ccpLog } from '../runner/cli/style.mjs';
 
 export default {
     category: 'observe',
@@ -104,7 +105,7 @@ export default {
         if (code.includes(sortA) && code.includes(sortB)) {
           code = code.split(sortA).join(sortANew);
           code = code.split(sortB).join(sortBNew);
-          console.log('  [boost_project_commands] patched sort A + sort B');
+          ccpLog('  [boost_project_commands] patched sort A + sort B');
           return code;
         }
       }

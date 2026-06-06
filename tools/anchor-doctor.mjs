@@ -30,7 +30,7 @@ import { probeAnchor, fuzzyMatch } from '../runner/anchors.mjs';
 import { compileKind } from '../runner/patch-kinds.mjs';
 import { resolveProfile } from '../runner/manifest.mjs';
 import { readProfiles } from '../runner/config.mjs';
-import { style, icon as glyph } from '../runner/cli/style.mjs';
+import { style, icon as glyph, isVerbose } from '../runner/cli/style.mjs';
 
 // Dim, consistent prefix for the doctor's own status lines.
 const TAG = style.gray('🩺 anchor doctor');
@@ -67,10 +67,21 @@ const versionMatch = absPath.match(/[v\/-](\d+\.\d+\.\d+)/);
 const version = versionMatch ? versionMatch[1] : null;
 
 if (!jsonOut) {
-  console.log(`${TAG} ${style.dim('bundle')}  ${absPath}`);
-  console.log(`${TAG} ${style.dim('sha256')}  ${sha}`);
-  console.log(`${TAG} ${style.dim('size')}    ${(code.length / 1_000_000).toFixed(2)} MB`);
-  if (version) console.log(`${TAG} ${style.dim('version')} ${style.cyan(version)}`);
+  if (isVerbose()) {
+    console.log(`${TAG} ${style.dim('bundle')}  ${absPath}`);
+    console.log(`${TAG} ${style.dim('sha256')}  ${sha}`);
+    console.log(`${TAG} ${style.dim('size')}    ${(code.length / 1_000_000).toFixed(2)} MB`);
+    if (version) console.log(`${TAG} ${style.dim('version')} ${style.cyan(version)}`);
+  } else {
+    // Compact: one line carrying the facts you act on — which bundle, what
+    // version, how big, and a short sha fingerprint. Full path + full sha are a
+    // --verbose away (and verify-bundle-sha already printed the full sha above).
+    const v = version ? ` ${style.cyan('v' + version)}` : '';
+    console.log(
+      `${TAG}${v} ${style.dim('·')} ${(code.length / 1_000_000).toFixed(2)} MB ` +
+      `${style.dim('·')} ${style.dim('sha')} ${sha.slice(0, 12)}`
+    );
+  }
 }
 
 // ── Load every patch via the runner's own loader so we exercise the real
@@ -132,27 +143,40 @@ if (jsonOut) {
     summary: { total: rows.length, missing: missingCount, drift: driftCount },
   }, null, 2));
 } else {
-  const widthName = Math.max(...rows.map(r => r.name.length), 10);
-  console.log();
-  console.log(`  ${style.dim('patch'.padEnd(widthName))}   ${style.dim('status   detail')}`);
-  console.log(`  ${style.gray('─'.repeat(widthName))}   ${style.gray('───────  ' + '─'.repeat(60))}`);
-  // Emoji render two columns wide; the trailing spaces normalize each cell to a
-  // consistent on-screen width (⊘ is one column, so it gets an extra pad).
-  const icon = { ok: `${glyph.ok} `, drift: `${glyph.drift} `, missing: `${glyph.missing} `, deprecated: `${glyph.deprecated}  ` };
-  const paint = { ok: style.green, drift: style.yellow, missing: style.red, deprecated: style.gray };
-  for (const r of rows) {
-    const patch = patches[r.name];
-    if (patch && patch.deprecated) {
-      const detail = `deprecated: ${patch.deprecated.reason}${patch.deprecated.since ? ` (since ${patch.deprecated.since})` : ''}`.slice(0, 70);
-      console.log(`  ${style.bold(r.name.padEnd(widthName))}  ${icon.deprecated} ${style.gray('deprecated'.padEnd(7))} ${style.dim(detail)}`);
-      continue;
-    }
-    const detail = (r.detail || (r.weak ? 'weak verify (no absent/count)' : '')).slice(0, 70);
-    const tint = paint[r.status] ?? style.gray;
-    console.log(`  ${style.bold(r.name.padEnd(widthName))}  ${icon[r.status] ?? '?  '} ${tint(r.status.padEnd(7))} ${style.dim(detail)}`);
-  }
-  console.log();
   const allOk = missingCount === 0 && driftCount === 0;
+  // The full per-patch table is detail: it repeats the patch list the apply
+  // phase prints moments later. Show it only when (a) the user asked for detail
+  // (--verbose / debug) or (b) something needs attention (drift/missing) — in
+  // which case the offending rows are exactly what you want to see. A clean
+  // compact run jumps straight to the one-line health summary below.
+  const showTable = isVerbose() || !allOk;
+  if (showTable) {
+    const widthName = Math.max(...rows.map(r => r.name.length), 10);
+    // When attention is needed in compact mode, surface ONLY the rows that
+    // aren't ok — the healthy 28 are noise; the 1 drifted row is the signal.
+    const visibleRows = (isVerbose())
+      ? rows
+      : rows.filter(r => r.status !== 'ok' || (patches[r.name] && patches[r.name].deprecated));
+    console.log();
+    console.log(`  ${style.dim('patch'.padEnd(widthName))}   ${style.dim('status   detail')}`);
+    console.log(`  ${style.gray('─'.repeat(widthName))}   ${style.gray('───────  ' + '─'.repeat(60))}`);
+    // Emoji render two columns wide; the trailing spaces normalize each cell to a
+    // consistent on-screen width (⊘ is one column, so it gets an extra pad).
+    const icon = { ok: `${glyph.ok} `, drift: `${glyph.drift} `, missing: `${glyph.missing} `, deprecated: `${glyph.deprecated}  ` };
+    const paint = { ok: style.green, drift: style.yellow, missing: style.red, deprecated: style.gray };
+    for (const r of visibleRows) {
+      const patch = patches[r.name];
+      if (patch && patch.deprecated) {
+        const detail = `deprecated: ${patch.deprecated.reason}${patch.deprecated.since ? ` (since ${patch.deprecated.since})` : ''}`.slice(0, 70);
+        console.log(`  ${style.bold(r.name.padEnd(widthName))}  ${icon.deprecated} ${style.gray('deprecated'.padEnd(7))} ${style.dim(detail)}`);
+        continue;
+      }
+      const detail = (r.detail || (r.weak ? 'weak verify (no absent/count)' : '')).slice(0, 70);
+      const tint = paint[r.status] ?? style.gray;
+      console.log(`  ${style.bold(r.name.padEnd(widthName))}  ${icon[r.status] ?? '?  '} ${tint(r.status.padEnd(7))} ${style.dim(detail)}`);
+    }
+    console.log();
+  }
   const head = allOk ? style.green('🩺 all anchors healthy') : style.yellow('🩺 anchor doctor');
   console.log(`${head} ${style.dim('·')} ${style.bold(rows.length)} patches ${style.dim('|')} ${missingCount ? style.red(missingCount + ' missing') : '0 missing'} ${style.dim('|')} ${driftCount ? style.yellow(driftCount + ' drift') : '0 drift'} ${style.dim('|')} ${style.green((rows.length - missingCount - driftCount) + ' ok')}`);
 }

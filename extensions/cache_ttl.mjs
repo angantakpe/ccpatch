@@ -1,3 +1,4 @@
+import { ccpLog } from '../runner/cli/style.mjs';
 
 export default {
     category: 'fix',
@@ -36,7 +37,7 @@ export default {
         return code;
       }
       const fixed = code.replace(match[0], 'return!0}');
-      console.log('  [cache_ttl] patched DoY() → always 1h TTL for eligible users (feature-flag gate removed)');
+      ccpLog('  [cache_ttl] patched DoY() → always 1h TTL for eligible users (feature-flag gate removed)');
       return fixed;
     }
   };

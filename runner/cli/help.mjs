@@ -46,6 +46,8 @@ export const HELP = Object.freeze({
     '  --json                   Emit a single JSON build report to stdout\n' +
     '  --log-level <lvl>        silent | error | warn | info | debug (default: info)\n' +
     '  --quiet                  Alias for --log-level=error\n' +
+    '  --verbose, -v            Full detail: per-patch + per-shim sub-chatter\n' +
+    '                           (alias for --log-level=debug; default is compact)\n' +
     '  --help                   Show this message\n' +
     '\n' +
     'Profiles: --profile=native auto-excludes esm_compat + bun_shim so the\n' +
@@ -191,7 +193,7 @@ export const USAGE =
   '  node patch-cli.mjs outputs clear [--force] [--rotate <KB>]\n' +
   '  node patch-cli.mjs --list\n' +
   '\n' +
-  'Global options: --log-level=silent|error|warn|info|debug   --quiet   --json   --help\n' +
+  'Global options: --log-level=silent|error|warn|info|debug   --quiet   --verbose   --json   --help\n' +
   '  --paranoid          Strict mode: surface normally-swallowed fetch-subscriber errors loudly\n' +
   '                      (sets CCPATCH_PARANOID=1) and force fail-closed native repack (any\n' +
   '                      grow-path degradation becomes a hard build failure).\n' +

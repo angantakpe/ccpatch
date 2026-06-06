@@ -1,3 +1,5 @@
+import { ccpLog } from '../cli/style.mjs';
+
 const REACT_MOD_RE_V1 = /var \w+=d\(\((\w+)\)=>\{var \w+=Symbol\.for\("react\.(?:transitional\.)?element"\)/;
 const REACT_MOD_RE_V2 = /(\w+)=p\(\((\w+),\w+\)=>\{[^}]*Symbol\.for\("react\.(?:transitional\.)?element"\)/;
 const REACT_MOD_RE_V3 = /var [\w$]+=\w+\(\(([\w$]+)\)=>\{var [\w$]+=Symbol\.for\("react\.(?:transitional\.)?element"\)/;
@@ -34,7 +36,7 @@ export function applyReactSingletonShim(code, logger = console) {
   if (reactModMatchV1) {
     const [fullMatch, exportsVar] = reactModMatchV1;
     const patchedMatch = fullMatch.replace('=>{', `=>{Object.assign(${exportsVar},globalThis.__hm_react);`);
-    logger.log(`  [builtin] Bundled React module shimmed (pattern 1). (exports: ${exportsVar})`);
+    ccpLog(`  [builtin] Bundled React module shimmed (pattern 1). (exports: ${exportsVar})`);
     return code.replace(fullMatch, patchedMatch);
   }
 
@@ -42,7 +44,7 @@ export function applyReactSingletonShim(code, logger = console) {
   if (reactModMatchV2) {
     const [fullMatch, moduleVar, exportsVar] = reactModMatchV2;
     const patchedMatch = fullMatch.replace('=>{', `=>{Object.assign(${exportsVar},globalThis.__hm_react);`);
-    logger.log(`  [builtin] Bundled React module shimmed (pattern 2). (module: ${moduleVar}, exports: ${exportsVar})`);
+    ccpLog(`  [builtin] Bundled React module shimmed (pattern 2). (module: ${moduleVar}, exports: ${exportsVar})`);
     return code.replace(fullMatch, patchedMatch);
   }
 
@@ -50,7 +52,7 @@ export function applyReactSingletonShim(code, logger = console) {
   if (reactModMatchV3) {
     const [fullMatch, exportsVar] = reactModMatchV3;
     const patchedMatch = fullMatch.replace('=>{', `=>{Object.assign(${exportsVar},globalThis.__hm_react);`);
-    logger.log(`  [builtin] Bundled React module shimmed (pattern 3). (exports: ${exportsVar})`);
+    ccpLog(`  [builtin] Bundled React module shimmed (pattern 3). (exports: ${exportsVar})`);
     return code.replace(fullMatch, patchedMatch);
   }
 

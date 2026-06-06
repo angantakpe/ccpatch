@@ -1,5 +1,6 @@
 import { forceFeatureFlag } from '../runner/patch-helpers.mjs';
 import { resolveAnchorLiteral } from '../runner/anchors.mjs';
+import { ccpLog } from '../runner/cli/style.mjs';
 
 export default {
   category: 'feature',
@@ -31,7 +32,7 @@ export default {
     }
 
     if (patched > 0) {
-      console.log('  [loop_dynamic] ' + patched + '/2 flag(s) enabled');
+      ccpLog('  [loop_dynamic] ' + patched + '/2 flag(s) enabled');
     }
     return code;
   },

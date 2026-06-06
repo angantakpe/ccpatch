@@ -1,5 +1,6 @@
 import { forceFeatureFlag, spliceAfter } from '../runner/patch-helpers.mjs';
 import { resolveAnchorLiteral } from '../runner/anchors.mjs';
+import { ccpLog } from '../runner/cli/style.mjs';
 
 const SHEBANG = '#!/usr/bin/env node';
 
@@ -33,7 +34,7 @@ export default {
         return code;
       }
       code = res.code;
-      console.log(`  [durable_cron] patched ${res.fnName}() → always true`);
+      ccpLog(`  [durable_cron] patched ${res.fnName}() → always true`);
 
       // H-3: Register /cron slash command so the feature is accessible from the prompt.
       // We register a simple handler on globalThis.__ccpRegisterSlashCommand (installed

@@ -114,7 +114,10 @@ export function applySinglePatch({
   if (timingMs > 5000) {
     logger.warn(`  [!] SLOW PATCH: "${name}" took ${timingMs}ms — check for catastrophic regex backtracking`);
   } else if (timingMs > 1000) {
-    logger.log(`  [~] ${name}: ${timingMs}ms`);
+    // A merely slow-ish patch (1–5s) is detail, not a warning — keep it out of
+    // the compact stream. logger.debug only emits at --verbose / --log-level=debug;
+    // fall back to logger.log for the dry-run console shim that lacks .debug.
+    (logger.debug || logger.log)(`  [~] ${name}: ${timingMs}ms`);
   }
   if (typeof appliedCode !== 'string') {
     logger.error(`  [!] Patch "${name}" returned non-string (${typeof appliedCode}) — keeping code unchanged`);
@@ -202,15 +205,19 @@ export function applySinglePatch({
     const deltaBefore = frame.deltaBefore(preCode);
     let diffSpans = null;        // null => deferred (non-strict)
     let diffSpanCount = changed ? 1 : 0;
-    // Cache structuredPatch result so the lazy materialization path never recomputes it.
-    let _sp = null;
     if (changed && globalStrict) {
-      _sp = structuredPatch(name, name, preCode, effectiveCode, 'pre', 'post', { context: 0 });
-      diffSpans = frame.shiftToOriginal(diffSpansFromPatch(preCode, _sp), deltaBefore);
+      // Strict mode needs spans eagerly to back the FATAL overlap gate.
+      const sp = structuredPatch(name, name, preCode, effectiveCode, 'pre', 'post', { context: 0 });
+      diffSpans = frame.shiftToOriginal(diffSpansFromPatch(preCode, sp), deltaBefore);
       diffSpanCount = diffSpans.length;
-    } else if (changed) {
-      _sp = structuredPatch(name, name, preCode, effectiveCode, 'pre', 'post', { context: 0 });
     }
+    // Perf: non-strict mode does NOT diff here. detectAndRecordOverlaps()
+    // materialises spans lazily from _preCode/_effectiveCode, and only for
+    // phases with ≥2 patches — so single-patch phases pay no structuredPatch at
+    // all, and each multi-patch phase diffs exactly once. (A `_sp` field was
+    // previously computed eagerly for every changed patch and stored on the
+    // trace, but nothing ever read it — the deferred path recomputes — so it was
+    // ~one wasted full-bundle line diff per changed patch.)
     const atSitesShifted = frame.shiftSites(atSites, deltaBefore);
     trace = {
       name,
@@ -221,7 +228,6 @@ export function applySinglePatch({
       changed,
       _preCode: changed ? preCode : null,
       _effectiveCode: changed ? effectiveCode : null,
-      _sp,
       _deltaBefore: deltaBefore,
       allowOverlapWith: Array.isArray(normalized.allowOverlapWith) ? normalized.allowOverlapWith : [],
     };

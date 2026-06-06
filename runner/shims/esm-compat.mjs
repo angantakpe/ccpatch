@@ -1,3 +1,5 @@
+import { ccpLog } from '../cli/style.mjs';
+
 const CJS_TAIL = '})(module.exports, require, module, __filename, __dirname);';
 const CJS_HEAD = '(function(exports, require, module, __filename, __dirname)';
 
@@ -13,7 +15,7 @@ function headerInsertOffset(code) {
   return nl === -1 ? code.length : nl + 1;
 }
 
-export function applyEsmCompatibilityShim(code, logger = console) {
+export function applyEsmCompatibilityShim(code) {
   const cjsTailIdx = code.lastIndexOf(CJS_TAIL);
   const isCjsIife = code.includes(CJS_HEAD) && cjsTailIdx !== -1;
 
@@ -47,7 +49,7 @@ export function applyEsmCompatibilityShim(code, logger = console) {
     ].join('\n');
     const esmTail = '})(__hm_module.exports, __hm_require, __hm_module, __hm_filename, __hm_dirname);';
     const shebangEnd = headerInsertOffset(code);
-    logger.log('  [shim] ESM compatibility shim applied.');
+    ccpLog('  [shim] ESM compatibility shim applied.');
     return code.slice(0, shebangEnd) + esmHeader + code.slice(shebangEnd, cjsTailIdx) + esmTail + code.slice(cjsTailIdx + CJS_TAIL.length);
   }
 
@@ -55,6 +57,6 @@ export function applyEsmCompatibilityShim(code, logger = console) {
   // adding TLA can trigger Node's ambiguous module-format error.
   const esmNativeShim = `{try{const __hmReq=typeof __hm_nativeRequire==='function'?__hm_nativeRequire:(typeof require==='function'?require:null);if(__hmReq){const __hmRI=__hmReq('react');const __hmII=__hmReq('ink');globalThis.__hm_react=(__hmRI&&__hmRI.default)||__hmRI;globalThis.__hm_ink=__hmII;}}catch{}}\n`;
   const shebangEnd = headerInsertOffset(code);
-  logger.log('  [shim] Native-ESM bundle - injected require-based react+ink pre-load shim (no top-level await).');
+  ccpLog('  [shim] Native-ESM bundle - injected require-based react+ink pre-load shim (no top-level await).');
   return code.slice(0, shebangEnd) + esmNativeShim + code.slice(shebangEnd);
 }

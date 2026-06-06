@@ -11,6 +11,8 @@
  * unique. No regex needed — simple string replacement.
  */
 
+import { ccpLog } from '../runner/cli/style.mjs';
+
 export default {
   category: 'fix',
 
@@ -47,7 +49,7 @@ export default {
       return code;
     }
     const patched = code.slice(0, winStart) + newWindow + code.slice(winStart + window.length);
-    console.log(`  [recap_strip_hint] removed recap hint (F=${m[1]}, Y=${m[2]}, b=${m[3]})`);
+    ccpLog(`  [recap_strip_hint] removed recap hint (F=${m[1]}, Y=${m[2]}, b=${m[3]})`);
     return patched;
   },
 };

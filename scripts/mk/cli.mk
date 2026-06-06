@@ -207,7 +207,7 @@ patch-claude-code: ## Apply the standard profile: make patch-claude-code [VERSIO
 	echo "Using: $$SRC"; \
 	$(call verify_bundle_sha,$$SRC) || exit 1; \
 	node tools/anchor-doctor.mjs "$$SRC" $(if $(PROFILE),--profile $(PROFILE),) || true; \
-	$(NODE) $(PATCH_TOOL) "$$SRC" $(OUTPUT) $(addprefix --patch ,$(subst $(comma), ,$(PATCH))) $(if $(PROFILE),--profile $(PROFILE),) $(if $(VERSION),--version $(VERSION),)
+	$(NODE) $(PATCH_TOOL) "$$SRC" $(OUTPUT) $(addprefix --patch ,$(subst $(comma), ,$(PATCH))) $(if $(PROFILE),--profile $(PROFILE),) $(if $(VERSION),--version $(VERSION),) $(CCP_VERBOSE_FLAG)
 	@SHA256=$$(sha256sum $(OUTPUT) | awk '{print $$1}'); \
 	echo "$$SHA256  cli.v$(VERSION).patched.mjs" > releases/$(VERSION)/cli.v$(VERSION).patched.mjs.sha256; \
 	SIZE=$$(wc -c < $(OUTPUT) | tr -d ' '); \

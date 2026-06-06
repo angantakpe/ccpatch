@@ -18,6 +18,8 @@
  *   These sequences are never valid user keystrokes and safe to discard.
  */
 
+import { ccpLog } from '../runner/cli/style.mjs';
+
 const block = `var __ccpFixStdinDA1Installed=true;(function(){try{var __ccpDA1Re=/\\x1b\\[[?>][0-9;]*c/g;var __ccpStdinEmit=process.stdin.emit.bind(process.stdin);process.stdin.emit=function(event,data){if(event==='data'&&data!=null){var str=Buffer.isBuffer(data)?data.toString('binary'):(typeof data==='string'?data:null);if(str&&__ccpDA1Re.test(str)){__ccpDA1Re.lastIndex=0;var filtered=str.replace(__ccpDA1Re,'');if(!filtered)return false;data=Buffer.isBuffer(data)?Buffer.from(filtered,'binary'):filtered;}__ccpDA1Re.lastIndex=0;}return __ccpStdinEmit(event,data);};}catch(e){}})();`;
 
 export default {
@@ -39,7 +41,7 @@ export default {
     const SHEBANG = '#!/usr/bin/env node';
     if (code.startsWith(SHEBANG)) {
       const afterShebang = code.indexOf('\n') + 1;
-      console.log('  [stdin_da1_leak] stdin DA1 filter installed (shebang anchor)');
+      ccpLog('  [stdin_da1_leak] stdin DA1 filter installed (shebang anchor)');
       return code.slice(0, afterShebang) + block + '\n' + code.slice(afterShebang);
     }
 
@@ -50,7 +52,7 @@ export default {
     const m = code.match(cjsAnchor);
     if (m) {
       const insertAt = m.index + m[0].length;
-      console.log('  [stdin_da1_leak] stdin DA1 filter installed (CJS wrapper anchor)');
+      ccpLog('  [stdin_da1_leak] stdin DA1 filter installed (CJS wrapper anchor)');
       return code.slice(0, insertAt) + block + code.slice(insertAt);
     }
 

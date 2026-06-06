@@ -38,9 +38,6 @@
     "runner/agents-dir-builder.mjs"
   ],
   "ignoreDependencies": [
-    "ink",
-    "react",
-    "source-map",
     "concurrently"
   ],
   "ignoreBinaries": [

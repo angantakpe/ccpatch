@@ -52,6 +52,60 @@ function colorEnabled() {
 // True when SGR color escapes should be emitted (NO_COLOR / FORCE_COLOR / TTY).
 const COLOR = colorEnabled();
 
+// ── Verbosity (two-tier) ─────────────────────────────────────────────────────
+// Patches and shims emit incidental "[name] did X" sub-chatter directly via
+// console.log (they run inside apply(), outside the CLI's leveled logger). At
+// the default verbosity that chatter is pure noise — the runner already prints a
+// ✨ line per patch and a summary box — so it is suppressed and surfaces only at
+// DEBUG level. The two tiers:
+//   compact (default) — phase headers, the per-patch ✨ line, warnings, and the
+//                       summary. Sub-chatter hidden. This is the `info` log
+//                       level, the default for an interactive build.
+//   verbose           — everything, including every [unhide_features]/[builtin]/
+//                       [shim] line. Turned on by --verbose / --log-level=debug
+//                       / CCPATCH_LOG_LEVEL=debug / CCPATCH_VERBOSE=1.
+//
+// The decision is carried through CCPATCH_LOG_LEVEL (set by the CLI's
+// extractGlobalFlags) and CCPATCH_VERBOSE, so the doctor pre-pass and any
+// child process spawned by the build share one verbosity decision rather than
+// each re-deriving it from their own stdout.TTY.
+function resolveVerbose() {
+  if (process.env.CCPATCH_VERBOSE != null) return process.env.CCPATCH_VERBOSE !== '0';
+  const lvl = process.env.CCPATCH_LOG_LEVEL;
+  if (lvl === 'debug') return true;
+  if (lvl === 'silent' || lvl === 'error' || lvl === 'warn' || lvl === 'info') return false;
+  // No explicit signal: compact. Routine builds stay quiet; pipe to a file with
+  // --verbose (or --log-level=debug) when the full transform trace is wanted.
+  return false;
+}
+
+let VERBOSE = resolveVerbose();
+
+/** True when full per-patch sub-chatter should be emitted. */
+export function isVerbose() { return VERBOSE; }
+
+/**
+ * Force the verbosity tier for the rest of the process and export the decision
+ * to child processes via CCPATCH_VERBOSE. Called by the build CLI once it has
+ * parsed --verbose / --log-level so the doctor pre-pass and patch sub-chatter
+ * agree on one answer.
+ */
+export function setVerbose(on) {
+  VERBOSE = !!on;
+  process.env.CCPATCH_VERBOSE = on ? '1' : '0';
+}
+
+/**
+ * Per-patch / per-shim sub-chatter sink. Callers use this instead of
+ * console.log for the incidental "[name] did X" lines that help when debugging
+ * a drifted anchor but are noise in a routine build. Suppressed in compact
+ * mode; passed through verbatim in verbose mode. The callers' leading two-space
+ * indent is preserved.
+ */
+export function ccpLog(...args) {
+  if (VERBOSE) console.log(...args);
+}
+
 const wrap = (open, close) => (s) => (COLOR ? `\x1b[${open}m${s}\x1b[${close}m` : String(s == null ? '' : s));
 
 /** Minimal SGR palette. Each helper is a no-op passthrough when color is off. */

@@ -10,7 +10,7 @@ import { checkVerifyCore, toList } from './verify-core.mjs';
 import { getResolvedVariant } from './loader.mjs';
 import { compareVersions } from './version-resolver.mjs';
 import { PHASE_ORDER, phaseOf, orderPatches } from './apply-order.mjs';
-import { style, icon } from './cli/style.mjs';
+import { style, icon, isVerbose } from './cli/style.mjs';
 import {
   makeStorageWarnOnce,
   writeConflictsArtifact,
@@ -165,7 +165,11 @@ export function detectAndRecordOverlaps(phaseTraces, frame, globalStrict, logger
       const msg = `overlap (${c.kind}) phase="${c.phase}" ${c.a} <-> ${c.b}` +
                   ` rangeA=[${c.rangeA[0]},${c.rangeA[1]}] rangeB=[${c.rangeB[0]},${c.rangeB[1]}]`;
       if (allowed) {
-        logger.warn(`  [overlap] ${msg} (allowlisted)`);
+        // An allowlisted overlap is explicitly acknowledged (via allowOverlapWith)
+        // and harmless — it fires every build for the known pairs. Demote it from
+        // a warning to debug so the compact stream isn't crying wolf; --verbose
+        // (--log-level=debug) still surfaces it with full ranges.
+        (logger.debug || logger.warn)(`  [overlap] ${msg} (allowlisted)`);
       } else if (globalStrict) {
         // Strict: FATAL overlaps stay loud and unchanged.
         logger.warn(`  [overlap] ${msg}`);
@@ -293,7 +297,12 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
       fail(`manifest invalid (${manifestErrors.join('; ')})`);
       continue;
     }
-    logger.log(`  ${style.green(icon.apply)} ${style.bold(name)} ${style.dim('· ' + patch.description)}`);
+    // Compact mode shows just the patch name (the scannable token); the prose
+    // description is detail reserved for --verbose. Either way the runner still
+    // prints one ✨ line per patch so progress through the set stays visible.
+    logger.log(isVerbose()
+      ? `  ${style.green(icon.apply)} ${style.bold(name)} ${style.dim('· ' + patch.description)}`
+      : `  ${style.green(icon.apply)} ${style.bold(name)}`);
 
     // Revisit marker: nudge the maintainer when a forensic patch has reached
     // the upstream version it was supposed to be re-evaluated at.

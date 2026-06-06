@@ -1,3 +1,5 @@
+import { ccpLog } from '../runner/cli/style.mjs';
+
 export default {
   category: 'fix',
 
@@ -49,7 +51,7 @@ export default {
     }
 
     const patched = code.replace(match[0], 'return null');
-    console.log('  [grep_shadow] PN_() patched to return null — grep/find shadow injection disabled');
+    ccpLog('  [grep_shadow] PN_() patched to return null — grep/find shadow injection disabled');
     return patched;
   },
 };

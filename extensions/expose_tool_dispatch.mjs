@@ -85,6 +85,8 @@
  * than hanging.
  */
 
+import { ccpLog } from '../runner/cli/style.mjs';
+
 export default {
   category: 'expose',
 
@@ -186,7 +188,7 @@ export default {
       return code;
     }
 
-    console.log(`  [expose_tool_dispatch] using ${anchorUsed}`);
+    ccpLog(`  [expose_tool_dispatch] using ${anchorUsed}`);
 
     // ── Build replacement ─────────────────────────────────────────────────
     // The matched string ends with ");if(" — split there and inject between.

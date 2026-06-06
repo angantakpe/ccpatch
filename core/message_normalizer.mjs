@@ -1,3 +1,5 @@
+import { ccpLog } from '../runner/cli/style.mjs';
+
 // Upstream breakage in v2.1.131: new display item types (grouped_tool_use,
 // collapsed_read_search) produced by cq4()/dQ7() hit unguarded paths in
 // zr_() and RY$(). These three substitutions harden those paths.
@@ -58,7 +60,7 @@ export default {
       const anchor = `function ${fn}(H){if(H.type==="progress"||H.type==="attachment"||H.type==="system")return!0;if(typeof H.message.content`;
       const replacement = `function ${fn}(H){if(!H)return!1;if(H.type==="progress"||H.type==="attachment"||H.type==="system")return!0;if(!H.message)return!0;if(typeof H.message.content`;
       result = result.replace(anchor, replacement);
-      console.log(`  [+] message_normalizer: ${fn}() null-element and missing-.message guards`);
+      ccpLog(`  [+] message_normalizer: ${fn}() null-element and missing-.message guards`);
     } else {
       console.warn(`  [!] message_normalizer: display-item normalizer anchor not found — skipping`);
     }
@@ -71,7 +73,7 @@ export default {
         continue;
       }
       result = result.replace(anchor, replacement);
-      console.log(`  [+] message_normalizer: ${name}`);
+      ccpLog(`  [+] message_normalizer: ${name}`);
     }
     return result;
   },

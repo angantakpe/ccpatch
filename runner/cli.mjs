@@ -4,6 +4,7 @@ import path from 'node:path';
 import { HELP, USAGE, maybePrintSubcommandHelp } from './cli/help.mjs';
 import { buildCommandTable, namedSubcommands, DEFAULT_KEY } from './cli/commands.mjs';
 import { extractGlobalFlags, makeLogger } from './cli/logger.mjs';
+import { setVerbose } from './cli/style.mjs';
 import { loadPatches } from './loader.mjs';
 import { resolveProfile, classifyRisk, CAPABILITIES } from './manifest.mjs';
 import { readProfiles, readPatchFlags } from './config.mjs';
@@ -212,6 +213,15 @@ export async function runPatchCli(args, logger = console) {
   // every downstream call honors --quiet / --log-level. The default `console`
   // sink preserves legacy behavior when no flag is passed.
   const { level, json, args: cleanedArgs } = extractGlobalFlags(args);
+  // Sync the per-patch / per-shim sub-chatter tier (ccpLog) and any spawned
+  // sub-process (the doctor pre-pass) to the resolved level: chatter is on only
+  // at debug, off otherwise. Exporting CCPATCH_LOG_LEVEL is the carrier so a
+  // child Node process re-derives the SAME answer instead of falling back to its
+  // own stdout.isTTY. Skipped when the host passed a custom logger (tests).
+  if (logger === console) {
+    process.env.CCPATCH_LOG_LEVEL = level;
+    setVerbose(level === 'debug');
+  }
   const leveled = (logger === console)
     ? makeLogger({ level, sink: console, json })
     : logger;

@@ -1,4 +1,5 @@
 import { forceFeatureFlag } from '../runner/patch-helpers.mjs';
+import { ccpLog } from '../runner/cli/style.mjs';
 
 export default {
     category: 'feature',
@@ -29,7 +30,7 @@ export default {
         patched++;
         return 'isHidden(){return!1}';
       });
-      for (const name of seen) console.log('  [unhide_features] exposed: ' + name + '-gated');
+      for (const name of seen) ccpLog('  [unhide_features] exposed: ' + name + '-gated');
 
       // 2. H-2: Second pass - catch literal isHidden(){return!0} occurrences.
       // Count via the replace callback so the bundle is scanned once, not twice
@@ -38,7 +39,7 @@ export default {
       let hardcodedCount = 0;
       code = code.replace(hardcodedRe, () => { hardcodedCount++; return 'isHidden(){return!1}'; });
       if (hardcodedCount > 0) {
-        console.log('  [unhide_features] exposed: ' + hardcodedCount + ' hardcoded isHidden(){return!0}');
+        ccpLog('  [unhide_features] exposed: ' + hardcodedCount + ' hardcoded isHidden(){return!0}');
         patched += hardcodedCount;
       }
 
@@ -49,7 +50,7 @@ export default {
       const bedrockRe = new RegExp(bedrockReSrc);
       if (bedrockRe.test(code)) {
         code = code.replace(bedrockRe, 'isHidden(){return!1}');
-        console.log('  [unhide_features] exposed: bedrock-gated');
+        ccpLog('  [unhide_features] exposed: bedrock-gated');
         patched++;
       }
 
@@ -66,7 +67,7 @@ export default {
       const pushRes = forceFeatureFlag(code, 'tengu_kairos_push_notifications', { allowMissing: true });
       if (pushRes.changed) {
         code = pushRes.code;
-        console.log('  [unhide_features] push notifications enabled (' + pushRes.fnName + ')');
+        ccpLog('  [unhide_features] push notifications enabled (' + pushRes.fnName + ')');
         patched++;
       }
 
@@ -82,14 +83,14 @@ export default {
       if (streamMatch) {
         const helper = streamMatch[1];
         code = code.replace(streamRe, helper + '("tengu_streaming_tool_execution2",!0)');
-        console.log('  [unhide_features] streaming tool execution enabled (' + helper + ')');
+        ccpLog('  [unhide_features] streaming tool execution enabled (' + helper + ')');
         patched++;
       }
 
       if (patched === 0) {
         console.warn('  [!] unhide_features: no matching patterns found --- CLI may have been updated');
       } else {
-        console.log('  [unhide_features] total: ' + patched + ' features exposed');
+        ccpLog('  [unhide_features] total: ' + patched + ' features exposed');
       }
       return code;
     }
