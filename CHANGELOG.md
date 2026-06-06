@@ -22,8 +22,12 @@ Accumulated across merge batches A, D, E, F (issues #1, #4–#15).
 - **`EXTENSIONS_API.md`** — developer reference for the patch extension API (#6).
 - **Nonce-gate on `__ccpInvokeTool`** — each tool invocation is authenticated with a per-session nonce; requests without a valid nonce are rejected (#9).
 - **Bridge auth structural test** — `tests/` covers the nonce handshake end-to-end without requiring a live patched CLI (#10).
+- **Two-tier build verbosity** — `--verbose` / `-v` (and `make patch-claude-code VERBOSE=1` / `CCPATCH_VERBOSE=1` / `--log-level=debug`) un-gates full per-patch and per-shim sub-chatter; the default build stays compact. Backed by a new `ccpLog()` sink in `runner/cli/style.mjs` that the patch shims emit incidental `[name] did X` lines through (`isVerbose()` / `setVerbose()`); `CCPATCH_LOG_LEVEL` carries the decision to the doctor pre-pass and any spawned child so they don't re-derive it from their own TTY.
 
 ### Changed
+
+- **Build output compact by default** — routine `make patch-claude-code` now shows phase headers, one ✨ line per patch, warnings, and the summary box; the per-patch prose description, the slow-patch `[~]` timing, allowlisted-overlap notices, and the doctor's full anchor table are demoted to `--verbose`. In compact mode the doctor prints a one-line health summary and surfaces the full table only when a patch is drifted/missing (showing just the offending rows). The duplicate `[ccpatch] profile=… patches=…` notice was dropped (already in the banner).
+- **Pinned Claude Code v2.1.167** — added the extracted bundle sha256 to `storage/known-shas.json`, so future builds of 2.1.167 fail-closed on a tampered bundle instead of falling back to a TOFU warning.
 
 - **CLI entry point refactored** — `bin/patch-cli.mjs` is now a thin router; business logic lives in the extracted `cmd-*.mjs` modules (#1, #8, #12).
 - **`structuredPatch` result cached** — repeated calls to the same source/target pair are served from an in-memory cache, cutting apply time on multi-patch profiles (#4, #5).

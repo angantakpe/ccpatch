@@ -54,6 +54,12 @@
       "sizeBytes": 16181948,
       "tarballIntegrity": "sha512-gqRw9XegRhh1fLUB8+/sTWzBpO2xvpdx0sF07lKIjUC3ZySolobu8k1pHlV1yMtK52yHw5BPWk/17yA9Qagvgg==",
       "source": "bun-native (extracted from claude.exe linux-x64)"
+    },
+    "2.1.167": {
+      "cliSha256": "ee9606c9ab2da684f312804286b59d2cd8fe55fc5712138e9183018974ffb7f2",
+      "sizeBytes": 16245218,
+      "tarballIntegrity": "sha512-j+8+aD9FRo4RVA8GPR86LPWS5OimAUpOXeaWBYSu66f9Y/s7jGelWOsdmuRC4dH2MYItMZ5JMCJAaunQX+eFIQ==",
+      "source": "bun-native (extracted from claude.exe linux-x64)"
     }
   }
 }
