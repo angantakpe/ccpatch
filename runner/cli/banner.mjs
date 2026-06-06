@@ -29,6 +29,31 @@ function clip(s, n) {
 }
 
 /**
+ * Render a compact single-line build status header for the build CLI.
+ *
+ * This is intentionally NOT a full box — scripts/print-banner.mjs already
+ * renders the project-level boxed overview at the make level.  Repeating a
+ * second box of the same shape would look copy-pasted.  Instead this emits a
+ * single styled line that reads as "build starting" metadata, visually distinct
+ * from the outer banner.
+ *
+ * Example (color):
+ *   ✨ ccpatch v2.1.167  ·  standard  ·  28 patches  →  cli.v2.1.167.patched.mjs
+ *
+ * @param {{ version?: string|null, profile?: string, patchCount?: number, outputName?: string }} opts
+ * @returns {string}
+ */
+export function renderBuildStatusHeader({ version = null, profile = 'default', patchCount = 0, outputName = '' } = {}) {
+  const dot = style.dim('  ·  ');
+  const arrow = style.dim('  →  ');
+  let line = style.bold(version ? `✨ ccpatch v${version}` : '✨ ccpatch');
+  line += dot + style.dim(profile || 'default');
+  line += dot + style.dim(`${patchCount} patch${patchCount === 1 ? '' : 'es'}`);
+  if (outputName) line += arrow + style.cyan(outputName);
+  return line;
+}
+
+/**
  * Render a rounded box with a title embedded in the top border and a list of
  * rows. Returns the multi-line string (no trailing newline).
  *
