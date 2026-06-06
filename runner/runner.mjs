@@ -1,8 +1,8 @@
-import { structuredPatch } from 'diff';
 import { PROJECT_ROOT } from './paths.mjs';
 import { validateManifest } from './manifest.mjs';
 import { resolveAt } from './at-selector.mjs';
 import { compileKind } from './patch-kinds.mjs';
+import { structuredPatch } from 'diff';
 import { diffSpansFromPatch, detectOverlapsInPhase } from './conflict.mjs';
 import { CoordinateFrame } from './coordinate-frame.mjs';
 import { fireHook } from './lifecycle.mjs';
@@ -143,6 +143,14 @@ export function detectAndRecordOverlaps(phaseTraces, frame, globalStrict, logger
       // Arch#1(b): decompose into per-hunk spans the SAME way strict mode does
       // (structuredPatch context:0 → diffSpansFromPatch) instead of a single
       // first-to-last-changed-byte envelope.
+      //
+      // Perf#4 NOTE: windowing this diff to the changed region (via a prefix/
+      // suffix scan) was tried and REVERTED — it diverges from the full-bundle
+      // result when a patch makes multiple edits within ONE long line, which is
+      // the norm in a minified bundle. diffSpansFromPatch is line-based, so a
+      // correct window would have to snap to line boundaries — and a minified
+      // line can be the whole bundle, yielding no savings. See the equivalence
+      // test in tests/conflict.test.mjs for the failing shape.
       const spResult = structuredPatch(t.name, t.name, t._preCode, t._effectiveCode, 'pre', 'post', { context: 0 });
       const raw = diffSpansFromPatch(t._preCode, spResult);
       t.diffSpans = frame.shiftToOriginal(raw, t._deltaBefore);

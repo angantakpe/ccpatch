@@ -4,10 +4,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { applyPatch } from 'diff';
+import { createPatch } from 'diff';
 
 import { applyNamedPatches } from '../runner/runner.mjs';
 import { parsePatchCliArgs, runRevert, runDiff } from '../runner/cli.mjs';
+import { REVERT_SIDECAR_VERSION } from '../runner/cli/sidecar.mjs';
 
 const silent = { log() {}, warn() {}, error() {} };
 
@@ -66,9 +67,9 @@ describe('applyNamedPatches — reverse diff capture', () => {
 
     let current = patched;
     for (const entry of captureReverse.slice().reverse()) {
-      const restored = applyPatch(current, entry.reverseDiff);
-      assert.notEqual(restored, false, `reverse-diff for ${entry.name} failed to apply`);
-      current = restored;
+      // v2: each record is an exact splice ({ at, removeLen, insert }).
+      const { at, removeLen, insert } = entry.splice;
+      current = current.slice(0, at) + insert + current.slice(at + removeLen);
     }
     assert.equal(sha256(current), sha256(ORIGINAL));
     assert.equal(current, ORIGINAL);
@@ -102,7 +103,7 @@ describe('ccpatch revert / diff — CLI round-trip', () => {
     const { code: patched } = await applyNamedPatches(ORIGINAL, patches, ['a', 'b'], silent, { captureReverse });
     fs.writeFileSync(patchedPath, patched, 'utf8');
     fs.writeFileSync(patchedPath + '.ccp-revert.json', JSON.stringify({
-      version: 1,
+      version: REVERT_SIDECAR_VERSION,
       timestamp: new Date().toISOString(),
       ccVersion: '0.0.0-test',
       inputSha256: sha256(ORIGINAL),
@@ -140,7 +141,7 @@ describe('ccpatch revert / diff — CLI round-trip', () => {
     const { code: patched } = await applyNamedPatches(ORIGINAL, patches, ['a', 'b'], silent, { captureReverse });
     fs.writeFileSync(patchedPath, patched, 'utf8');
     fs.writeFileSync(patchedPath + '.ccp-revert.json', JSON.stringify({
-      version: 1,
+      version: REVERT_SIDECAR_VERSION,
       timestamp: new Date().toISOString(),
       ccVersion: null,
       inputSha256: sha256(ORIGINAL),
@@ -164,6 +165,45 @@ describe('ccpatch revert / diff — CLI round-trip', () => {
     const aAdded = Number(aMatch[1]);
     const aRemoved = Number(aMatch[2]);
     assert.ok(aAdded > aRemoved, `expected a.added > a.removed, got ${aAdded}/${aRemoved}`);
+  });
+
+  it('revert reads legacy v1 reverseDiff-string sidecars (back-compat)', async () => {
+    const dir = tmpDir();
+    const patchedPath = path.join(dir, 'patched.mjs');
+    const patches = {
+      a: mkPatch((c) => c.replace('return 1;', 'return 11;')),
+      b: mkPatch((c) => c.replace('return 2;', 'return 22;')),
+    };
+    const captureReverse = [];
+    const { code: patched } = await applyNamedPatches(ORIGINAL, patches, ['a', 'b'], silent, { captureReverse });
+    fs.writeFileSync(patchedPath, patched, 'utf8');
+    // Synthesize an OLD v1 sidecar: unified-diff strings, no splice field.
+    const legacyPatches = captureReverse.map((e) => {
+      // Reconstruct the pre/post code states this record bridges.
+      const post = e.name === 'a' ? patched.replace('return 22;', 'return 2;') : patched;
+      const pre = e.name === 'a'
+        ? post.replace('return 11;', 'return 1;')
+        : post.replace('return 22;', 'return 2;');
+      return {
+        name: e.name,
+        reverseDiff: createPatch(e.name, post, pre, 'patched', 'original'),
+        preSha256: e.preSha256,
+        postSha256: e.postSha256,
+      };
+    });
+    fs.writeFileSync(patchedPath + '.ccp-revert.json', JSON.stringify({
+      version: 1,
+      timestamp: new Date().toISOString(),
+      ccVersion: '0.0.0-legacy',
+      inputSha256: sha256(ORIGINAL),
+      outputSha256: sha256(patched),
+      patches: legacyPatches,
+    }, null, 2), 'utf8');
+
+    const restoredPath = path.join(dir, 'restored.mjs');
+    const code = await runRevert({ patchedPath, outputPath: restoredPath }, silent);
+    assert.equal(code, 0, 'legacy v1 sidecar should revert cleanly');
+    assert.equal(fs.readFileSync(restoredPath, 'utf8'), ORIGINAL);
   });
 
   it('revert errors when sidecar is missing', async () => {

@@ -5,7 +5,12 @@
 import fs from 'node:fs';
 import { sha256 } from '../reverse-diff.mjs';
 
-export const REVERT_SIDECAR_VERSION = 1;
+// v2: records carry a minimal `splice` ({ at, removeLen, insert }) instead of a
+// full-bundle unified `reverseDiff` string (Perf#4). Readers accept BOTH so v1
+// sidecars produced by older builds still revert; the apply path branches per
+// record on which field is present, not on this header version.
+export const REVERT_SIDECAR_VERSION = 2;
+const SUPPORTED_SIDECAR_VERSIONS = new Set([1, 2]);
 
 export { sha256 };
 
@@ -43,8 +48,8 @@ export function readSidecar(patchedPath) {
   } catch (err) {
     return { error: `Sidecar ${sidecarPath} is not valid JSON: ${err.message}` };
   }
-  if (sidecar.version !== REVERT_SIDECAR_VERSION) {
-    return { error: `Sidecar version mismatch: expected ${REVERT_SIDECAR_VERSION}, got ${sidecar.version}` };
+  if (!SUPPORTED_SIDECAR_VERSIONS.has(sidecar.version)) {
+    return { error: `Sidecar version unsupported: got ${sidecar.version}, supported ${[...SUPPORTED_SIDECAR_VERSIONS].join(', ')}` };
   }
   if (!Array.isArray(sidecar.patches)) {
     return { error: `Sidecar at ${sidecarPath} has no patches[] array` };

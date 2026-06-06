@@ -21,9 +21,14 @@ function lineStartsFor(preCode) {
   if (cachedLineStartsCode === preCode && cachedLineStarts !== null) {
     return cachedLineStarts;
   }
+  // Perf#4: native String.indexOf is vectorised in V8 and scans a ~15MB bundle
+  // several times faster than a per-character charCodeAt loop. Each '\n' at
+  // index i starts a new line at i+1.
   const lineStarts = [0];
-  for (let i = 0; i < preCode.length; i++) {
-    if (preCode.charCodeAt(i) === 10 /* \n */) lineStarts.push(i + 1);
+  let idx = preCode.indexOf('\n');
+  while (idx !== -1) {
+    lineStarts.push(idx + 1);
+    idx = preCode.indexOf('\n', idx + 1);
   }
   cachedLineStartsCode = preCode;
   cachedLineStarts = lineStarts;
