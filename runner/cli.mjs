@@ -4,7 +4,7 @@ import path from 'node:path';
 import { HELP, USAGE, maybePrintSubcommandHelp } from './cli/help.mjs';
 import { buildCommandTable, namedSubcommands, DEFAULT_KEY } from './cli/commands.mjs';
 import { extractGlobalFlags, makeLogger } from './cli/logger.mjs';
-import { setVerbose } from './cli/style.mjs';
+import { setVerbose, isVerbose, style } from './cli/style.mjs';
 import { loadPatches } from './loader.mjs';
 import { resolveProfile, classifyRisk, CAPABILITIES } from './manifest.mjs';
 import { readProfiles, readPatchFlags } from './config.mjs';
@@ -140,6 +140,21 @@ export function parseBuildArgs(args) {
     if (args[i] === '--allow-unverified') {
       patchOptions.allowUnverified = true;
     }
+    // Sidecar / verify controls (shared with the Makefile targets). Reverse-diff
+    // capture is OPT-IN: the ~16MB sha256 per changed patch is the dominant build
+    // cost, so it only runs when --emit-revert is set (the release target passes
+    // it). --no-sidecar skips ALL sidecar writes (.sha256 + .ccp-revert.json) and
+    // --no-verify skips the verify literal scan; both are used by `make dev` to
+    // keep the inner edit loop fast.
+    if (args[i] === '--emit-revert') {
+      patchOptions.emitRevert = true;
+    }
+    if (args[i] === '--no-sidecar') {
+      patchOptions.noSidecar = true;
+    }
+    if (args[i] === '--no-verify') {
+      patchOptions.noVerify = true;
+    }
   }
   if (!patchOptions.strict && process.env.CCPATCH_STRICT === '1') {
     patchOptions.strict = true;
@@ -268,11 +283,44 @@ export async function runPatchCli(args, logger = console) {
   }
 
   // `--list` is a flag, not a table subcommand: it still needs patches loaded.
+  // Compact (default): one `name  description` line per patch. Verbose
+  // (--verbose / -v / VERBOSE=1 / --log-level=debug): a category-grouped roll-up
+  // that also surfaces the metadata you'd otherwise have to open each patch file
+  // to see — capabilities, and required/disabled status — so the listing matches
+  // the per-patch detail the build prints under VERBOSE.
   if (options.list) {
     const patches = await loadPatches({ version: pickLoadVersion(options) });
-    for (const name of Object.keys(patches).sort()) {
-      const desc = patches[name].description ?? '';
-      logger.log(`${name.padEnd(32)} ${desc}`);
+    const names = Object.keys(patches).sort();
+    if (!isVerbose()) {
+      for (const name of names) {
+        const desc = patches[name].description ?? '';
+        logger.log(`${name.padEnd(32)} ${desc}`);
+      }
+      return 0;
+    }
+    // Verbose: group by category so the listing reads like the patch catalog.
+    const byCategory = new Map();
+    for (const name of names) {
+      const cat = patches[name].category ?? 'uncategorized';
+      if (!byCategory.has(cat)) byCategory.set(cat, []);
+      byCategory.get(cat).push(name);
+    }
+    logger.log(`${style.bold(`${names.length} patches`)} ${style.dim(`· ${byCategory.size} categories`)}`);
+    for (const cat of [...byCategory.keys()].sort()) {
+      const group = byCategory.get(cat);
+      logger.log('');
+      logger.log(`${style.cyan(cat)} ${style.dim(`(${group.length})`)}`);
+      for (const name of group) {
+        const p = patches[name];
+        const tags = [];
+        if (p.required) tags.push('required');
+        if (p.enabled === false) tags.push('disabled');
+        const caps = Array.isArray(p.capabilities) ? p.capabilities : [];
+        if (caps.length) tags.push(caps.join('+'));
+        const meta = tags.length ? ` ${style.dim(`[${tags.join(' · ')}]`)}` : '';
+        logger.log(`  ${style.green(name)}${meta}`);
+        if (p.description) logger.log(`    ${style.dim(p.description)}`);
+      }
     }
     return 0;
   }
@@ -408,6 +456,7 @@ export async function runHealCommand(ctx) {
     for (const s of res.skipped) {
       logger.log(`  [skip] ${s.patch} (${s.id ?? '?'}): ${s.reason}`);
     }
+    if (res.nextLine) logger.log(res.nextLine);
     return 0;
   }
   if (options.write && res.wrote) {
@@ -418,6 +467,7 @@ export async function runHealCommand(ctx) {
       logger.log(`  [skip] ${s.patch} (${s.id ?? '?'}): ${s.reason}`);
     }
     logger.log(`[heal] applied ${res.changes.length} registry edit(s) to runner/anchors.mjs.`);
+    if (res.nextLine) logger.log(res.nextLine);
     return 0;
   }
   // Default: propose the diff on stdout. Informational lines go to the logger
@@ -427,6 +477,7 @@ export async function runHealCommand(ctx) {
   for (const s of res.skipped) {
     logger.log(`  [skip] ${s.patch} (${s.id ?? '?'}): ${s.reason}`);
   }
+  if (res.nextLine) logger.log(res.nextLine);
   return 0;
 }
 

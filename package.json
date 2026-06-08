@@ -51,6 +51,7 @@
   "workspaces": ["tools/reconstructor", "packages/adk"],
   "scripts": {
     "test:patches": "node --test tests/patch-verification.test.mjs",
+    "test:patch": "node -e \"const n=process.env.CCPATCH_TEST_PATCH;if(!n){console.error('test:patch: set CCPATCH_TEST_PATCH=<patch> (e.g. CCPATCH_TEST_PATCH=debug npm run test:patch)');process.exit(2)}const{spawnSync}=require('child_process');process.exit(spawnSync(process.execPath,['--test','--test-name-pattern','^'+n+'$','tests/patch-verification.test.mjs'],{stdio:'inherit'}).status||0)\"",
     "test:boot": "node --test tests/boot-smoke.test.mjs",
     "test:integration": "node tests/integration_roundtrip.mjs",
     "test:adk": "node --test packages/adk/tests/*.test.mjs",

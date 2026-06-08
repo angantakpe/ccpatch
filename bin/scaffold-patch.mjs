@@ -33,6 +33,7 @@ import { PROJECT_ROOT } from '../runner/paths.mjs';
 
 const REGISTRY_PATH = path.join(PROJECT_ROOT, 'tests/fixtures/registry.mjs');
 const REGISTRY_MARKER = '// ── scaffold-patch.mjs inserts new entries here ──';
+const MANIFEST_PATH = path.join(PROJECT_ROOT, 'ccpatch.yml');
 
 function parseArgs(argv) {
   const args = argv.slice(2);
@@ -278,20 +279,113 @@ function main(argv = process.argv) {
     console.log(`Appended fixture stub for "${opts.name}" to tests/fixtures/registry.mjs`);
   }
 
-  console.log(`Next: open it, fill in the TODOs, then dry-run JUST this patch:`);
+  const manifestStatus = registerInManifest(opts.name);
+  if (manifestStatus === 'wrote') {
+    console.log(`Registered "${opts.name}" in ccpatch.yml (DISABLED — enabled: false)`);
+  } else if (manifestStatus === 'exists') {
+    console.log(`Notice: "${opts.name}" already present in ccpatch.yml — left untouched`);
+  }
+
+  const name = opts.name;
+  console.log('');
+  console.log('Next steps:');
+  console.log(`  1. Edit the patch:    ${filePath}`);
+  console.log(
+    `     Fill in the TODO-marked anchor/body. Pick a STABLE string literal as the`
+  );
+  console.log(
+    `     anchor — see docs/finding-anchors.md (\`make beautify\` + grep for tengu_*`
+  );
+  console.log(
+    `     / error-message / env-var literals that survive minification).`
+  );
+  console.log(
+    `  2. Enable it:         in ccpatch.yml, set \`${name}: true\` under \`patches:\``
+  );
+  console.log(`     (it was registered as \`${name}: false\` — opt-in/disabled by default).`);
   // Two positionals are required (<input> <output>); a single `--patch` in the
   // output slot is rejected. We point the output at /tmp since --dry-run never
   // writes it. A lone --patch X --dry-run relaxes the capability-ack gate, but
   // --allow-unacked keeps it working even if you later drop --dry-run.
-  console.log(`  node bin/patch-cli.mjs <bundle> /tmp/${opts.name}-out.mjs --patch ${opts.name} --dry-run --allow-unacked`);
+  console.log(`  3. Dry-run JUST this patch:`);
+  console.log(
+    `       node bin/patch-cli.mjs <bundle> /tmp/${name}-out.mjs --patch ${name} --dry-run --allow-unacked`
+  );
+  console.log(`  4. Test just this patch:   make test-patch NAME=${name}`);
+  console.log(`  5. Check anchor health:    node bin/patch-cli.mjs doctor <bundle>`);
+  console.log(`     (a.k.a. \`ccpatch doctor\` — reports ok | drift | missing per patch)`);
   if (registryWrote) {
+    console.log('');
     console.log(
-      `Note: the Layer 1/2 verification tests will SKIP "${opts.name}" until you replace its\n` +
+      `Note: the Layer 1/2 verification tests will SKIP "${name}" until you replace its\n` +
       `      null fixture in tests/fixtures/registry.mjs with a real anchor-bearing fragment\n` +
       `      (so \`make test-patches\` does not silently pass it as skipped).`
     );
   }
   return 0;
+}
+
+/**
+ * Append a new patch entry to the `patches:` map in ccpatch.yml, defaulting to
+ * DISABLED. Uses the `name: false` shorthand that every other opt-in entry in
+ * the manifest already uses (see docs/manifest-reference.md), so the result is
+ * valid YAML and matches the surrounding style.
+ *
+ * Idempotent: if a `<name>:` key already exists anywhere in the manifest, the
+ * append is skipped and `false` is returned so the caller can print a notice.
+ *
+ * Returns one of:
+ *   'wrote'   — entry appended
+ *   'exists'  — a key for this patch already exists; skipped
+ *   'missing' — ccpatch.yml or its `patches:` section could not be found
+ *
+ * @param {string} name
+ * @returns {'wrote'|'exists'|'missing'}
+ */
+function registerInManifest(name) {
+  if (!fs.existsSync(MANIFEST_PATH)) {
+    console.warn(`  [warn] ${MANIFEST_PATH} not found — skipping manifest registration`);
+    return 'missing';
+  }
+  const src = fs.readFileSync(MANIFEST_PATH, 'utf8');
+  const lines = src.split('\n');
+
+  // Idempotency: bail if a key for this patch already exists (either the
+  // `name:` long form or the `name: <value>` shorthand), at any indentation.
+  const keyRe = new RegExp(`^\\s*${name}\\s*:`, 'm');
+  if (keyRe.test(src)) return 'exists';
+
+  // Locate the `patches:` block and the first subsequent top-level key (a line
+  // starting in column 0 that is not a comment/blank), which bounds the map.
+  const patchesIdx = lines.findIndex((l) => /^patches:\s*$/.test(l));
+  if (patchesIdx === -1) {
+    console.warn(`  [warn] no \`patches:\` section in ccpatch.yml — skipping manifest registration`);
+    return 'missing';
+  }
+  let endIdx = lines.length;
+  for (let i = patchesIdx + 1; i < lines.length; i++) {
+    if (/^[^\s#]/.test(lines[i])) { endIdx = i; break; }
+  }
+  // Back up past trailing blank lines AND any contiguous comment block that
+  // precedes the next top-level key — that block (e.g. the `# Profiles —` banner)
+  // documents the FOLLOWING section, not the patches map, so we must insert
+  // before it to keep the new entry attached to the map and the banner intact.
+  let insertAt = endIdx;
+  while (
+    insertAt > patchesIdx + 1 &&
+    (lines[insertAt - 1].trim() === '' || /^\s*#/.test(lines[insertAt - 1]))
+  ) {
+    insertAt--;
+  }
+
+  const entry = [
+    '',
+    '  # ── Scaffolded (disabled by default — flip to `true` to enable) ──────────────',
+    `  ${name}: false           # TODO: describe what this patch does`,
+  ];
+  lines.splice(insertAt, 0, ...entry);
+  fs.writeFileSync(MANIFEST_PATH, lines.join('\n'), 'utf8');
+  return 'wrote';
 }
 
 /**

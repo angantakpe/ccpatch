@@ -9,11 +9,27 @@
 // This script computes that file's sha256 and gates it against a pinned
 // registry (storage/known-shas.json) BEFORE any patching happens.
 //
-// Policy:
+// Trust hierarchy (strongest signal wins; CCPATCH_SKIP_SHA_CHECK only ever
+// waives the WEAKER checks, never an explicit operator pin):
+//   1. --expect-sha256 (out-of-band operator pin) — STRONGEST. A mismatch here
+//      ALWAYS fails closed, even with CCPATCH_SKIP_SHA_CHECK=1. An explicit pin
+//      is an authenticity assertion the operator made by hand; an env var must
+//      not be able to silently waive it.
+//   2. KNOWN version + registry sha — match -> proceed; mismatch -> fail closed
+//      (SKIP may waive this, loudly and unsafely).
+//   3. UNKNOWN version (not pinned) — TOFU. Requires a tarball-integrity check
+//      against the npm registry (see verifyTarball); if no --tarball-integrity
+//      was supplied, fail closed (SKIP may waive it, loudly). On success, a
+//      single TOFU notice; proceed so new versions still work.
+//
+// Summary:
+//   - --expect-sha256 MATCH        -> exit 0 (proceed)
+//   - --expect-sha256 MISMATCH     -> FAIL CLOSED, exit 1 (NOT waivable by SKIP)
 //   - KNOWN version + sha MATCH    -> exit 0 (proceed)
-//   - KNOWN version + sha MISMATCH -> FAIL CLOSED, exit 1 (loud error)
-//   - UNKNOWN version (not pinned) -> TOFU warning, exit 0 (new versions still work)
-//   - CCPATCH_SKIP_SHA_CHECK=1     -> intentional bypass, exit 0 (loud warning)
+//   - KNOWN version + sha MISMATCH -> FAIL CLOSED, exit 1 (SKIP waives -> exit 0)
+//   - UNKNOWN version, tarball OK  -> TOFU notice, exit 0
+//   - UNKNOWN version, no tarball  -> FAIL CLOSED, exit 1 (SKIP waives -> exit 0)
+//   - CCPATCH_SKIP_SHA_CHECK=1     -> waives the weaker checks only (loud warning)
 //
 // Usage:
 //   node scripts/verify-bundle-sha.mjs <cli.js> --version <x.y.z>
@@ -131,8 +147,7 @@ function loadRegistry(path) {
 }
 
 function pinHint() {
-  return `  Run \`ccpatch pin ${version || '<x.y.z>'}\` to record this sha and suppress future TOFU warnings.\n` +
-    `  (To see the raw JSON entry, add --verbose to that command.)`;
+  return `run \`ccpatch pin ${version || '<x.y.z>'}\` to record it`;
 }
 
 async function main() {
@@ -145,11 +160,14 @@ async function main() {
   if (expectSha256) {
     if (!/^[0-9a-f]{64}$/i.test(expectSha256)) usage('--expect-sha256 must be a 64-char hex sha256.');
     if (computed.toLowerCase() !== expectSha256.toLowerCase()) {
-      if (SKIP) { warn(`--expect-sha256 MISMATCH but CCPATCH_SKIP_SHA_CHECK=1 set — proceeding.`); return done(); }
+      // An explicit out-of-band pin is the strongest authenticity signal there
+      // is. It is NOT waivable by CCPATCH_SKIP_SHA_CHECK — SKIP only relaxes the
+      // weaker registry/TOFU checks. A mismatch here always fails closed.
       fail(`--expect-sha256 MISMATCH for ${target}\n` +
         `  expected: ${expectSha256}\n` +
         `  computed: ${computed}\n` +
-        `  Refusing to patch a bundle that does not match the out-of-band pin.`);
+        `  Refusing to patch a bundle that does not match the out-of-band pin.\n` +
+        `  (This explicit pin is NOT waivable by CCPATCH_SKIP_SHA_CHECK.)`);
     }
     info(`bundle sha256 OK (verified against out-of-band --expect-sha256): ${computed}`);
     return done();
@@ -161,12 +179,27 @@ async function main() {
   const pinned = versions[version];
 
   if (!pinned) {
-    // TOFU: unknown/new version — warn loudly, but proceed so new versions work.
-    // The npm tarball sha512-vs-registry check already ran above (primary defense).
-    warn(`TOFU: v${version} is not yet pinned — tarball integrity already verified against npm registry.`);
-    warn(`  bundle sha256: ${computed}  (${size} bytes)`);
-    process.stderr.write(pinHint() + '\n');
-    warn(`Proceeding. Run \`ccpatch pin ${version}\` to suppress this warning on future builds.`);
+    // TOFU: unknown/new version. There is no registry sha and no --expect-sha256
+    // to vouch for this bundle, so the ONE remaining authenticity anchor is the
+    // npm tarball integrity (sha512-vs-registry, verified in verifyTarball). It
+    // is therefore MANDATORY here: accepting an unverified ~16MB blob on disk
+    // with zero checks is not TOFU, it's blind trust. Fail closed if it's absent.
+    if (!tarballIntegrity) {
+      if (SKIP) {
+        warn(`TOFU: v${version} is unpinned and no --tarball-integrity given, but CCPATCH_SKIP_SHA_CHECK=1 — proceeding UNVERIFIED.`);
+        warn(`  bundle sha256: ${computed}  (${size} bytes) — NOT authenticated against any source.`);
+        return done();
+      }
+      fail(`TOFU: v${version} is not pinned and has NO integrity anchor.\n` +
+        `  bundle:   ${target}\n` +
+        `  sha256:   ${computed}  (${size} bytes)\n` +
+        `  A brand-new version must be verified against the npm registry on first use.\n` +
+        `  Re-run with --tarball <tgz> --tarball-integrity <sha512-...> (from \`npm pack --json\`),\n` +
+        `  or pass an out-of-band --expect-sha256 pin. Refusing to patch an unverified bundle.`);
+    }
+    // tarball integrity already verified above (verifyTarball fails closed on
+    // mismatch) — this is genuine TOFU: accepted on first use, record it to pin.
+    info(`TOFU: v${version} unpinned, tarball integrity OK — proceeding. sha256 ${computed.slice(0, 16)}… · ${pinHint()}`);
     return done();
   }
 

@@ -175,6 +175,15 @@ patches). They are **intentionally not pre-acked** — selecting one still force
 explicit per-capability acknowledgement of its `tools`/`network`/`telemetry`
 patches, so standing up the bridge is always a deliberate, auditable act.
 
+**The capability gate protects BUILD time, not RUNTIME.** The gate decides
+*whether a patch is allowed into the bundle*; it does nothing once the bundle is
+running. In particular, running the patched bundle with
+`--dangerously-skip-permissions` means patched tool-dispatch code runs with **no
+runtime allow/deny prompts at all** — the bundle you acknowledged at build time
+then executes its tool calls unprompted. Acknowledging a `tools`/`exec`/`network`
+capability is a build-time decision; it is not a substitute for the runtime
+permission prompts that `--dangerously-skip-permissions` removes.
+
 ## Dangerous combinations & full-bypass flags
 
 The per-patch table treats each patch in isolation, but some combinations are
@@ -369,6 +378,35 @@ Three options, any of them is fine:
 - Use `--profile minimal` _(coming)_ to apply only `core/` infrastructure and bug fixes.
 
 To audit what was actually injected, run `node bin/patch-cli.mjs <input.js> /tmp/out.js --dry-run` and read the diff.
+
+---
+
+## Output `.sha256` sidecar: integrity, not authenticity
+
+Every build writes a `.sha256` sidecar next to the patched bundle
+(`<output>.sha256`, see `runner/cli/cmd-build.mjs`). It records the sha256 of
+the bytes ccpatch just wrote, and the build re-reads the file to confirm it
+landed on disk uncorrupted.
+
+**This sidecar provides INTEGRITY (corruption detection), NOT AUTHENTICITY.**
+It is a self-computed hash written next to a self-written file: anyone who can
+tamper with the bundle can also rewrite the sidecar to match. It is **not a
+cryptographic signature** and does **not** protect against a local attacker —
+or any process — that can write to the output directory. Its sole job is to
+catch **accidental corruption** (a truncated write, a bad disk, a botched
+copy), so a downstream consumer can detect that the bundle no longer matches
+what the build produced. Treat a matching sidecar as "these bytes are intact",
+never as "these bytes are trustworthy".
+
+This is a deliberately weaker guarantee than the **INPUT bundle TOFU pinning**
+(`storage/known-shas.json`, the `ccpatch pin` subcommand, and
+`scripts/verify-bundle-sha.mjs`). That registry pins the sha256 of the *input*
+Claude Code bundle out-of-band and is **fail-closed**: re-pinning a different
+sha for a known version is **refused** unless you pass `--force`, so an upstream
+bundle that silently changes under a known version is caught. Trust-on-first-use
+pinning of a known-good input hash is a real (if first-use-bounded) authenticity
+control on what goes *into* the build; the output `.sha256` sidecar is only an
+intactness check on what comes *out*. Do not conflate the two.
 
 ---
 

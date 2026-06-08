@@ -3,26 +3,39 @@ export default {
 
   description: 'Load project .env into process.env before any other patch runs (variables already set in shell take precedence)',
   // SECURITY: a project-local .env is attacker-controllable input (it ships in
-  // any repo you clone/open). To stop a repo from silently standing up the
-  // bridge or repointing API traffic, the loader REFUSES to set the following
-  // security-critical keys from .env (shell-set values are unaffected):
-  //   - CC_BRIDGE_TOKEN, CC_BRIDGE_ADDR   (would stand up / configure the bridge)
-  //   - ANTHROPIC_BASE_URL                (would repoint API traffic to an MITM)
-  //   - ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN (credential override)
-  //   - CC_WEBHOOK_URL                    (would set an egress/exfil target)
-  //   - CC_PROJECT_ROOT                   (would redirect where conversations/
-  //                                        cache are written — path traversal)
-  //   - CLAUDE_CODE_OAUTH_TOKEN           (credential override)
-  //   - CC_SAVE_CONVERSATIONS, CC_CACHE_RESPONSES, CLAUDE_CACHE
-  //                                        (would silently enable disk capture
-  //                                        of conversation/response data)
-  //   - any CC_*TOKEN                     (bridge / integration tokens,
-  //                                        including bare CC_TOKEN)
-  //   - CLERK_SECRET_KEY, DATABASE_URL, REDIS_URL, OPENAI_API_KEY,
-  //     GITHUB_TOKEN, AWS_SECRET_ACCESS_KEY, AWS_ACCESS_KEY_ID
-  //                                        (credential injection via
-  //                                        hostile repo .env)
-  // A blocked key found in .env is skipped and a warning is emitted.
+  // any repo you clone/open). A denylist loses by construction — a hostile .env
+  // can inject ANY key that is not on the list (OPENAI_API_KEY, arbitrary
+  // MCP-server creds, CLAUDE_DEBUG=1, ...) straight into the user's Claude Code
+  // process. So this loader is FAIL-CLOSED: it uses an ALLOWLIST and refuses to
+  // set anything not explicitly permitted (shell-set values are unaffected).
+  //
+  // The allowlist is intentionally restrictive. It contains only the benign
+  // runtime configuration knobs that ccpatch's own extensions legitimately read
+  // from the environment (verified by grepping process.env reads across
+  // extensions/), namely:
+  //   - the CC_* family the extensions consume (thinking/pricing/effort/etc.)
+  //     EXCEPT the dangerous CC_* keys, which stay blocked even though they
+  //     match the CC_* prefix (see __envDenyCC below):
+  //       CC_BRIDGE_*            (would stand up / configure / weaken the bridge)
+  //       CC_WEBHOOK_URL         (would set an egress/exfil target)
+  //       CC_PROJECT_ROOT        (would redirect where conversations/cache are
+  //                               written — path traversal)
+  //       CC_SAVE_CONVERSATIONS, CC_CACHE_RESPONSES
+  //                              (would silently enable disk capture of data)
+  //       any CC_*TOKEN          (bridge / integration tokens, incl. bare CC_TOKEN)
+  //   - a small set of known-safe app/display vars (model display, retry/rate
+  //     tuning, NO_COLOR/FORCE_COLOR).
+  //
+  // Deliberately NOT on the allowlist (fail-closed by default, called out for
+  // clarity): ANTHROPIC_* (base-url repoint / credential override / model
+  // selection); ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, CLAUDE_CODE_OAUTH_TOKEN
+  // (credentials); CLAUDE_CACHE (disk capture); CLAUDE_DEBUG (writes a debug log
+  // to disk); NODE_OPTIONS / NODE_PATH / PATH / NODE_DEBUG (code-exec / lookup
+  // shadowing); and every third-party credential (OPENAI_API_KEY, GITHUB_TOKEN,
+  // DATABASE_URL, REDIS_URL, CLERK_SECRET_KEY, AWS_*, ...). Anything not named
+  // here is refused regardless of how it is spelled.
+  //
+  // Skipped keys are reported once via a single deduplicated stderr warning.
   capabilities: ["env","fs"],
   // No dependsOn — runs LAST in patch order (moved to end of PATCH list in vars.mk)
   // so it is applied after all other patches. Its hook injects BEFORE the first
@@ -52,36 +65,40 @@ if (!globalThis.__ccpDotenvLoaded) {
       if (!__fs.existsSync(__envPath)) return;
       var __raw = __fs.readFileSync(__envPath, 'utf8');
       var __lines = __raw.split('\\n');
-      // SECURITY: security-critical keys must never be settable from a
-      // repo-local .env (see file header). Exact-match denylist + a pattern
-      // for any CC_*_TOKEN. Shell-set values are unaffected (handled below).
-      var __envDeny = {
-        'CC_BRIDGE_TOKEN': 1, 'CC_BRIDGE_ADDR': 1, 'ANTHROPIC_BASE_URL': 1,
-        'ANTHROPIC_API_KEY': 1, 'ANTHROPIC_AUTH_TOKEN': 1, 'CC_WEBHOOK_URL': 1,
-        'CC_PROJECT_ROOT': 1, 'CLAUDE_CODE_OAUTH_TOKEN': 1,
-        'CC_SAVE_CONVERSATIONS': 1, 'CC_CACHE_RESPONSES': 1, 'CLAUDE_CACHE': 1,
-        // blocks --require / --inspect injection via hostile .env (arbitrary code execution)
-        'NODE_OPTIONS': 1,
-        // blocks module-resolution shadowing via hostile .env
-        'NODE_PATH': 1,
-        // blocks executable-lookup shadowing via hostile .env
-        'PATH': 1,
-        // blocks runtime-behaviour changes via hostile .env
-        'NODE_DEBUG': 1,
-        // blocks credential injection via hostile repo .env
-        'CLERK_SECRET_KEY': 1,
-        'DATABASE_URL': 1,
-        'REDIS_URL': 1,
-        'OPENAI_API_KEY': 1,
-        'GITHUB_TOKEN': 1,
-        'AWS_SECRET_ACCESS_KEY': 1,
-        'AWS_ACCESS_KEY_ID': 1,
+      // SECURITY: FAIL-CLOSED allowlist (see file header). Only keys that are
+      // (a) explicitly named below, OR (b) match the CC_* prefix the extensions
+      // legitimately use AND are not in the dangerous-CC_* deny subset, are
+      // loaded from .env. Everything else is refused. Shell-set values are
+      // unaffected (handled below).
+      var __envAllow = {
+        // benign CC_* runtime knobs consumed by ccpatch extensions
+        'CC_DEBUG': 1, 'CC_THINKING': 1, 'CC_THINKING_BUDGET': 1,
+        'CC_EFFORT_LEVEL': 1, 'CC_PRICING_INPUT': 1, 'CC_PRICING_OUTPUT': 1,
+        'CC_WORKSPACE': 1, 'CC_RATE_LIMIT_PATCH_ENABLED': 1,
+        // known-safe app/display vars
+        'CLAUDE_MODEL': 1, 'CLAUDE_MODEL_DISPLAY': 1, 'MAX_THINKING_TOKENS': 1,
+        'CLAUDE_RATE_LIMIT': 1, 'CLAUDE_MAX_RETRIES': 1,
+        'CLAUDE_MAX_RETRY_AFTER_MS': 1, 'NO_COLOR': 1, 'FORCE_COLOR': 1,
       };
-      var __isBlocked = function(k) {
-        if (__envDeny[k]) return true;
-        if (/^CC_[A-Z0-9_]*TOKEN$/.test(k)) return true;
+      // Dangerous CC_* keys: blocked even though they match the CC_* prefix.
+      var __envDenyCC = {
+        'CC_BRIDGE_TOKEN': 1, 'CC_BRIDGE_TOKEN_FILE': 1, 'CC_BRIDGE_ADDR': 1,
+        'CC_BRIDGE_ALLOW_PUBLIC': 1, 'CC_BRIDGE_MAX_LINE': 1,
+        'CC_BRIDGE_TOOL_ALLOWLIST': 1, 'CC_WEBHOOK_URL': 1, 'CC_PROJECT_ROOT': 1,
+        'CC_SAVE_CONVERSATIONS': 1, 'CC_CACHE_RESPONSES': 1,
+      };
+      var __isAllowed = function(k) {
+        if (__envAllow[k]) return true;
+        // CC_* prefix family, minus the dangerous CC_* keys and any CC_*TOKEN.
+        if (/^CC_[A-Z0-9_]+$/.test(k)) {
+          if (__envDenyCC[k]) return false;
+          if (/TOKEN$/.test(k)) return false;
+          return true;
+        }
         return false;
       };
+      var __skipped = [];
+      var __skippedSeen = {};
       for (var __i = 0; __i < __lines.length; __i++) {
         var __line = __lines[__i].trim();
         if (!__line || __line.charAt(0) === '#') continue;
@@ -97,9 +114,9 @@ if (!globalThis.__ccpDotenvLoaded) {
             __val = __val.slice(1, -1);
           }
         }
-        // SECURITY: refuse to set security-critical keys from .env.
-        if (__isBlocked(__key)) {
-          process.stderr.write('[dotenv_loader] refusing to set security-critical key from .env: ' + __key + ' (set it in the shell if you really mean it)\\n');
+        // SECURITY: fail-closed — only load keys on the allowlist.
+        if (!__isAllowed(__key)) {
+          if (!__skippedSeen[__key]) { __skippedSeen[__key] = 1; __skipped.push(__key); }
           continue;
         }
         // Don't override values already set in the shell
@@ -107,10 +124,19 @@ if (!globalThis.__ccpDotenvLoaded) {
           process.env[__key] = __val;
         }
       }
+      // SECURITY INVARIANT: never emit a secret VALUE. Every write below logs
+      // only KEY NAMES (__skipped), a file path (__envPath), or an fs/parse
+      // error message — __val is never interpolated into any output, on any
+      // path. The loaded-value array (__val) stays inside process.env only.
+      if (__skipped.length) {
+        process.stderr.write('[dotenv_loader] refused ' + __skipped.length + ' key(s) from .env not on the allowlist (set them in the shell if you really mean it): ' + __skipped.join(', ') + '\\n');
+      }
       if (process.env.CC_DEBUG) {
         process.stderr.write('[dotenv_loader] loaded ' + __envPath + '\\n');
       }
     } catch (__envErr) {
+      // __envErr.message comes from fs/path ops here and never carries a .env
+      // value (values are not interpolated into any throw above).
       if (process.env.CC_DEBUG) process.stderr.write('[dotenv_loader] error: ' + (__envErr && __envErr.message) + '\\n');
     }
   })();

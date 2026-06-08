@@ -191,7 +191,7 @@ export const USAGE =
   '  node patch-cli.mjs module verify <name>\n' +
   '  node patch-cli.mjs module update <name>\n' +
   '  node patch-cli.mjs outputs clear [--force] [--rotate <KB>]\n' +
-  '  node patch-cli.mjs --list\n' +
+  '  node patch-cli.mjs --list [--verbose]   (--verbose groups by category, adds capabilities + required/disabled tags)\n' +
   '\n' +
   'Global options: --log-level=silent|error|warn|info|debug   --quiet   --verbose   --json   --help\n' +
   '  --paranoid          Strict mode: surface normally-swallowed fetch-subscriber errors loudly\n' +

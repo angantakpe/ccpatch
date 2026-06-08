@@ -1,0 +1,266 @@
+name: drift-canary
+
+# Forward-looking drift radar. drift-check.yml is the nightly @latest leading
+# indicator that BLOCKS and opens an issue on failure. This canary goes one
+# step further out on the timeline: it probes the UNRELEASED dist-tags
+# (`next`/prerelease) in ADDITION to `latest`, so anchor drift is caught against
+# a Claude Code build BEFORE it is promoted to stable and a user hits it.
+#
+# Design choices, matching the existing radars:
+#   - Same install/extraction path as drift-check.yml: `npm i -g
+#     @anthropic-ai/claude-code@<tag>` then read cli.js out of `npm root -g`,
+#     falling back to `make extract-from-binary` when only a native binary ships.
+#   - Same read-only health check: `ccpatch doctor` (node bin/patch-cli.mjs
+#     doctor). doctor exits non-zero ONLY on MISSING anchors; DRIFT is a soft
+#     signal surfaced via storage/outputs/anchor-drift.jsonl. We capture both.
+#   - Drift does NOT hard-fail the pipeline. The canary's job is to SIGNAL, not
+#     to gate (gating is version-matrix.yml on PRs and drift-check.yml on main).
+#     We surface status via the step summary, workflow annotations, and a
+#     deduplicated GitHub issue (scheduled runs only).
+#
+# The `next` leg is skipped cleanly (not failed) when no distinct prerelease
+# dist-tag exists, since a prerelease is not always published.
+
+on:
+  schedule:
+    # Nightly at 05:30 UTC — staggered ~30m before drift-check.yml (06:00) so
+    # the two radars don't contend for the same runner window.
+    - cron: '30 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: drift-canary
+  cancel-in-progress: true
+
+jobs:
+  # Resolve the dist-tags up front so the matrix probes each unique published
+  # version exactly once. `npm view <pkg> dist-tags --json` returns e.g.
+  # { "latest": "2.1.151", "next": "2.2.0-rc.1" }. We always include `latest`
+  # (the canary's baseline) and add `next` only when it points at a DIFFERENT
+  # version, so a stale/duplicate `next` tag doesn't double the work.
+  resolve-tags:
+    runs-on: ubuntu-latest
+    outputs:
+      targets: ${{ steps.tags.outputs.targets }}
+    steps:
+      - id: tags
+        name: Resolve claude-code dist-tags
+        run: |
+          DIST_JSON="$(npm view @anthropic-ai/claude-code dist-tags --json)"
+          echo "dist-tags: $DIST_JSON"
+          TARGETS=$(node -e "
+            const dt = JSON.parse(process.argv[1] || '{}');
+            const out = [];
+            const seen = new Set();
+            // Always probe the @latest baseline.
+            if (dt.latest) { out.push({ tag: 'latest', version: dt.latest }); seen.add(dt.latest); }
+            // Probe candidate prerelease channels if they point somewhere new.
+            for (const tag of ['next', 'rc', 'beta', 'canary']) {
+              const v = dt[tag];
+              if (v && !seen.has(v)) { out.push({ tag, version: v }); seen.add(v); }
+            }
+            process.stdout.write(JSON.stringify(out));
+          " "$DIST_JSON")
+          echo "Resolved targets: $TARGETS"
+          echo "targets=$TARGETS" >> "$GITHUB_OUTPUT"
+
+  canary:
+    needs: resolve-tags
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.resolve-tags.outputs.targets) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install claude-code CLI (@${{ matrix.target.tag }})
+        run: |
+          npm i -g "@anthropic-ai/claude-code@${{ matrix.target.tag }}"
+          CC_VERSION="$(npm ls -g @anthropic-ai/claude-code --depth=0 --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);process.stdout.write(j.dependencies["@anthropic-ai/claude-code"].version)})')"
+          echo "CC_VERSION=${CC_VERSION}" >> "$GITHUB_ENV"
+          echo "CC_TAG=${{ matrix.target.tag }}" >> "$GITHUB_ENV"
+          echo "Installed claude-code @${{ matrix.target.tag }} -> version: ${CC_VERSION}"
+
+      - name: Locate installed claude-code bundle
+        run: |
+          CC_BIN="$(npm root -g)/@anthropic-ai/claude-code"
+          if [ -f "${CC_BIN}/cli.js" ]; then
+            echo "CC_BUNDLE=${CC_BIN}/cli.js" >> "$GITHUB_ENV"
+          elif [ -f "${CC_BIN}/cli.mjs" ]; then
+            echo "CC_BUNDLE=${CC_BIN}/cli.mjs" >> "$GITHUB_ENV"
+          else
+            echo "::warning::cli.js/cli.mjs not found under ${CC_BIN}; extracting from native binary"
+            make extract-from-binary VERSION="${CC_VERSION}"
+            echo "CC_BUNDLE=storage/archives/claude-code-v${CC_VERSION}/cli.v${CC_VERSION}.cjs" >> "$GITHUB_ENV"
+          fi
+
+      - name: Run doctor against @${{ matrix.target.tag }} (v${{ env.CC_VERSION }})
+        id: doctor
+        run: |
+          set +e
+          node bin/patch-cli.mjs doctor "$CC_BUNDLE" --version "$CC_VERSION" > /tmp/doctor.out 2>&1
+          STATUS=$?
+          cat /tmp/doctor.out
+          echo "STATUS=$STATUS" >> "$GITHUB_OUTPUT"
+          DRIFT_COUNT=$(grep -c "^  DRIFT" /tmp/doctor.out || true)
+          MISSING_COUNT=$(grep -c "^  MISSING" /tmp/doctor.out || true)
+          echo "DRIFT_COUNT=$DRIFT_COUNT" >> "$GITHUB_OUTPUT"
+          echo "MISSING_COUNT=$MISSING_COUNT" >> "$GITHUB_OUTPUT"
+          # Canary signals, it does not gate: never exit non-zero on drift/missing.
+          exit 0
+
+      - name: Summarise canary result
+        if: always()
+        run: |
+          TAG="${{ matrix.target.tag }}"
+          VER="${CC_VERSION:-${{ matrix.target.version }}}"
+          DRIFT="${{ steps.doctor.outputs.DRIFT_COUNT }}"
+          MISSING="${{ steps.doctor.outputs.MISSING_COUNT }}"
+          if [ "${DRIFT:-0}" != "0" ] || [ "${MISSING:-0}" != "0" ]; then
+            echo "::warning::canary @${TAG} (v${VER}): drift=${DRIFT:-0} missing=${MISSING:-0}"
+            {
+              echo "### ⚠️ drift-canary @${TAG} — v${VER}"
+              echo ""
+              echo "- missing anchors: \`${MISSING:-0}\`"
+              echo "- drifted anchors: \`${DRIFT:-0}\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### ✅ drift-canary @${TAG} — v${VER}: no drift" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload anchor-drift log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-anchor-drift-${{ env.CC_VERSION }}
+          path: storage/outputs/anchor-drift.jsonl
+          if-no-files-found: ignore
+
+      # Open/update a GitHub issue when this canary leg detects drift or missing
+      # anchors. Scheduled runs only — manual `workflow_dispatch` probes should
+      # not file issues. Dedup is by a stable, version-scoped title so a
+      # recurring nightly canary UPDATES the same issue (a comment) rather than
+      # spamming a new one each night. Body shape mirrors ISSUE_TEMPLATE/drift.yml.
+      - name: Report drift via GitHub issue
+        if: >-
+          always()
+          && github.event_name == 'schedule'
+          && (steps.doctor.outputs.DRIFT_COUNT != '0' || steps.doctor.outputs.MISSING_COUNT != '0')
+        uses: actions/github-script@v7
+        env:
+          CC_VERSION: ${{ env.CC_VERSION }}
+          CC_TAG: ${{ matrix.target.tag }}
+          DRIFT_COUNT: ${{ steps.doctor.outputs.DRIFT_COUNT }}
+          MISSING_COUNT: ${{ steps.doctor.outputs.MISSING_COUNT }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          script: |
+            const fs = require('fs');
+            const version = process.env.CC_VERSION || 'unknown';
+            const tag = process.env.CC_TAG || 'unknown';
+            const drift = process.env.DRIFT_COUNT || '0';
+            const missing = process.env.MISSING_COUNT || '0';
+            const runUrl = process.env.RUN_URL;
+
+            // Stable, version-scoped title => one issue per CC version, updated
+            // (commented) on subsequent nightly runs rather than re-opened.
+            const titlePrefix = 'Canary drift against unreleased claude-code';
+            const title = `${titlePrefix} ${version}`;
+
+            // Pull doctor's drift entries for this version from the JSONL so the
+            // body names the specific patches + closest fuzzy candidates,
+            // matching ISSUE_TEMPLATE/drift.yml fields.
+            let driftBlock = '';
+            const affectedPatches = [];
+            try {
+              const raw = fs.readFileSync('storage/outputs/anchor-drift.jsonl', 'utf8');
+              const lines = raw.trim().split('\n').filter(Boolean).map(l => {
+                try { return JSON.parse(l); } catch { return null; }
+              }).filter(Boolean);
+              const recent = lines.filter(e => e.source === 'doctor' && e.version === version);
+              const byPatch = new Map();
+              for (const e of recent) byPatch.set(e.patch, e);
+              if (byPatch.size > 0) {
+                const out = ['', '### Doctor output for the affected patch(es)', ''];
+                for (const e of byPatch.values()) {
+                  affectedPatches.push(e.patch);
+                  out.push(`**\`${e.patch}\`** — ${e.status}${e.detail ? `: ${e.detail}` : ''}`);
+                  if (e.verify_failed?.length) {
+                    for (const f of e.verify_failed.slice(0, 3)) out.push(`- ${f}`);
+                  }
+                  if (e.candidates?.length) {
+                    const c = e.candidates[0];
+                    out.push(`- Top candidate (score ${c.score.toFixed(2)}, from ${c.source}) @ offset ${c.offset}:`);
+                    out.push('  ```');
+                    out.push('  ' + (c.snippet || '').replace(/`/g, "'"));
+                    out.push('  ```');
+                  }
+                  out.push('');
+                }
+                driftBlock = out.join('\n');
+              }
+            } catch { /* no jsonl — fall through */ }
+
+            const patchList = affectedPatches.length
+              ? affectedPatches.map(p => `\`${p}\``).join(', ')
+              : '_see doctor output / workflow logs_';
+
+            const body = [
+              `The nightly **drift-canary** detected anchor drift against an`,
+              `unreleased/at-the-edge Claude Code build, BEFORE it reached users.`,
+              ``,
+              `- Upstream Claude Code version: \`${version}\` (dist-tag \`@${tag}\`)`,
+              `- missing anchors: \`${missing}\``,
+              `- drifted anchors: \`${drift}\``,
+              `- Affected patch(es): ${patchList}`,
+              `- Canary run: ${runUrl}`,
+              driftBlock,
+              ``,
+              `Fuzzy candidates and the full \`anchor-drift.jsonl\` are attached to`,
+              `the workflow run as an artifact.`,
+              ``,
+              `Generated automatically by \`.github/workflows/drift-canary.yml\`.`,
+            ].join('\n');
+
+            const { owner, repo } = context.repo;
+            const existing = await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: 'open',
+              per_page: 100,
+            });
+            const match = existing.find(i => !i.pull_request && i.title === title);
+
+            if (match) {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: match.number,
+                body,
+              });
+              core.info(`Updated existing canary issue #${match.number} for v${version}`);
+            } else {
+              const created = await github.rest.issues.create({
+                owner,
+                repo,
+                title,
+                labels: ['drift'],
+                body,
+              });
+              core.info(`Opened new canary issue #${created.data.number} for v${version}`);
+            }

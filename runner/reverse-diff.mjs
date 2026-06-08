@@ -5,17 +5,29 @@ import { changedWindow } from './text-span.mjs';
 // changed patch hashes BOTH its pre and post code — ~40 hashes/build. But the
 // runner threads `nextCode = effectiveCode` straight into the next patch's
 // preCode (same string reference), so a changed patch's postCode IS the next
-// changed patch's preCode. Memoise by string identity (same last-seen pattern as
-// conflict.mjs / ast-cache.mjs — JS can't weak-ref a string) so each code state
-// is hashed once instead of twice. Correctness is unaffected if the reference
-// ever differs: it just recomputes.
-let lastHashStr = null;
-let lastHashVal = null;
+// changed patch's preCode. Memoise by string identity (JS can't weak-ref a
+// string) so each code state is hashed once instead of twice. Correctness is
+// unaffected if the reference ever differs: it just recomputes.
+//
+// A single last-seen slot only hit when post(N) === pre(N+1) AND nothing else
+// was hashed in between. With pre and post BOTH consulting (and BOTH writing) a
+// small bounded ring, a string hashed once as a "post" is reused when it next
+// appears as a "pre" even if interleaved with other hashes. Bounded to the last
+// few references so memory stays flat on large builds (entries are string refs,
+// not copies — the strings are already live in the runner).
+const HASH_CACHE_MAX = 64;
+// Keyed by string reference (Map uses === for keys): same content in a fresh
+// string object is a miss and recomputes — identical hash, just not deduped.
+const hashCache = new Map();
 export function sha256(s) {
-  if (lastHashStr === s && lastHashVal !== null) return lastHashVal;
+  const cached = hashCache.get(s);
+  if (cached !== undefined) return cached;
   const v = createHash('sha256').update(s, 'utf8').digest('hex');
-  lastHashStr = s;
-  lastHashVal = v;
+  // Evict oldest (insertion-ordered Map) before exceeding the bound.
+  if (hashCache.size >= HASH_CACHE_MAX) {
+    hashCache.delete(hashCache.keys().next().value);
+  }
+  hashCache.set(s, v);
   return v;
 }
 
@@ -56,23 +68,40 @@ function countLines(s) {
  * No-op when `captureReverse` isn't an array or `effectiveCode` is not a
  * string. Mutates `captureReverse` in place.
  */
-export function captureReverseDiff(name, preCode, effectiveCode, captureReverse) {
+export function captureReverseDiff(name, preCode, effectiveCode, captureReverse, carriedPreSha) {
   // EXPLICIT-request gate: no array → capture was not requested → skip entirely.
-  if (!Array.isArray(captureReverse)) return;
-  if (typeof effectiveCode !== 'string') return;
-  if (effectiveCode === preCode) return;
+  // Return value threads `postSha256` forward to become the NEXT record's
+  // `preSha256` (the post code state of patch N IS the pre code state of patch
+  // N+1, by content). Callers pass the prior return as `carriedPreSha` so each
+  // distinct 16MB code state is hashed exactly ONCE across the whole build,
+  // instead of twice per changed patch. The reference-keyed `hashCache` above
+  // can't catch this because every patch transform (and coverage injection)
+  // produces a FRESH string object — same content, new reference, cache miss.
+  // Hashing is the dominant build cost (profiled: ~64% of native time), so this
+  // halves it. Correctness is unaffected: if a carried sha is ever absent we
+  // recompute, and the value is identical either way.
+  if (!Array.isArray(captureReverse)) return undefined;
+  if (typeof effectiveCode !== 'string') return carriedPreSha;
+  if (effectiveCode === preCode) {
+    // No-change apply contributes no record; the code state is unchanged, so the
+    // pre-sha carries through untouched to the next patch.
+    return carriedPreSha;
+  }
 
   // The changed window: original (pre-apply) middle is what a revert must
   // restore; patched middle is what it must remove. `at` is the splice offset in
   // the PATCHED bundle (prefix is identical in both, so the offset coincides).
   const { at, preWin: originalMiddle, postWin: patchedMiddle } = changedWindow(preCode, effectiveCode);
 
+  const preSha256 = carriedPreSha ?? sha256(preCode);
+  const postSha256 = sha256(effectiveCode);
   captureReverse.push({
     name,
     splice: { at, removeLen: patchedMiddle.length, insert: originalMiddle },
     added: countLines(patchedMiddle),
     removed: countLines(originalMiddle),
-    preSha256: sha256(preCode),
-    postSha256: sha256(effectiveCode),
+    preSha256,
+    postSha256,
   });
+  return postSha256;
 }

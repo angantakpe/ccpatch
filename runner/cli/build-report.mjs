@@ -70,6 +70,13 @@ export function buildJsonReport({ ok, durationMs, report, patchNames, paranoid, 
   if (r.phases && typeof r.phases === 'object') {
     out.phases = { ...r.phases };
   }
+  // Per-patch harness-timing buckets (ms): reverse-diff/hash capture, verify
+  // scans, coverage injection, conflict detection. These attribute the
+  // "overhead" the per-patch transform sums can't see — the work that runs
+  // BETWEEN applies inside the apply loop. Optional; older runners omit it.
+  if (r.harness && typeof r.harness === 'object') {
+    out.harness = { ...r.harness };
+  }
   // WS6: surface paranoid/strict mode and any native grow-path platform
   // degradation in the machine-readable report. Both are optional — older
   // callers that don't pass them leave the report shape unchanged.
@@ -135,14 +142,52 @@ export function renderTextSummary({ ok, durationMs, report, outputPath, drySugge
     }
 
     // Harness overhead = total wall-clock minus the sum of per-patch transform
-    // times. This is the doctor/diff/verify/write scaffolding around the actual
-    // patching. Surface it so "2.3s of patches" doesn't get blamed for a 28s build.
+    // times. Historically this was labelled "doctor/diff/verify/write", but that
+    // attribution was wrong: the bulk is per-patch harness work that runs BETWEEN
+    // applies inside the apply loop (reverse-diff/hash capture, coverage
+    // injection, verify scans, conflict detection). When the runner reports
+    // measured `harness` buckets we break them out by name; whatever they don't
+    // account for is shown as an honest "unattributed" remainder rather than
+    // claimed for phases we didn't measure.
     const patchMsTotal = timings.reduce((sum, t) => sum + (Number(t.ms) || 0), 0);
     const overheadMs = Math.max(0, (Number(durationMs) || 0) - patchMsTotal);
-    lines.push(
-      `Harness overhead: ${(overheadMs / 1000).toFixed(1)}s ` +
-      `(doctor/diff/verify/write; patches summed ${(patchMsTotal / 1000).toFixed(1)}s)`
-    );
+    const harness = (r.harness && typeof r.harness === 'object') ? r.harness : null;
+    const harnessLabels = {
+      reverseDiff: 'reverse-diff',
+      verify: 'verify',
+      coverage: 'coverage',
+      conflict: 'conflict',
+    };
+    const measured = harness
+      ? Object.entries(harness)
+          .map(([k, ms]) => [k, Number(ms) || 0])
+          .filter(([, ms]) => ms > 0)
+          .sort((a, b) => b[1] - a[1])
+      : [];
+    if (measured.length > 0) {
+      // Named breakdown: "Harness breakdown: reverse-diff 9.1s · verify 2.3s · …".
+      const parts = measured.map(
+        ([k, ms]) => `${harnessLabels[k] || k} ${(ms / 1000).toFixed(1)}s`
+      );
+      lines.push(`Harness breakdown: ${parts.join(' · ')}`);
+      const measuredTotal = measured.reduce((sum, [, ms]) => sum + ms, 0);
+      // Remainder = overhead the measured buckets don't explain (bundle/sidecar
+      // write, apply orchestration, doctor pre-pass, GC). Don't claim it.
+      const unattributedMs = Math.max(0, overheadMs - measuredTotal);
+      lines.push(
+        `Harness overhead: ${(overheadMs / 1000).toFixed(1)}s total ` +
+        `(measured ${(measuredTotal / 1000).toFixed(1)}s, ` +
+        `unattributed ${(unattributedMs / 1000).toFixed(1)}s; ` +
+        `patches summed ${(patchMsTotal / 1000).toFixed(1)}s)`
+      );
+    } else {
+      // No measured buckets (older runner / no harness work): report the raw
+      // overhead without claiming a breakdown we don't have.
+      lines.push(
+        `Harness overhead: ${(overheadMs / 1000).toFixed(1)}s ` +
+        `(unattributed; patches summed ${(patchMsTotal / 1000).toFixed(1)}s)`
+      );
+    }
   }
 
   // Coarse wall-clock phase breakdown, when the build path supplied phase

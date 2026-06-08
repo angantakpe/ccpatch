@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { runDoctorSuggest } from './doctor-suggest.mjs';
+import { style } from './style.mjs';
 import { readPatchFlags, readProfiles } from '../config.mjs';
 import { resolveProfile } from '../manifest.mjs';
 import { probeAnchor } from '../anchors.mjs';
@@ -40,15 +41,40 @@ function patchFileHint(name) {
  */
 export async function runDoctor(ctx) {
   const { options, patches, logger } = ctx;
-  const rc = await runDoctorCore(options, patches, logger);
+  const out = {};
+  const rc = await runDoctorCore(options, patches, logger, out);
   if (options.suggest) {
     logger.log('');
     runDoctorSuggest(logger);
+    // With --suggest, runDoctorCore deferred its `→ Next:` capstone so it lands
+    // AFTER the fuzzy-candidate block, keeping the command's last line the
+    // single actionable step (matching the build's report).
+    logger.log('');
+    logger.log(doctorNextLine(out, options));
   }
   return rc;
 }
 
-export async function runDoctorCore(options, patches, logger) {
+/**
+ * Build the build-style `→ Next:` capstone for the doctor command from the
+ * per-status tallies. Kept here so both the inline path (runDoctorCore) and the
+ * deferred `--suggest` path (runDoctor) render an identical line.
+ */
+export function doctorNextLine(counts, options = {}) {
+  const drift = counts.drift || 0;
+  const missing = counts.missing || 0;
+  const unverified = counts.unverified || 0;
+  if (drift > 0 || missing > 0) {
+    const seeCandidates = options.suggest ? '' : ' (add --suggest for fuzzy candidates)';
+    return `${style.cyan('→ Next:')} \`ccpatch heal\` to propose anchor fixes, then \`ccpatch heal --write\` to apply${seeCandidates}.`;
+  }
+  if (unverified > 0) {
+    return `${style.cyan('→ Next:')} strengthen the ${unverified} weak verify block(s) above, then re-run \`ccpatch doctor\`.`;
+  }
+  return `${style.cyan('→ Next:')} all anchors healthy — \`ccpatch build <input.js> <output.js>\` to apply patches.`;
+}
+
+export async function runDoctorCore(options, patches, logger, out = {}) {
   if (!fs.existsSync(options.inputPath)) {
     logger.error(`Error: cli.js not found at ${options.inputPath}`);
     return 1;
@@ -169,6 +195,23 @@ export async function runDoctorCore(options, patches, logger) {
 
   if (unverified > 0 && !options.strict) {
     logger.log(`  [warning] ${unverified} patch(es) have weak verify (only 'present'). Strengthen with verify.absent or verify.count.`);
+  }
+
+  // Expose the per-status tallies so the `--suggest` path (runDoctor) can render
+  // its capstone AFTER the candidate block instead of here.
+  out.drift = drift;
+  out.missing = missing;
+  out.unverified = unverified;
+  out.ok = ok;
+
+  // Match the build's `→ Next:` affordance (build-report.mjs): end the command
+  // with one actionable step. When anchors have drifted or gone missing, point
+  // the user at the fix loop; UNVERIFIED-only is advisory (weak verify, not a
+  // broken anchor) so it gets a softer nudge; a fully healthy run gets a
+  // positive confirmation. Under --suggest the line is deferred to runDoctor so
+  // it lands as the command's true last line (and is not duplicated here).
+  if (!options.suggest) {
+    logger.log(doctorNextLine(out, options));
   }
 
   // #12/#13: --json output — emit structured result on stdout after all logging is done

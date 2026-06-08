@@ -25,6 +25,32 @@ import { toList } from './verify-core.mjs';
 import { PROJECT_ROOT } from './paths.mjs';
 
 /**
+ * A monotonic millisecond bucket accumulator for per-patch HARNESS work that
+ * runs OUTSIDE each patch's apply() — coverage injection, reverse-diff/hash
+ * capture, conflict span materialization, and verify scans. The build summary
+ * historically lumped all of this into one opaque "overhead" number computed as
+ * (wall-clock − Σ apply() ms); these named buckets attribute it instead.
+ *
+ * `time(bucket, fn)` runs fn, adds its elapsed ms to report.harness[bucket], and
+ * returns fn's result. A no-op timer (null buckets) is fine — `addHarnessMs`
+ * tolerates a missing target so call sites need no guard.
+ *
+ * @returns {{ coverage:number, reverseDiff:number, conflict:number, verify:number }}
+ */
+export function makeHarnessBuckets() {
+  return { coverage: 0, reverseDiff: 0, conflict: 0, verify: 0 };
+}
+
+/**
+ * Add `ms` to one named bucket of a harness-timing record. Tolerant of a null
+ * record (instrumentation disabled) and of unknown keys (initialised to 0).
+ */
+export function addHarnessMs(harness, bucket, ms) {
+  if (!harness) return;
+  harness[bucket] = (harness[bucket] || 0) + ms;
+}
+
+/**
  * True when a normalized verify block declares at least one non-empty present
  * literal. An empty-string present is NOT a real assertion (used as a
  * manifest-valid placeholder) and does not trigger the no-change-is-fatal gate.
@@ -256,15 +282,18 @@ export function applySinglePatch({
  * @param {object} args.lifecycleCtx      per-patch lifecycle ctx
  * @param {object} args.patchOptions      carries .dryRun / .captureReverse
  * @param {object} args.logger
+ * @param {object} [args.harness]         optional per-build harness-timing buckets
  * @returns {string} final effectiveCode (coverage-instrumented when applicable)
  */
 export function recordStage({
-  name, normalized, preCode, effectiveCode, atSites, lifecycleCtx, patchOptions, logger,
+  name, normalized, preCode, effectiveCode, atSites, lifecycleCtx, patchOptions, logger, state, harness,
 }) {
   if (normalized.coverageMarker && effectiveCode !== preCode) {
+    const _covStart = Date.now();
     const instrumented = injectCoverageHit(
       preCode, effectiveCode, normalized.coverageMarker, atSites,
     );
+    addHarnessMs(harness, 'coverage', Date.now() - _covStart);
     if (instrumented === null) {
       logger.log?.(`  [coverage] ${name}: marker "${normalized.coverageMarker}" — no instrumentation site found, skipping`);
     } else {
@@ -274,7 +303,26 @@ export function recordStage({
   }
   // Skip the expensive createPatch call on dry runs (bundle is never written anyway).
   const reverseSink = patchOptions.dryRun ? undefined : patchOptions.captureReverse;
-  captureReverseDiff(name, preCode, effectiveCode, reverseSink);
+  // Thread the carried sha across patches: postSha256(N) === preSha256(N+1) by
+  // content, so each 16MB code state is hashed once for the whole build instead
+  // of twice per changed patch. `state` is optional (callers without it just
+  // recompute, same result). The carried value lives on the shared state handle
+  // alongside nextCode so it survives the per-patch loop.
+  // The carried sha is only valid if THIS patch's preCode is the exact string
+  // the prior carry hashed — i.e. the previous patch's output, untouched. The
+  // runner sets preCode = state.nextCode (the prior effectiveCode), but an
+  // onBeforeApply hook may rewrite ctx.code, in which case preCode is a fresh
+  // string and the carry is stale: gate on reference identity so we recompute
+  // (correct, identical value) rather than trust a stale hash.
+  const carried = state && preCode === state.nextCode ? state.carriedSha : undefined;
+  // reverse-diff capture (and its sha256 of the ~16MB bundle) is the dominant
+  // per-patch harness cost; time it into its own bucket. When reverseSink is
+  // undefined (dry-run, or --emit-revert not set) captureReverseDiff returns
+  // early and this records a near-zero segment, which is the point.
+  const _rdStart = Date.now();
+  const nextSha = captureReverseDiff(name, preCode, effectiveCode, reverseSink, carried);
+  addHarnessMs(harness, 'reverseDiff', Date.now() - _rdStart);
+  if (state) state.carriedSha = nextSha;
 
   return effectiveCode;
 }
@@ -297,7 +345,7 @@ export function recordStage({
  * @returns {(reasonPhase: string|null)=>Promise<void>}
  */
 export function makeVerifyFlusher({
-  state, failures, verifyIssuesReport, frame, checkVerify, logger,
+  state, failures, verifyIssuesReport, frame, checkVerify, logger, harness,
 }) {
   return async function flushPendingVerify(_reasonPhase) {
     if (state.pendingVerify.length === 0) return;
@@ -309,6 +357,10 @@ export function makeVerifyFlusher({
       const arr = groups.get(e.snapshot);
       if (arr) arr.push(e); else groups.set(e.snapshot, [e]);
     }
+    // Time only the literal-scan work (verifyBatch over each snapshot) into the
+    // harness 'verify' bucket — the onVerifyFail heal dispatch below is patch
+    // logic, not harness scaffolding, so it stays out of this segment.
+    const _vStart = Date.now();
     const issuesByEntry = new Map();
     for (const [snapshot, entries] of groups) {
       const items = entries.map((b) => ({
@@ -322,6 +374,7 @@ export function makeVerifyFlusher({
         issuesByEntry.set(entries[i], batchResults[i].issues);
       }
     }
+    addHarnessMs(harness, 'verify', Date.now() - _vStart);
     for (let i = 0; i < batch.length; i++) {
       const entry = batch[i];
       let issues = issuesByEntry.get(entry) || [];

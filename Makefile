@@ -8,7 +8,7 @@ include scripts/mk/cli.mk
         smoke-integration-roundtrip \
         bridge-host bridge-host-stop bridge-tail bridge-submit \
         verticals-check lint lint-dead lint-unused \
-        test\:patches lint\:dead lint\:unused heal
+        test\:patches test\:patch lint\:dead lint\:unused heal
 
 # ── Naming-drift aliases ────────────────────────────────────────────────────
 # Kill the spelling drift between the two build systems: every operation that
@@ -21,6 +21,7 @@ include scripts/mk/cli.mk
 # (test-patches) and below in this file (lint-dead, lint-unused). package.json
 # carries the mirror dash-spelled npm scripts.
 test\:patches: test-patches ## Alias for test-patches (npm-style spelling)
+test\:patch: test-patch ## Alias for test-patch (npm-style spelling): make test:patch NAME=debug
 lint\:dead: lint-dead ## Alias for lint-dead (npm-style spelling)
 lint\:unused: lint-unused ## Alias for lint-unused (npm-style spelling)
 
@@ -92,12 +93,22 @@ lint: lint-dead lint-unused ## Run all dead-code checks
 help: ## Show this help
 	@echo "Usage: make <target> [VERSION=x.y.z]"
 	@echo ""
-	@echo "Targets:"
-	@grep -h -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | \
-		awk 'BEGIN {FS = ":.*##"}; {printf "  %-30s %s\n", $$1, $$2}'
+	@echo "Quick start:"
+	@echo "  make dev                       fast inner loop: clean + patch + start (no sidecar/verify)"
+	@echo "  make patch-claude-code         full build → releases/<ver>/ (writes revert + sidecar)"
+	@echo "  make start CLI_ARGS='--help'   run the patched CLI (verifies the build sidecar first)"
+	@echo "  make doctor                    fuzzy-anchor candidates — run this when a build reports drift>0"
+	@echo ""
+	@echo "Env bypasses (use sparingly):"
+	@echo "  CCPATCH_SKIP_SHA_CHECK=1        skip the build-time supply-chain integrity gate"
+	@echo "  CCPATCH_SKIP_LAUNCH_VERIFY=1    skip the launch-time bundle sidecar check at 'make start'"
 	@echo ""
 	@echo "Variables:"
 	@echo "  VERSION=$(VERSION)     Target version"
 	@echo "  INPUT=$(INPUT)"
 	@echo "  OUTPUT=$(OUTPUT)"
 	@echo "  PATCH=<patches>        Comma-separated patches (default in vars.mk)"
+	@echo ""
+	@echo "Targets:"
+	@grep -h -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | \
+		awk 'BEGIN {FS = ":.*##"}; {printf "  %-30s %s\n", $$1, $$2}' || true
