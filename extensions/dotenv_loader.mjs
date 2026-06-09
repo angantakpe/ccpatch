@@ -18,6 +18,7 @@ export default {
   //     match the CC_* prefix (see __envDenyCC below):
   //       CC_BRIDGE_*            (would stand up / configure / weaken the bridge)
   //       CC_WEBHOOK_URL         (would set an egress/exfil target)
+  //       CC_WEBHOOK_RAW         (would disable payload redaction before egress)
   //       CC_PROJECT_ROOT        (would redirect where conversations/cache are
   //                               written — path traversal)
   //       CC_SAVE_CONVERSATIONS, CC_CACHE_RESPONSES
@@ -85,6 +86,9 @@ if (!globalThis.__ccpDotenvLoaded) {
         'CC_BRIDGE_TOKEN': 1, 'CC_BRIDGE_TOKEN_FILE': 1, 'CC_BRIDGE_ADDR': 1,
         'CC_BRIDGE_ALLOW_PUBLIC': 1, 'CC_BRIDGE_MAX_LINE': 1,
         'CC_BRIDGE_TOOL_ALLOWLIST': 1, 'CC_WEBHOOK_URL': 1, 'CC_PROJECT_ROOT': 1,
+        // CC_WEBHOOK_RAW disables webhook payload redaction; a repo-local .env
+        // must not be able to flip the redact-by-default control off.
+        'CC_WEBHOOK_RAW': 1,
         'CC_SAVE_CONVERSATIONS': 1, 'CC_CACHE_RESPONSES': 1,
       };
       var __isAllowed = function(k) {

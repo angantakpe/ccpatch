@@ -21,6 +21,11 @@ import { CAPABILITIES } from '../manifest.mjs';
 import { buildPreload } from '../preload-builder.mjs';
 import { emitOverlay } from '../overlay-builder.mjs';
 import {
+  collectAgentDirPatches,
+  emitAgentsDir,
+  emitAdkRuntime,
+} from '../agents-dir-builder.mjs';
+import {
   parseRepackSkip,
   nativeGrowPathAvailable,
   hostPlatformLabel,
@@ -460,6 +465,29 @@ export async function runBuild(ctx) {
     }
   } catch (err) {
     logger.warn(`  [!] Could not write overlay file: ${err.message}`);
+  }
+
+  // Emit the agents dir (ccpatch-agents/) for every enabled patch that declared
+  // `agentDir: { name, code }`. The core/overlay_loader patch injects a boot
+  // block that require()s each *.mjs there (integrity-gated via .sha256). When
+  // any agent ships, also copy the ADK runtime next to the bundle so those
+  // entries can `require('../ccpatch-adk/index.mjs')` without an install-layout
+  // assumption.
+  try {
+    const outputDir = path.dirname(options.outputPath);
+    const agentEntries = collectAgentDirPatches(patches, patchesToApply);
+    if (agentEntries.length > 0) {
+      const adkFiles = emitAdkRuntime(outputDir);
+      if (adkFiles.length > 0) {
+        logger.log(`  [+] ADK runtime (${adkFiles.length} files) copied to: ${path.join(outputDir, 'ccpatch-adk')}`);
+      }
+      const written = emitAgentsDir(agentEntries, outputDir);
+      if (written.length > 0) {
+        logger.log(`  [+] Agents dir (${written.length}) written under: ${path.join(outputDir, 'ccpatch-agents')}`);
+      }
+    }
+  } catch (err) {
+    logger.warn(`  [!] Could not write agents dir: ${err.message}`);
   }
 
   // Write the reverse-diff sidecar so `ccpatch revert` can restore the input.

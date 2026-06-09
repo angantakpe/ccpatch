@@ -197,6 +197,16 @@ function isNullFixture(name) {
 const NULL_FIXTURE_SKIP = (name) =>
   `${name}: fixture is still null — replace it in tests/fixtures/registry.mjs`;
 
+/** Agent-dir delivery patches (e.g. adk_hello_agent) ship all behavior in an
+ *  emitted ccpatch-agents/<name>.mjs file — apply() is intentionally a no-op,
+ *  so Layer 1's "apply() must mutate the bundle" assertion does not apply. The
+ *  emitted file's integrity is guaranteed by its .sha256 sidecar at load time,
+ *  not by a bundle splice. Mirrors the runner, which exempts these from the
+ *  no-change-is-fatal gate via their absent-only verify (see the patch header). */
+function isAgentDirOnly(patch) {
+  return patch?.agentDir != null && typeof patch.apply === 'function';
+}
+
 /** Some patches' anchors only exist in the real bundle. When there's no real
  *  bundle, skip rather than fail — synthetic fixtures aren't a substitute. */
 function shouldSkipWithoutBundle(name) {
@@ -223,6 +233,10 @@ test('Layer 1 — every patch.apply() mutates its input', async (t) => {
       }
       if (isNullFixture(name)) {
         t.skip(NULL_FIXTURE_SKIP(name));
+        return;
+      }
+      if (isAgentDirOnly(patch)) {
+        t.skip('agent-dir delivery patch — apply() is intentionally a no-op (behavior ships in ccpatch-agents/)');
         return;
       }
       if (shouldSkipWithoutBundle(name)) {

@@ -30,7 +30,6 @@ function captureLogger() {
 }
 
 function errsJoin(logger) { return logger.errs.join('\n'); }
-function linesJoin(logger) { return logger.lines.join('\n'); }
 
 function tmpReg(content = { versions: {} }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ccpatch-pin-cmd-'));

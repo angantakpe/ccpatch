@@ -84,7 +84,7 @@ verify_launch = ( \
 .PHONY: install reconstruct build smoke run run-p test download \
         extract-from-binary bun-decompile bun-run bun-verify bun-reconstruct \
         coverage bun-all all beautify beautify-fast patch \
-        patch-claude-code patch-list doctor heal print-patch anchor-catalog \
+        patch-claude-code patch-list patch-applied doctor heal print-patch anchor-catalog \
         anchor-catalog-missing anchor-catalog-changed anchor-report repatch release run-extracted \
         start start-unsafe dev verify \
         patch-claude-code-native \
@@ -311,8 +311,11 @@ patch-claude-code: ## Apply the standard profile: make patch-claude-code [VERSIO
 	esac; \
 	echo "Artifacts: $(OUTPUT) ($$SIZE_MB MB, sha256:$$(echo $$SHA256 | cut -c1-12))"
 
-patch-list: ## List available patches (VERBOSE=1 adds category/capabilities per patch)
+patch-list: ## List available patches in the catalog (VERBOSE=1 adds category/capabilities per patch)
 	@$(NODE) $(PATCH_TOOL) --list $(CCP_VERBOSE_FLAG)
+
+patch-applied: ## List patches that actually applied to the last build (reads storage/outputs/patch-results-v$(VERSION).json)
+	@$(NODE) $(PATCH_TOOL) --applied --version $(VERSION)
 
 # `NAME` is a common environment variable (set by some shells/distros). Ignore
 # an environment-origin value so `make new-patch` with no NAME shows usage rather

@@ -79,6 +79,13 @@ ack:
   mcp_lazy: [network, tools]
   dotenv_loader: [env]
   block_tools: [env, tools]
+  # ADK wiring — expose_tool_dispatch injects/dispatches tools (the headless RCE
+  # surface), adk_hello_agent injects a tool through the ADK, expose_system_prompt
+  # writes the persona overlay. Acked here so the default build proceeds; see
+  # THREAT_MODEL.md for the tool-dispatch trust boundary (nonce-gated registrar).
+  expose_tool_dispatch: [tools]
+  expose_system_prompt: [prompt]
+  adk_hello_agent: [tools]
 
 patches:
 
@@ -138,11 +145,11 @@ patches:
   boost_project_commands: false # boost loadedFrom:commands_DEPRECATED to top of autocomplete
 
   # ── Expose Internals ────────────────────────────────────────────────────────
-  expose_tool_dispatch: false     # MCP tool registry + health probe + invoker
+  expose_tool_dispatch: true      # MCP tool registry + health probe + invoker (ADK defineTool)
   expose_api_client: false        # Anthropic SDK client via __ccpApiClient
   expose_submit_input: false      # React submit callback via __ccpSubmitInput
   expose_agent_tool: false        # native AgentTool via __ccpAgentTool
-  expose_system_prompt: false     # __ccpSetSystemPrompt persona overlay (ADK swap handoff)
+  expose_system_prompt: true      # __ccpSetSystemPrompt persona overlay (ADK swap handoff)
   policy_gate: false              # host-driven behavior gate: soft steer + outbound allow/scrub/block (CCP_POLICY_GATE_MODULE)
   prime_agent_tool_on_boot: false # prime AgentTool at React mount (no user input needed)
   capture_interactive_request: false # capture first /v1/messages shape for reuse
@@ -177,6 +184,14 @@ patches:
 
   input_bar_color: false          # color the prompt input bar border green
   _overlay_example: false         # example: publish a value via the sibling overlay file (no bundle anchor)
+
+  # ── ADK (Agent Development Kit) ──────────────────────────────────────────────
+  # Loads @codehornets/adk into the patched session via the ccpatch-agents/ boot
+  # block (the build copies the ADK runtime to ccpatch-adk/ next to the bundle).
+  # Hard deps expose_tool_dispatch + expose_system_prompt are enabled above. For
+  # delegate handoffs add expose_agent_tool + prime_agent_tool_on_boot; for the
+  # event bus add event_bus.
+  adk_hello_agent: true           # register a hello agent + adk_ping tool via the ADK
 
   # ── Verticals (composed on top of the horizontals above) ────────────────────
   event_bus: false                # typed pub/sub (__ccpBus) — shared by orchestrator/bridge

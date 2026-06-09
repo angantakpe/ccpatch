@@ -69,6 +69,25 @@ export const HELP = Object.freeze({
     '\n' +
     'Summarize the reverse-diff sidecar produced at apply time.',
 
+  dissect:
+    'Usage: ccpatch dissect <cli.js> [--against <other.js>] [--native]\n' +
+    '                       [--ownership] [--context <N>] [--cc-version X.Y.Z] [--json]\n' +
+    '\n' +
+    'Read-only structural analysis of an UNPATCHED bundle: every registry anchor\n' +
+    'with its resolved symbol, byte offset, line, and status. Shares the\n' +
+    'analyzeBundle() model that `refmap` projects from, so the two cannot drift.\n' +
+    '\n' +
+    'Modes (all read-only):\n' +
+    '  (default)           anchor table (symbol / offset:line / status)\n' +
+    '  --context <N>       capture ±N chars of source around each resolved anchor\n' +
+    '  --ownership         join each anchor to its owning patch and core/ext shim;\n' +
+    '                      flags orphan anchors no patch references\n' +
+    '  --against <old.js>  cross-version diff: stable/moved/renamed/vanished/\n' +
+    '                      appeared per anchor (exit 3 if any moved/renamed/vanished)\n' +
+    '  --native            decode a Bun-compiled `claude` binary: extract the cli.js\n' +
+    '                      module from the SEA graph, then run the anchor pass on it\n' +
+    '  --json              machine-readable output for any of the above',
+
   doctor:
     'Usage: ccpatch doctor <input.js> [--profile <name>] [--strict] [--suggest]\n' +
     '\n' +
@@ -181,6 +200,7 @@ export const USAGE =
   '  node patch-cli.mjs versions [--target-version <x.y.z>]\n' +
   '  node patch-cli.mjs capabilities [--profile <name>] [--json]\n' +
   '  node patch-cli.mjs explain [--profile <name>] [--patch <name>] [--json]\n' +
+  '  node patch-cli.mjs dissect <cli.js> [--against <other.js>] [--native] [--ownership] [--context <N>] [--json]\n' +
   '  node patch-cli.mjs ack <patch> [--all-caps] [--dry-run]\n' +
   '  node patch-cli.mjs refmap <bundle.js> [--out <path>] [--cc-version X.Y.Z] [--check]\n' +
   '  node patch-cli.mjs fallback-capture <patched.js> --against <unpatched.js> [--patch <name>]\n' +
@@ -191,7 +211,8 @@ export const USAGE =
   '  node patch-cli.mjs module verify <name>\n' +
   '  node patch-cli.mjs module update <name>\n' +
   '  node patch-cli.mjs outputs clear [--force] [--rotate <KB>]\n' +
-  '  node patch-cli.mjs --list [--verbose]   (--verbose groups by category, adds capabilities + required/disabled tags)\n' +
+  '  node patch-cli.mjs --list [--verbose]   (catalog of ALL patches; --verbose groups by category, adds capabilities + required/disabled tags)\n' +
+  '  node patch-cli.mjs --applied --version <ver>   (only patches that applied to the last build of <ver>, grouped by category)\n' +
   '\n' +
   'Global options: --log-level=silent|error|warn|info|debug   --quiet   --verbose   --json   --help\n' +
   '  --paranoid          Strict mode: surface normally-swallowed fetch-subscriber errors loudly\n' +

@@ -34,6 +34,7 @@ import path from 'node:path';
 // cmd-explain.mjs is a leaf that only depends on config/manifest/runner, so we
 // can import it directly here without creating a cycle.
 import { runExplain } from './cmd-explain.mjs';
+import { runDissect } from './cmd-dissect.mjs';
 import { runOutputsClear } from './cmd-outputs.mjs';
 import { runPin } from './cmd-pin.mjs';
 
@@ -300,6 +301,37 @@ export function buildCommandTable(impl) {
         return { explain: true, requestedPatches, profile, json };
       },
       run: (ctx) => runExplain(ctx),
+    },
+    {
+      name: 'dissect',
+      resultKey: 'dissect',
+      helpKey: 'dissect',
+      // Read-only structural analysis. --ownership greps core/extensions source
+      // itself, so no loaded patch objects are needed.
+      needsPatches: false,
+      parse(rest) {
+        if (rest.length < 1 || rest[0].startsWith('-')) {
+          return { error: 'Usage: ccpatch dissect <cli.js> [--against <other.js>] [--native] [--ownership] [--context <N>] [--cc-version X.Y.Z] [--json]' };
+        }
+        const inputPath = path.resolve(rest[0]);
+        let againstPath = null;
+        let native = false;
+        let ownership = false;
+        let context = 0;
+        let ccVersion = null;
+        let json = false;
+        for (let i = 1; i < rest.length; i++) {
+          if (rest[i] === '--against' && rest[i + 1]) againstPath = path.resolve(rest[++i]);
+          else if (rest[i] === '--native') native = true;
+          else if (rest[i] === '--ownership') ownership = true;
+          else if (rest[i] === '--context' && rest[i + 1]) context = parseInt(rest[++i], 10) || 0;
+          else if (rest[i] === '--cc-version' && rest[i + 1]) ccVersion = rest[++i];
+          else if (rest[i] === '--json') json = true;
+        }
+        if (!ccVersion && process.env.CCPATCH_CLI_VERSION) ccVersion = process.env.CCPATCH_CLI_VERSION;
+        return { dissect: true, inputPath, againstPath, native, ownership, context, ccVersion, json };
+      },
+      run: (ctx) => runDissect(ctx),
     },
     {
       name: 'pin',

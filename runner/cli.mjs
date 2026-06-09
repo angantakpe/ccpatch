@@ -215,6 +215,11 @@ export function parsePatchCliArgs(args) {
   if (args.includes('--list')) {
     return { list: true };
   }
+  if (args.includes('--applied')) {
+    const vi = args.indexOf('--version');
+    const version = vi !== -1 ? args[vi + 1] : undefined;
+    return { applied: true, version };
+  }
   const head = args[0];
   if (head && NAMED_SUBCOMMANDS.has(head)) {
     return COMMANDS.byName.get(head).parse(args.slice(1));
@@ -320,6 +325,68 @@ export async function runPatchCli(args, logger = console) {
         const meta = tags.length ? ` ${style.dim(`[${tags.join(' · ')}]`)}` : '';
         logger.log(`  ${style.green(name)}${meta}`);
         if (p.description) logger.log(`    ${style.dim(p.description)}`);
+      }
+    }
+    return 0;
+  }
+
+  // `--applied`: unlike `--list` (which enumerates the whole catalog), this
+  // reads the per-build results JSON that writeApplyArtifacts() emitted for the
+  // most recent build of this version and reports ONLY the patches that actually
+  // applied — joined back to catalog metadata (category, capabilities, status)
+  // and grouped like the verbose listing. Answers "what's in this bundle", not
+  // "what patches exist". Requires a prior build (the results JSON to exist).
+  if (options.applied) {
+    const version = options.version || process.env.CCPATCH_CLI_VERSION || undefined;
+    if (!version) {
+      logger.log('--applied needs a version: pass --version x.y.z or set CCPATCH_CLI_VERSION (it selects which patch-results-v<ver>.json to read).');
+      return 1;
+    }
+    const resultsPath = path.join(PROJECT_ROOT, 'storage', 'outputs', `patch-results-v${version}.json`);
+    if (!fs.existsSync(resultsPath)) {
+      logger.log(`No build results for v${version} at ${resultsPath} — run \`make patch-claude-code\` first.`);
+      return 1;
+    }
+    let results;
+    try {
+      results = JSON.parse(fs.readFileSync(resultsPath, 'utf8'));
+    } catch (err) {
+      logger.log(`Could not parse ${resultsPath}: ${err.message} — re-run \`make patch-claude-code\` to regenerate it.`);
+      return 1;
+    }
+    if (!results.patches || typeof results.patches !== 'object') {
+      logger.log(`${resultsPath} is missing a "patches" object (stale or hand-edited format) — re-run \`make patch-claude-code\`.`);
+      return 1;
+    }
+    const patches = await loadPatches({ version });
+    // Applied = status applied / applied-fallback / no-change-ok (same liveness
+    // test writeApplyArtifacts uses for the coverage manifest).
+    const isApplied = (s) => s === 'applied' || s === 'applied-fallback' || s === 'no-change-ok';
+    const names = Object.keys(results.patches)
+      .filter((n) => isApplied(results.patches[n].status))
+      .sort();
+    const byCategory = new Map();
+    for (const name of names) {
+      const cat = patches[name]?.category ?? 'uncategorized';
+      if (!byCategory.has(cat)) byCategory.set(cat, []);
+      byCategory.get(cat).push(name);
+    }
+    logger.log(`${style.bold(`${names.length} patches applied`)} ${style.dim(`· v${version} · ${byCategory.size} categories`)}`);
+    for (const cat of [...byCategory.keys()].sort()) {
+      const group = byCategory.get(cat);
+      logger.log('');
+      logger.log(`${style.cyan(cat)} ${style.dim(`(${group.length})`)}`);
+      for (const name of group) {
+        const p = patches[name];
+        const tags = [];
+        if (p?.required) tags.push('required');
+        const caps = Array.isArray(p?.capabilities) ? p.capabilities : [];
+        if (caps.length) tags.push(caps.join('+'));
+        const variant = results.patches[name].resolvedVariant;
+        if (variant && variant !== 'default') tags.push(`variant:${variant}`);
+        const meta = tags.length ? ` ${style.dim(`[${tags.join(' · ')}]`)}` : '';
+        logger.log(`  ${style.green(name)}${meta}`);
+        if (p?.description) logger.log(`    ${style.dim(p.description)}`);
       }
     }
     return 0;
