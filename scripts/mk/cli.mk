@@ -499,6 +499,13 @@ run-extracted: ## Run the extracted (unpatched) CLI directly: make run-extracted
 NATIVE_PATCHED_JS  ?= storage/outputs/$(VERSION)/cli.patched.js
 NATIVE_OUTPUT      ?= releases/$(VERSION)/claude
 
+# The native repack path MUST exclude the Bun-SEA-incompatible patches
+# (esm_compat, bun_shim). The `native` profile does exactly that — its filter
+# lives in runner/cli/native-profile.mjs. Force it here (not the global
+# PROFILE=standard default) so `make patch-claude-code-native` is correct by
+# construction; override with NATIVE_PROFILE= only if you know what you're doing.
+NATIVE_PROFILE     ?= native
+
 patch-claude-code-native: ## Patch native binary: extract + patch + repack
 	@test -n "$(VERSION)" || (echo "Error: VERSION required" && exit 1)
 	@mkdir -p releases/$(VERSION) storage/outputs/$(VERSION)
@@ -506,8 +513,8 @@ patch-claude-code-native: ## Patch native binary: extract + patch + repack
 	@SRC=$(CJS_EXTRACTED); \
 	if [ ! -f "$$SRC" ]; then echo "ERROR: $(CJS_EXTRACTED) not found after extract step."; exit 1; fi; \
 	$(call verify_bundle_sha,$$SRC) || exit 1; \
-	echo "Patching: $$SRC → $(NATIVE_PATCHED_JS)"; \
-	$(NODE) $(PATCH_TOOL) "$$SRC" $(NATIVE_PATCHED_JS) $(addprefix --patch ,$(subst $(comma), ,$(PATCH)))
+	echo "Patching: $$SRC → $(NATIVE_PATCHED_JS) (profile: $(NATIVE_PROFILE))"; \
+	$(NODE) $(PATCH_TOOL) "$$SRC" $(NATIVE_PATCHED_JS) $(addprefix --patch ,$(subst $(comma), ,$(PATCH))) $(if $(NATIVE_PROFILE),--profile $(NATIVE_PROFILE),)
 	@test -f $(NATIVE_PATCHED_JS) || (echo "Error: patch step did not produce $(NATIVE_PATCHED_JS)" && exit 1)
 	@ORIG_BIN=storage/archives/claude-code-v$(VERSION)/bin/claude.exe; \
 	echo "Repacking: $$ORIG_BIN + $(NATIVE_PATCHED_JS) → $(NATIVE_OUTPUT)"; \

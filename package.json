@@ -85,5 +85,8 @@
     "concurrently": "^9.0.0",
     "knip": "^5.39.0",
     "typescript": "^5.7.0"
+  },
+  "overrides": {
+    "shell-quote": "^1.8.4"
   }
 }

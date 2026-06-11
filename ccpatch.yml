@@ -251,6 +251,16 @@ profiles:
       - block_tools
       - input_bar_color
 
+  # native = standard, minus the two patches that cannot survive a Bun SEA
+  # repack. The exclusion itself is owned by runner/cli/native-profile.mjs
+  # (applyNativeProfileFilter drops esm_compat + bun_shim whenever
+  # profile === 'native'), so this entry only has to seed the base set —
+  # listing them here would be redundant and they'd be filtered out anyway.
+  # Use this for `make patch-claude-code-native` (the native-binary path).
+  native:
+    extends: standard
+    patches: []
+
   # power lists everything explicitly -- no extends
   power:
     # Every patch currently listed under `patches:` above.

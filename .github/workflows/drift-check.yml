@@ -23,14 +23,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # bun.lock is the single source of truth for dependencies; package-lock.json
+      # was removed (see ci.yml). Install via bun, not npm — `cache: npm` / `npm ci`
+      # fail here because there is no npm lockfile to key the cache or ci install on.
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Install dependencies (frozen lockfile)
+        run: bun install --frozen-lockfile
 
       - name: Install latest Claude Code CLI
         run: |
