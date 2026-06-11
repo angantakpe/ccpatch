@@ -7,11 +7,7 @@
     "moduleResolution": "Bundler",
     "skipLibCheck": true,
     "types": ["node"],
-    "lib": ["ES2022"],
-    "baseUrl": ".",
-    "paths": {
-      "@adk": ["../../packages/adk/index.d.ts"]
-    }
+    "lib": ["ES2022"]
   },
-  "files": ["adk-types-usage.ts"]
+  "files": ["index.d.ts"]
 }

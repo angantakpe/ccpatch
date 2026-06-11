@@ -6,7 +6,7 @@
 //   - writePin: new version, idempotent noop, refuse on mismatch, force override
 //   - assertValidSha256: validation
 
-import { describe, it, before, after } from 'node:test';
+import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';

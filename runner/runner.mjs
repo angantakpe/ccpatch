@@ -20,6 +20,7 @@ import {
   applySinglePatch,
   recordStage,
   makeVerifyFlusher,
+  makeHarnessBuckets,
 } from './apply-pipeline.mjs';
 
 
@@ -106,12 +107,15 @@ export function validatePhaseDepOrder(topoOrdered, patches) {
  * @param {Array<object>} drifts — anchor-drift entries
  * @param {object[]} verifyIssuesReport — per-patch verify failure records
  * @param {Record<string,string>} results — name -> status string map
- * @returns {{ timings, drifts, verifyIssues, noChange, appliedFallback }}
+ * @param {object} [harness] — per-build harness-timing buckets (ms)
+ * @returns {{ timings, drifts, verifyIssues, noChange, appliedFallback, harness? }}
  */
-export function buildPatchReport(timings, drifts, verifyIssuesReport, results) {
+export function buildPatchReport(timings, drifts, verifyIssuesReport, results, harness = null) {
   const noChange = Object.values(results).filter(s => s === 'no-change').length;
   const appliedFallback = Object.values(results).filter(s => s === 'applied-fallback').length;
-  return { timings, drifts, verifyIssues: verifyIssuesReport, noChange, appliedFallback };
+  const report = { timings, drifts, verifyIssues: verifyIssuesReport, noChange, appliedFallback };
+  if (harness) report.harness = harness;
+  return report;
 }
 
 /**
@@ -125,9 +129,13 @@ export function buildPatchReport(timings, drifts, verifyIssuesReport, results) {
  * @param {Function} warnStorageOnce — first-write-failure guard
  * @returns {Array<object>} allConflicts — array of conflict records
  */
-export function detectAndRecordOverlaps(phaseTraces, frame, globalStrict, logger, warnStorageOnce, storageRoot = PROJECT_ROOT) {
+export function detectAndRecordOverlaps(phaseTraces, frame, globalStrict, logger, warnStorageOnce, storageRoot = PROJECT_ROOT, harness = null) {
   const allConflicts = [];
   const failures = [];
+  // Time the whole overlap pass (lazy span materialization + per-phase scan)
+  // into the harness 'conflict' bucket. Cheap when phases have <2 patches
+  // (the loop short-circuits before any structuredPatch runs).
+  const _conflictStart = Date.now();
   for (const phaseKey of ['pre', 'main', 'post']) {
     const traces = phaseTraces[phaseKey] || [];
     if (traces.length < 2) continue;
@@ -193,6 +201,7 @@ export function detectAndRecordOverlaps(phaseTraces, frame, globalStrict, logger
       }
     }
   }
+  if (harness) harness.conflict = (harness.conflict || 0) + (Date.now() - _conflictStart);
   // Conflicts JSONL is written BEFORE the strict-failure throw (so a strict
   // build that aborts still leaves the conflict forensics behind). ARCH1.
   writeConflictsArtifact(allConflicts, warnStorageOnce, storageRoot);
@@ -212,6 +221,11 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
   const warnStorageOnce = makeStorageWarnOnce(logger);
   const globalStrict = patchOptions.strict === true;
   const storageRoot = patchOptions.storageRoot ?? PROJECT_ROOT;
+  // --no-verify (fast-dev): skip the verify literal scan entirely. Patches still
+  // apply; we just don't defer their verify.present/absent assertions into the
+  // phase batch, so flushPendingVerify has nothing to scan. Strict mode keeps
+  // verify on — silently dropping assertions there would defeat the gate.
+  const skipVerify = patchOptions.skipVerify === true && !globalStrict;
   const failures = [];
   // Per-phase trace for overlap detection.
   const phaseTraces = { pre: [], main: [], post: [] };
@@ -223,6 +237,12 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
   const timings = [];
   const drifts = [];
   const verifyIssuesReport = [];
+  // Per-build harness-timing buckets (ms). These attribute the per-patch work
+  // that runs OUTSIDE apply() — coverage injection, reverse-diff/hash capture,
+  // conflict span materialization, verify scans — which the build summary
+  // previously lumped into one opaque "overhead" number. Threaded into
+  // recordStage / the verify flusher / detectAndRecordOverlaps below.
+  const harness = makeHarnessBuckets();
 
   // Deferred verify queue, flushed at phase boundaries and at the very end.
   // Each entry snapshots the code as it was IMMEDIATELY after its own apply()
@@ -258,7 +278,7 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
   // (heals) and pushes into failures / verifyIssuesReport. Behavior is identical
   // to the former inline closure.
   const flushPendingVerify = makeVerifyFlusher({
-    state, failures, verifyIssuesReport, frame, checkVerify, logger,
+    state, failures, verifyIssuesReport, frame, checkVerify, logger, harness,
   });
 
   // Enforce phase-respecting dependencies: a patch may only depend on patches
@@ -305,12 +325,14 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
       fail(`manifest invalid (${manifestErrors.join('; ')})`);
       continue;
     }
-    // Compact mode shows just the patch name (the scannable token); the prose
-    // description is detail reserved for --verbose. Either way the runner still
-    // prints one ✨ line per patch so progress through the set stays visible.
-    logger.log(isVerbose()
-      ? `  ${style.green(icon.apply)} ${style.bold(name)} ${style.dim('· ' + patch.description)}`
-      : `  ${style.green(icon.apply)} ${style.bold(name)}`);
+    // Per-patch roll-call is VERBOSE-only: in compact mode the build path prints
+    // a single `✨ N patches applied` rollup (see cli/build-report.mjs / the
+    // post-apply summary in cmd-build.mjs), so emitting one ✨ line per patch
+    // here just adds 28 lines of noise. Under --verbose we still show the full
+    // per-patch narrative (name + prose description) for progress tracing.
+    if (isVerbose()) {
+      logger.log(`  ${style.green(icon.apply)} ${style.bold(name)} ${style.dim('· ' + patch.description)}`);
+    }
 
     // Revisit marker: nudge the maintainer when a forensic patch has reached
     // the upstream version it was supposed to be re-evaluated at.
@@ -436,7 +458,7 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
         // (Finding #3). Returns the coverage-instrumented final code.
         effectiveCode = recordStage({
           name, normalized, preCode, effectiveCode, atSites,
-          lifecycleCtx, patchOptions, logger,
+          lifecycleCtx, patchOptions, logger, state, harness,
         });
 
         state.nextCode = effectiveCode;
@@ -446,7 +468,7 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
       // DX2: gate and source verify off `normalized.verify` (post-validation
       // truth), not the raw patch.verify. The entry also carries the normalized
       // verify block so the onVerifyFail retry re-checks against the same source.
-      if (normalized.verify) {
+      if (normalized.verify && !skipVerify) {
         // Defer verify into the phase batch. End-of-phase flush runs verifyBatch
         // in one linear scan per snapshot, then dispatches onVerifyFail
         // per-patch as needed. `snapshot` captures the code immediately after
@@ -478,7 +500,7 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
   // strict mode; in strict mode they become fatal unless allowlisted.
   // Delegated to detectAndRecordOverlaps() — independently testable.
   const { failures: overlapFailures } = detectAndRecordOverlaps(
-    phaseTraces, frame, globalStrict, logger, warnStorageOnce, storageRoot,
+    phaseTraces, frame, globalStrict, logger, warnStorageOnce, storageRoot, harness,
   );
   for (const f of overlapFailures) failures.push(f);
 
@@ -486,7 +508,7 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
   // them. `noChange` patches silently injected nothing (anchors likely drifted);
   // `appliedFallback` patches only applied by replaying a stale stored diff.
   // Assembled into a structured report via buildPatchReport().
-  const report = buildPatchReport(timings, drifts, verifyIssuesReport, results);
+  const report = buildPatchReport(timings, drifts, verifyIssuesReport, results, harness);
   if (report.appliedFallback > 0) {
     logger.warn('');
     logger.warn(`  [!] ${report.appliedFallback} patch(es) applied via STALE FALLBACK DIFF — anchors have drifted, fix anchors`);

@@ -26,7 +26,7 @@ import {
   toolStatusesIn,
   disposeToolScope,
   __resetDriftGuardForTests,
-} from '../packages/adk/tool-registry.mjs';
+} from '../tool-registry.mjs';
 
 // ── shared global hygiene ─────────────────────────────────────────────────────
 

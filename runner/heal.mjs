@@ -16,6 +16,29 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { PROJECT_ROOT } from './paths.mjs';
+import { style } from './cli/style.mjs';
+
+/**
+ * Build the build-style `→ Next:` capstone for `ccpatch heal`, matching the
+ * arrow glyph + cyan styling the build report uses (runner/cli/build-report.mjs)
+ * so every command ends with one actionable step in the same voice.
+ *
+ *   - wrote     : edits were applied → confirm with doctor.
+ *   - proposed  : a diff is on stdout → apply with `--write`.
+ *   - nothing   : no healable drift → run doctor to (re)detect drift.
+ *
+ * @param {{ wrote:boolean, changeCount:number, empty:boolean }} state
+ * @returns {string}
+ */
+export function healNextLine({ wrote = false, changeCount = 0, empty = false } = {}) {
+  if (wrote && changeCount > 0) {
+    return `${style.cyan('→ Next:')} re-run \`ccpatch doctor <input.js>\` to confirm the anchors now resolve.`;
+  }
+  if (!empty && changeCount > 0) {
+    return `${style.cyan('→ Next:')} re-run with \`ccpatch heal --write\` to apply the proposed registry edit(s).`;
+  }
+  return `${style.cyan('→ Next:')} run \`ccpatch doctor <input.js> --suggest\` to (re)detect drift and gather candidates.`;
+}
 
 export const DEFAULT_DRIFT_PATH = path.join(PROJECT_ROOT, 'storage', 'outputs', 'anchor-drift.jsonl');
 export const DEFAULT_ANCHORS_PATH = path.join(PROJECT_ROOT, 'runner', 'anchors.mjs');
@@ -260,7 +283,10 @@ function makeUnifiedDiff(label, oldStr, newStr, context = 3) {
  * @param {string} [opts.driftPath]   path to anchor-drift.jsonl
  * @param {string} [opts.anchorsPath] path to runner/anchors.mjs
  * @param {boolean}[opts.write]       apply the diff in place
- * @returns {{ ok: boolean, error?: string, diff: string, changes, skipped, wrote: boolean }}
+ * @param {{log:Function}}[opts.logger] when provided, the `→ Next:` capstone is
+ *        emitted through it so heal ends with the same actionable line the build
+ *        report uses. The line is always returned as `nextLine` regardless.
+ * @returns {{ ok: boolean, error?: string, diff: string, changes, skipped, wrote: boolean, nextLine?: string }}
  */
 export function runHeal(opts = {}) {
   const driftPath = opts.driftPath || DEFAULT_DRIFT_PATH;
@@ -279,5 +305,13 @@ export function runHeal(opts = {}) {
     fs.writeFileSync(anchorsPath, newSrc, 'utf8');
     wrote = true;
   }
-  return { ok: true, diff, changes, skipped, wrote, empty: diff === '', driftCount: entries.length };
+  const empty = diff === '';
+  // Build-style capstone: after a --write apply, point at doctor to confirm;
+  // after a proposal, point at `heal --write` to apply; with nothing to do,
+  // point back at doctor --suggest to (re)detect drift.
+  const nextLine = healNextLine({ wrote, changeCount: changes.length, empty });
+  if (opts.logger && typeof opts.logger.log === 'function') {
+    opts.logger.log(nextLine);
+  }
+  return { ok: true, diff, changes, skipped, wrote, empty, driftCount: entries.length, nextLine };
 }

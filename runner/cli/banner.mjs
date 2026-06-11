@@ -12,6 +12,25 @@
 
 import { style, vwidth } from './style.mjs';
 
+/**
+ * Canonical ccpatch safety-caveat lines, shared by every banner that surfaces
+ * the warnings (e.g. scripts/print-banner.mjs). Kept here, next to the shared
+ * renderer, so the wording stays in one place.
+ *
+ * The capability gate is enforced at BUILD time (it decides which patches enter
+ * the bundle); --dangerously-skip-permissions removes RUNTIME prompts, so the
+ * patched tool-dispatch code then runs unprompted. The middle line below makes
+ * that build-time-vs-runtime distinction explicit in a single ⚠ row, sized to
+ * stay within the responsive box width.
+ *
+ * @type {string[]}
+ */
+export const SAFETY_WARNINGS = [
+  '⚠ Unofficial — may break when Claude Code updates.',
+  '⚠ Cap gate is build-time; --dangerously-skip-permissions runs patched code unprompted.',
+  '⚠ Review THREAT_MODEL.md before enabling network/env patches.',
+];
+
 function termCols() {
   const c = (process.stdout && process.stdout.columns) ||
             (process.stderr && process.stderr.columns) || 80;

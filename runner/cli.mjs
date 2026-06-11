@@ -4,7 +4,7 @@ import path from 'node:path';
 import { HELP, USAGE, maybePrintSubcommandHelp } from './cli/help.mjs';
 import { buildCommandTable, namedSubcommands, DEFAULT_KEY } from './cli/commands.mjs';
 import { extractGlobalFlags, makeLogger } from './cli/logger.mjs';
-import { setVerbose } from './cli/style.mjs';
+import { setVerbose, isVerbose, style } from './cli/style.mjs';
 import { loadPatches } from './loader.mjs';
 import { resolveProfile, classifyRisk, CAPABILITIES } from './manifest.mjs';
 import { readProfiles, readPatchFlags } from './config.mjs';
@@ -140,6 +140,21 @@ export function parseBuildArgs(args) {
     if (args[i] === '--allow-unverified') {
       patchOptions.allowUnverified = true;
     }
+    // Sidecar / verify controls (shared with the Makefile targets). Reverse-diff
+    // capture is OPT-IN: the ~16MB sha256 per changed patch is the dominant build
+    // cost, so it only runs when --emit-revert is set (the release target passes
+    // it). --no-sidecar skips ALL sidecar writes (.sha256 + .ccp-revert.json) and
+    // --no-verify skips the verify literal scan; both are used by `make dev` to
+    // keep the inner edit loop fast.
+    if (args[i] === '--emit-revert') {
+      patchOptions.emitRevert = true;
+    }
+    if (args[i] === '--no-sidecar') {
+      patchOptions.noSidecar = true;
+    }
+    if (args[i] === '--no-verify') {
+      patchOptions.noVerify = true;
+    }
   }
   if (!patchOptions.strict && process.env.CCPATCH_STRICT === '1') {
     patchOptions.strict = true;
@@ -199,6 +214,11 @@ const NAMED_SUBCOMMANDS = new Set(namedSubcommands(COMMANDS));
 export function parsePatchCliArgs(args) {
   if (args.includes('--list')) {
     return { list: true };
+  }
+  if (args.includes('--applied')) {
+    const vi = args.indexOf('--version');
+    const version = vi !== -1 ? args[vi + 1] : undefined;
+    return { applied: true, version };
   }
   const head = args[0];
   if (head && NAMED_SUBCOMMANDS.has(head)) {
@@ -268,11 +288,106 @@ export async function runPatchCli(args, logger = console) {
   }
 
   // `--list` is a flag, not a table subcommand: it still needs patches loaded.
+  // Compact (default): one `name  description` line per patch. Verbose
+  // (--verbose / -v / VERBOSE=1 / --log-level=debug): a category-grouped roll-up
+  // that also surfaces the metadata you'd otherwise have to open each patch file
+  // to see — capabilities, and required/disabled status — so the listing matches
+  // the per-patch detail the build prints under VERBOSE.
   if (options.list) {
     const patches = await loadPatches({ version: pickLoadVersion(options) });
-    for (const name of Object.keys(patches).sort()) {
-      const desc = patches[name].description ?? '';
-      logger.log(`${name.padEnd(32)} ${desc}`);
+    const names = Object.keys(patches).sort();
+    if (!isVerbose()) {
+      for (const name of names) {
+        const desc = patches[name].description ?? '';
+        logger.log(`${name.padEnd(32)} ${desc}`);
+      }
+      return 0;
+    }
+    // Verbose: group by category so the listing reads like the patch catalog.
+    const byCategory = new Map();
+    for (const name of names) {
+      const cat = patches[name].category ?? 'uncategorized';
+      if (!byCategory.has(cat)) byCategory.set(cat, []);
+      byCategory.get(cat).push(name);
+    }
+    logger.log(`${style.bold(`${names.length} patches`)} ${style.dim(`· ${byCategory.size} categories`)}`);
+    for (const cat of [...byCategory.keys()].sort()) {
+      const group = byCategory.get(cat);
+      logger.log('');
+      logger.log(`${style.cyan(cat)} ${style.dim(`(${group.length})`)}`);
+      for (const name of group) {
+        const p = patches[name];
+        const tags = [];
+        if (p.required) tags.push('required');
+        if (p.enabled === false) tags.push('disabled');
+        const caps = Array.isArray(p.capabilities) ? p.capabilities : [];
+        if (caps.length) tags.push(caps.join('+'));
+        const meta = tags.length ? ` ${style.dim(`[${tags.join(' · ')}]`)}` : '';
+        logger.log(`  ${style.green(name)}${meta}`);
+        if (p.description) logger.log(`    ${style.dim(p.description)}`);
+      }
+    }
+    return 0;
+  }
+
+  // `--applied`: unlike `--list` (which enumerates the whole catalog), this
+  // reads the per-build results JSON that writeApplyArtifacts() emitted for the
+  // most recent build of this version and reports ONLY the patches that actually
+  // applied — joined back to catalog metadata (category, capabilities, status)
+  // and grouped like the verbose listing. Answers "what's in this bundle", not
+  // "what patches exist". Requires a prior build (the results JSON to exist).
+  if (options.applied) {
+    const version = options.version || process.env.CCPATCH_CLI_VERSION || undefined;
+    if (!version) {
+      logger.log('--applied needs a version: pass --version x.y.z or set CCPATCH_CLI_VERSION (it selects which patch-results-v<ver>.json to read).');
+      return 1;
+    }
+    const resultsPath = path.join(PROJECT_ROOT, 'storage', 'outputs', `patch-results-v${version}.json`);
+    if (!fs.existsSync(resultsPath)) {
+      logger.log(`No build results for v${version} at ${resultsPath} — run \`make patch-claude-code\` first.`);
+      return 1;
+    }
+    let results;
+    try {
+      results = JSON.parse(fs.readFileSync(resultsPath, 'utf8'));
+    } catch (err) {
+      logger.log(`Could not parse ${resultsPath}: ${err.message} — re-run \`make patch-claude-code\` to regenerate it.`);
+      return 1;
+    }
+    if (!results.patches || typeof results.patches !== 'object') {
+      logger.log(`${resultsPath} is missing a "patches" object (stale or hand-edited format) — re-run \`make patch-claude-code\`.`);
+      return 1;
+    }
+    const patches = await loadPatches({ version });
+    // Applied = status applied / applied-fallback / no-change-ok (same liveness
+    // test writeApplyArtifacts uses for the coverage manifest).
+    const isApplied = (s) => s === 'applied' || s === 'applied-fallback' || s === 'no-change-ok';
+    const names = Object.keys(results.patches)
+      .filter((n) => isApplied(results.patches[n].status))
+      .sort();
+    const byCategory = new Map();
+    for (const name of names) {
+      const cat = patches[name]?.category ?? 'uncategorized';
+      if (!byCategory.has(cat)) byCategory.set(cat, []);
+      byCategory.get(cat).push(name);
+    }
+    logger.log(`${style.bold(`${names.length} patches applied`)} ${style.dim(`· v${version} · ${byCategory.size} categories`)}`);
+    for (const cat of [...byCategory.keys()].sort()) {
+      const group = byCategory.get(cat);
+      logger.log('');
+      logger.log(`${style.cyan(cat)} ${style.dim(`(${group.length})`)}`);
+      for (const name of group) {
+        const p = patches[name];
+        const tags = [];
+        if (p?.required) tags.push('required');
+        const caps = Array.isArray(p?.capabilities) ? p.capabilities : [];
+        if (caps.length) tags.push(caps.join('+'));
+        const variant = results.patches[name].resolvedVariant;
+        if (variant && variant !== 'default') tags.push(`variant:${variant}`);
+        const meta = tags.length ? ` ${style.dim(`[${tags.join(' · ')}]`)}` : '';
+        logger.log(`  ${style.green(name)}${meta}`);
+        if (p?.description) logger.log(`    ${style.dim(p.description)}`);
+      }
     }
     return 0;
   }
@@ -408,6 +523,7 @@ export async function runHealCommand(ctx) {
     for (const s of res.skipped) {
       logger.log(`  [skip] ${s.patch} (${s.id ?? '?'}): ${s.reason}`);
     }
+    if (res.nextLine) logger.log(res.nextLine);
     return 0;
   }
   if (options.write && res.wrote) {
@@ -418,6 +534,7 @@ export async function runHealCommand(ctx) {
       logger.log(`  [skip] ${s.patch} (${s.id ?? '?'}): ${s.reason}`);
     }
     logger.log(`[heal] applied ${res.changes.length} registry edit(s) to runner/anchors.mjs.`);
+    if (res.nextLine) logger.log(res.nextLine);
     return 0;
   }
   // Default: propose the diff on stdout. Informational lines go to the logger
@@ -427,6 +544,7 @@ export async function runHealCommand(ctx) {
   for (const s of res.skipped) {
     logger.log(`  [skip] ${s.patch} (${s.id ?? '?'}): ${s.reason}`);
   }
+  if (res.nextLine) logger.log(res.nextLine);
   return 0;
 }
 

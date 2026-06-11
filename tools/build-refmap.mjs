@@ -26,14 +26,18 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { createHash } from 'node:crypto';
 
-import { anchors } from '../runner/anchors.mjs';
-import { findFunctionByLiteral } from '../runner/ast-anchor.mjs';
 import { PROJECT_ROOT } from '../runner/paths.mjs';
+import { analyzeBundle, analysisToRefmap } from '../runner/dissect.mjs';
 
 /**
  * Build a refmap object for `code`. Pure function — no I/O.
+ *
+ * A refmap is a PROJECTION of analyzeBundle()'s structural model (see
+ * runner/dissect.mjs): the resolved-anchor subset, keyed `id → { fn, offset }`,
+ * plus the miss list. Sharing that primitive is what keeps `ccpatch refmap` and
+ * `ccpatch dissect` from drifting — same discipline `explain` follows by
+ * reusing resolveEffectivePatches().
  *
  * @param {string} code
  * @param {{ ccVersion?: string|null, now?: () => Date }} [opts]
@@ -46,33 +50,15 @@ import { PROJECT_ROOT } from '../runner/paths.mjs';
  * }}
  */
 export function buildRefmap(code, opts = {}) {
-  const ccVersion = opts.ccVersion ?? null;
   const now = opts.now ? opts.now() : new Date();
-  const bundleSha256 = createHash('sha256').update(code, 'utf8').digest('hex');
-
-  const resolved = {};
-  const misses = [];
-
-  for (const [id, entry] of Object.entries(anchors)) {
-    const literal = entry?.literal;
-    if (!literal) {
-      misses.push(id);
-      continue;
-    }
-    const hit = findFunctionByLiteral(code, literal);
-    if (!hit) {
-      misses.push(id);
-      continue;
-    }
-    resolved[id] = { fn: hit.name, offset: hit.start };
-  }
-
+  const analysis = analyzeBundle({ code }, { ccVersion: opts.ccVersion ?? null });
+  const refmap = analysisToRefmap(analysis);
   return {
-    ccVersion,
+    ccVersion: refmap.ccVersion,
     generatedAt: now.toISOString(),
-    bundleSha256,
-    anchors: resolved,
-    misses,
+    bundleSha256: refmap.bundleSha256,
+    anchors: refmap.anchors,
+    misses: refmap.misses,
   };
 }
 

@@ -9,7 +9,7 @@ import {
   getAgentIn,
   listAgentsIn,
   disposeAgentScope,
-} from '../packages/adk/agent.mjs';
+} from '../agent.mjs';
 
 /**
  * Capture console.warn calls + agent.redefined bus events for the duration of

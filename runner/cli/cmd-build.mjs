@@ -21,6 +21,11 @@ import { CAPABILITIES } from '../manifest.mjs';
 import { buildPreload } from '../preload-builder.mjs';
 import { emitOverlay } from '../overlay-builder.mjs';
 import {
+  collectAgentDirPatches,
+  emitAgentsDir,
+  emitAdkRuntime,
+} from '../agents-dir-builder.mjs';
+import {
   parseRepackSkip,
   nativeGrowPathAvailable,
   hostPlatformLabel,
@@ -36,6 +41,28 @@ import {
 export async function runBuild(ctx) {
   const { options, patches, logger } = ctx;
   let code = fs.readFileSync(options.inputPath, 'utf8');
+
+  // ── Fast-dev / sidecar flags ────────────────────────────────────────────────
+  // Three flags govern how much per-patch HARNESS work the build does. They are
+  // resolved from patchOptions first (when parseBuildArgs in cli.mjs wires them)
+  // and otherwise from process.argv directly, so this path works standalone:
+  //   --emit-revert  emit the .ccp-revert.json reverse-diff sidecar (default OFF).
+  //                  When OFF we skip reverse-diff splice capture AND its ~16MB
+  //                  sha256 hashing entirely — the dominant inner-loop cost. The
+  //                  release build target passes --emit-revert; `make dev` does not.
+  //   --no-sidecar   skip ALL sidecar writes (.sha256 + .ccp-revert.json). Implies
+  //                  no reverse-diff capture (nothing consumes it).
+  //   --no-verify    skip the verify literal scan (verify.present/absent batching).
+  const po = options.patchOptions || (options.patchOptions = {});
+  const rawArgs = Array.isArray(process.argv) ? process.argv : [];
+  const emitRevert = po.emitRevert === true || rawArgs.includes('--emit-revert');
+  const noSidecar = po.noSidecar === true || rawArgs.includes('--no-sidecar');
+  const noVerify = po.noVerify === true || rawArgs.includes('--no-verify');
+  // Normalize back onto patchOptions so downstream (and the runner) see a single
+  // source of truth regardless of which surface set the flag.
+  po.emitRevert = emitRevert;
+  po.noSidecar = noSidecar;
+  po.noVerify = noVerify;
 
   // ── Feature flags / profile / --patch resolution ───────────────────────────
   // U2: precedence (explicit --patch > --profile > ccpatch.yml enabled flags,
@@ -258,8 +285,16 @@ export async function runBuild(ctx) {
   // Cluster B will eventually have applyNamedPatches return { code, report }.
   // Read defensively so this code path keeps working through that migration.
   let runnerReport = {};
-  const captureReverse = [];
+  // Reverse-diff capture is OPT-IN: only collect splices (and pay their ~16MB
+  // sha256 per changed patch) when --emit-revert is set and sidecars are not
+  // suppressed. Otherwise leave captureReverse undefined so captureReverseDiff()
+  // short-circuits on its `!Array.isArray` guard — no splice, no hashing.
+  const wantReverseDiff = emitRevert && !noSidecar;
+  const captureReverse = wantReverseDiff ? [] : undefined;
   patchOptions.captureReverse = captureReverse;
+  // --no-verify: skip the verify literal scan entirely. Threaded to the runner
+  // so the verify-batch flush is a no-op (see applyNamedPatches).
+  if (noVerify) patchOptions.skipVerify = true;
   // Coarse wall-clock phase timers (ms). Filled in as each major phase runs so
   // the end-of-run report can attribute wall time beyond the per-patch
   // transform sums. Defensive: applyNamedPatches may later expose its own
@@ -366,22 +401,33 @@ export async function runBuild(ctx) {
 
   // Issue #8: post-write integrity check + .sha256 sidecar (skipped in dry-run).
   if (!options.patchOptions?.dryRun) {
-    // 1. Re-read the written file and compare hashes.
-    const writtenBytes = fs.readFileSync(options.outputPath, 'utf8');
-    const writtenSha = sha256(writtenBytes);
-    if (writtenSha === outputSha256) {
+    // 1. Cheap integrity check: compare the on-disk byte length against what we
+    //    wrote. A full re-read + sha256 of the ~16MB bundle on every build is a
+    //    redundant cost for a check that almost never fails, so only escalate to
+    //    the re-read + hash compare when the lengths actually differ.
+    const expectedBytes = Buffer.byteLength(patchedCode, 'utf8');
+    const onDiskBytes = fs.statSync(options.outputPath).size;
+    const integrityOk =
+      onDiskBytes === expectedBytes ||
+      sha256(fs.readFileSync(options.outputPath, 'utf8')) === outputSha256;
+    if (integrityOk) {
       logger.log(`  [+] Output integrity: OK`);
     } else {
       logger.warn(`  [!] Output integrity: MISMATCH`);
     }
 
-    // 2. Write a .sha256 sidecar next to the output bundle.
-    try {
-      const sha256SidecarPath = options.outputPath + '.sha256';
-      fs.writeFileSync(sha256SidecarPath, outputSha256 + '\n', 'utf8');
-      logger.log(`  [+] SHA-256 sidecar written to: ${sha256SidecarPath}`);
-    } catch (err) {
-      logger.warn(`  [!] Could not write .sha256 sidecar: ${err.message}`);
+    // 2. Write a .sha256 sidecar next to the output bundle (skipped under
+    //    --no-sidecar; the integrity check above still runs).
+    if (noSidecar) {
+      logger.log(`  [~] --no-sidecar: skipping .sha256 sidecar`);
+    } else {
+      try {
+        const sha256SidecarPath = options.outputPath + '.sha256';
+        fs.writeFileSync(sha256SidecarPath, outputSha256 + '\n', 'utf8');
+        logger.log(`  [+] SHA-256 sidecar written to: ${sha256SidecarPath}`);
+      } catch (err) {
+        logger.warn(`  [!] Could not write .sha256 sidecar: ${err.message}`);
+      }
     }
   }
 
@@ -421,9 +467,34 @@ export async function runBuild(ctx) {
     logger.warn(`  [!] Could not write overlay file: ${err.message}`);
   }
 
+  // Emit the agents dir (ccpatch-agents/) for every enabled patch that declared
+  // `agentDir: { name, code }`. The core/overlay_loader patch injects a boot
+  // block that require()s each *.mjs there (integrity-gated via .sha256). When
+  // any agent ships, also copy the ADK runtime next to the bundle so those
+  // entries can `require('../ccpatch-adk/index.mjs')` without an install-layout
+  // assumption.
+  try {
+    const outputDir = path.dirname(options.outputPath);
+    const agentEntries = collectAgentDirPatches(patches, patchesToApply);
+    if (agentEntries.length > 0) {
+      const adkFiles = emitAdkRuntime(outputDir);
+      if (adkFiles.length > 0) {
+        logger.log(`  [+] ADK runtime (${adkFiles.length} files) copied to: ${path.join(outputDir, 'ccpatch-adk')}`);
+      }
+      const written = emitAgentsDir(agentEntries, outputDir);
+      if (written.length > 0) {
+        logger.log(`  [+] Agents dir (${written.length}) written under: ${path.join(outputDir, 'ccpatch-agents')}`);
+      }
+    }
+  } catch (err) {
+    logger.warn(`  [!] Could not write agents dir: ${err.message}`);
+  }
+
   // Write the reverse-diff sidecar so `ccpatch revert` can restore the input.
+  // captureReverse is undefined unless --emit-revert was set (and sidecars are
+  // not suppressed), so this whole block is skipped on the fast/default path.
   const sidecarStartedAt = Date.now();
-  if (captureReverse.length > 0) {
+  if (Array.isArray(captureReverse) && captureReverse.length > 0) {
     const sidecar = {
       version: REVERT_SIDECAR_VERSION,
       timestamp: new Date().toISOString(),

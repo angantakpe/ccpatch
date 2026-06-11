@@ -10,7 +10,7 @@
  *   node scripts/print-banner.mjs [--version x.y.z] [--profile name]
  */
 
-import { renderBanner } from '../runner/cli/banner.mjs';
+import { renderBanner, SAFETY_WARNINGS } from '../runner/cli/banner.mjs';
 
 function flag(name) {
   const i = process.argv.indexOf(name);
@@ -26,15 +26,14 @@ const rows = [
   null,
   ['make patch-claude-code', 'apply patches → releases/<ver>/'],
   ['make start', 'run the patched CLI  (CLI_ARGS=…)'],
-  ['make doctor', 'check anchor health (read-only)'],
+  ['make dev', 'fast clean→patch→start loop (no sidecar/verify)'],
+  ['make doctor', 'check anchor health · run when drift>0'],
   ['make patch-list', 'list available patches'],
   ['make clean', 'wipe releases/ + outputs (keeps archives)'],
   null,
   'Output is compact by default — add VERBOSE=1 for full per-patch detail.',
   null,
-  '⚠ Unofficial — may break when Claude Code updates.',
-  '⚠ --dangerously-skip-permissions skips all tool prompts.',
-  '⚠ Review THREAT_MODEL.md before enabling network/env patches.',
+  ...SAFETY_WARNINGS,
 ];
 
 const title = version ? `ccpatch v${version} · ${profile}` : `ccpatch · ${profile}`;

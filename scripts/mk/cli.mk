@@ -5,22 +5,91 @@
 # sha256 registry (storage/known-shas.json). Policy:
 #   known version + sha match    -> proceed
 #   known version + sha mismatch -> FAIL CLOSED (loud error, build stops)
-#   unknown/new version          -> TOFU warning, proceed (new versions still work)
+#   unknown/new version          -> tarball-integrity check is MANDATORY
+#                                   (verify-bundle-sha fails closed without it),
+#                                   then TOFU-accept and proceed.
 # Bypass intentionally with CCPATCH_SKIP_SHA_CHECK=1.
 SHA_REGISTRY    ?= storage/known-shas.json
 VERIFY_SHA_TOOL := scripts/verify-bundle-sha.mjs
+CC_PKG          ?= @anthropic-ai/claude-code
+# Cache for the per-version npm tarball pulled solely to supply an authenticity
+# anchor to the gate. Lives under storage/tmp/ so `make clean` (which preserves
+# storage/) keeps it across build cycles.
+SHA_TARBALL_DIR ?= storage/tmp
+
 # verify_bundle_sha <path-to-cli.js> — call inside a recipe ($$VAR ok).
-verify_bundle_sha = $(NODE) $(VERIFY_SHA_TOOL) "$(1)" --version "$(VERSION)" --registry $(SHA_REGISTRY)
+#
+# ALWAYS passes an npm registry integrity anchor (--tarball + --tarball-integrity)
+# alongside the version/registry lookup. For a known+pinned version this is a
+# belt-and-suspenders cross-check; for an UNKNOWN/new version it is the only
+# authenticity anchor and Lane B's gate now refuses to proceed without it. The
+# integrity comes from `npm pack --json`, which streams the registry's own
+# dist.integrity; the tarball is cached per-version so repeat builds don't re-pull
+# ~16MB. If npm is unreachable we emit a warning and fall back to the bare
+# version/registry call so offline builds of an ALREADY-PINNED version still work
+# (an unknown version will then fail closed inside the tool, as intended).
+verify_bundle_sha = ( \
+	TGZ=""; INTEG=""; \
+	mkdir -p $(SHA_TARBALL_DIR); \
+	PACK_JSON=$$(cd $(SHA_TARBALL_DIR) && npm pack $(CC_PKG)@$(VERSION) --json 2>/dev/null); \
+	if [ -n "$$PACK_JSON" ]; then \
+		FN=$$(printf '%s' "$$PACK_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const a=JSON.parse(s);process.stdout.write(a[0].filename||"")}catch{}})'); \
+		INTEG=$$(printf '%s' "$$PACK_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const a=JSON.parse(s);process.stdout.write(a[0].integrity||"")}catch{}})'); \
+		[ -n "$$FN" ] && [ -f "$(SHA_TARBALL_DIR)/$$FN" ] && TGZ="$(SHA_TARBALL_DIR)/$$FN"; \
+	fi; \
+	if [ -n "$$INTEG" ] && [ -n "$$TGZ" ]; then \
+		$(NODE) $(VERIFY_SHA_TOOL) "$(1)" --version "$(VERSION)" --registry $(SHA_REGISTRY) --tarball "$$TGZ" --tarball-integrity "$$INTEG"; \
+	else \
+		echo "[verify-bundle-sha] WARNING: could not obtain npm registry integrity for $(CC_PKG)@$(VERSION) (offline?) — running registry-only check; an UNKNOWN version will fail closed." 1>&2; \
+		$(NODE) $(VERIFY_SHA_TOOL) "$(1)" --version "$(VERSION)" --registry $(SHA_REGISTRY); \
+	fi \
+	)
+
+# ── Launch-time sidecar verification ──────────────────────────────────────────
+# A `<bundle>.sha256` sidecar is written at build time, but until launch nothing
+# re-checks it — so a patched bundle tampered with AFTER the build would run
+# unnoticed (especially dangerous together with --dangerously-skip-permissions).
+# `verify_launch <bundle>` recomputes the bundle's sha256 and compares it to the
+# sidecar before we exec it. Policy:
+#   sidecar present + match     -> proceed silently
+#   sidecar present + MISMATCH  -> FAIL CLOSED (build was tampered; abort)
+#   sidecar MISSING             -> warn but proceed (e.g. `make dev` builds with
+#                                  --no-sidecar; not a tamper signal, just absent)
+# Skippable with CCPATCH_SKIP_LAUNCH_VERIFY=1 (loud warning), mirroring the
+# CCPATCH_SKIP_SHA_CHECK build-gate bypass.
+verify_launch = ( \
+	if [ "$(CCPATCH_SKIP_LAUNCH_VERIFY)" = "1" ]; then \
+		echo "[start] WARNING: CCPATCH_SKIP_LAUNCH_VERIFY=1 — launch-time bundle integrity check SKIPPED. The patched bundle is run UNVERIFIED." 1>&2; \
+	else \
+		SIDECAR="$(1).sha256"; \
+		if [ ! -f "$$SIDECAR" ]; then \
+			echo "[start] WARNING: no $$SIDECAR sidecar — running $(1) UNVERIFIED (built with --no-sidecar?)." 1>&2; \
+		else \
+			WANT=$$(awk '{print $$1; exit}' "$$SIDECAR"); \
+			GOT=$$(sha256sum "$(1)" | awk '{print $$1}'); \
+			if [ "$$WANT" != "$$GOT" ]; then \
+				echo "" 1>&2; \
+				echo "[start] LAUNCH INTEGRITY FAILURE — refusing to run $(1)" 1>&2; \
+				echo "  sidecar sha256: $$WANT" 1>&2; \
+				echo "  bundle  sha256: $$GOT" 1>&2; \
+				echo "  The patched bundle does NOT match the sha256 recorded at build time." 1>&2; \
+				echo "  It may have been modified since it was built. Rebuild (make patch-claude-code)" 1>&2; \
+				echo "  or, if this is intentional, bypass with CCPATCH_SKIP_LAUNCH_VERIFY=1." 1>&2; \
+				exit 1; \
+			fi; \
+		fi; \
+	fi \
+	)
 
 .PHONY: install reconstruct build smoke run run-p test download \
         extract-from-binary bun-decompile bun-run bun-verify bun-reconstruct \
         coverage bun-all all beautify beautify-fast patch \
-        patch-claude-code patch-list doctor heal print-patch anchor-catalog \
+        patch-claude-code patch-list patch-applied doctor heal print-patch anchor-catalog \
         anchor-catalog-missing anchor-catalog-changed anchor-report repatch release run-extracted \
-        start start-unsafe verify \
+        start start-unsafe dev verify \
         patch-claude-code-native \
         clean clean-patched clean-identifiers clean-all \
-        test-patches patch-coverage new-patch
+        test-patches test-patch patch-coverage new-patch
 
 install: ## Install tool dependencies (prettier + lebab required by reconstructor)
 	bun install
@@ -191,6 +260,12 @@ patch: ## Apply patches to CLI: make patch [VERSION=x.y.z] [PATCH=startup,debug]
 	@test -f $(INPUT) || (echo "Error: $(INPUT) not found" && exit 1)
 	$(NODE) $(PATCH_TOOL) $(INPUT) $(OUTPUT) $(addprefix --patch ,$(subst $(comma), ,$(PATCH)))
 
+# Extra flags handed to the patch CLI by the standard build. Defaults to
+# --emit-revert so the production build always writes the .ccp-revert.json
+# reverse-diff sidecar. `make dev` overrides this to a fast-dev set
+# (--no-sidecar --no-verify, and crucially NO --emit-revert) for a tight loop.
+CCP_BUILD_FLAGS ?= --emit-revert
+
 patch-claude-code: ## Apply the standard profile: make patch-claude-code [VERSION=x.y.z] [PROFILE=minimal|standard|power] [INPUT=cli.js] [OUTPUT=out.js]
 	@$(NODE) scripts/print-banner.mjs --version $(VERSION) --profile $(PROFILE)
 	@mkdir -p releases/$(VERSION)
@@ -207,32 +282,40 @@ patch-claude-code: ## Apply the standard profile: make patch-claude-code [VERSIO
 	echo "Using: $$SRC"; \
 	$(call verify_bundle_sha,$$SRC) || exit 1; \
 	node tools/anchor-doctor.mjs "$$SRC" $(if $(PROFILE),--profile $(PROFILE),) || true; \
-	$(NODE) $(PATCH_TOOL) "$$SRC" $(OUTPUT) $(addprefix --patch ,$(subst $(comma), ,$(PATCH))) $(if $(PROFILE),--profile $(PROFILE),) $(if $(VERSION),--version $(VERSION),) $(CCP_VERBOSE_FLAG)
+	$(NODE) $(PATCH_TOOL) "$$SRC" $(OUTPUT) $(addprefix --patch ,$(subst $(comma), ,$(PATCH))) $(if $(PROFILE),--profile $(PROFILE),) $(if $(VERSION),--version $(VERSION),) $(CCP_BUILD_FLAGS) $(CCP_VERBOSE_FLAG)
 	@SHA256=$$(sha256sum $(OUTPUT) | awk '{print $$1}'); \
-	echo "$$SHA256  cli.v$(VERSION).patched.mjs" > releases/$(VERSION)/cli.v$(VERSION).patched.mjs.sha256; \
 	SIZE=$$(wc -c < $(OUTPUT) | tr -d ' '); \
 	SIZE_MB=$$(awk "BEGIN {printf \"%.1f\", $$SIZE/1048576}"); \
 	BUILD_TS=$$(date -u +"%Y-%m-%dT%H:%M:%SZ"); \
-	node -e " \
-	  const fs = require('fs'); \
-	  const patches = '$(PATCH)'.split(',').map(s=>s.trim()); \
-	  let capBypass = false; \
-	  try { capBypass = !!JSON.parse(fs.readFileSync('$(OUTPUT)' + '.capgate.json', 'utf8')).capabilitiesGateBypassed; } catch {} \
-	  const manifest = { \
-	    version: '$(VERSION)', \
-	    build_timestamp: process.env.BUILD_TS, \
-	    sha256: process.env.SHA256, \
-	    file_size_bytes: parseInt(process.env.SIZE, 10), \
-	    patches, \
-	    capabilitiesGateBypassed: capBypass, \
-	    node_required: '>=18.0.0' \
-	  }; \
-	  fs.writeFileSync('releases/$(VERSION)/cli.v$(VERSION).manifest.json', JSON.stringify(manifest, null, 2) + '\\n'); \
-	" BUILD_TS=$$BUILD_TS SHA256=$$SHA256 SIZE=$$SIZE; \
+	case " $(CCP_BUILD_FLAGS) " in \
+	  *" --no-sidecar "*) \
+	    echo "[build] --no-sidecar: skipping .sha256 + manifest writes (launch-time verify will warn, not fail)."; ;; \
+	  *) \
+	    echo "$$SHA256  cli.v$(VERSION).patched.mjs" > releases/$(VERSION)/cli.v$(VERSION).patched.mjs.sha256; \
+	    node -e " \
+	      const fs = require('fs'); \
+	      const patches = '$(PATCH)'.split(',').map(s=>s.trim()); \
+	      let capBypass = false; \
+	      try { capBypass = !!JSON.parse(fs.readFileSync('$(OUTPUT)' + '.capgate.json', 'utf8')).capabilitiesGateBypassed; } catch {} \
+	      const manifest = { \
+	        version: '$(VERSION)', \
+	        build_timestamp: process.env.BUILD_TS, \
+	        sha256: process.env.SHA256, \
+	        file_size_bytes: parseInt(process.env.SIZE, 10), \
+	        patches, \
+	        capabilitiesGateBypassed: capBypass, \
+	        node_required: '>=18.0.0' \
+	      }; \
+	      fs.writeFileSync('releases/$(VERSION)/cli.v$(VERSION).manifest.json', JSON.stringify(manifest, null, 2) + '\\n'); \
+	    " BUILD_TS=$$BUILD_TS SHA256=$$SHA256 SIZE=$$SIZE; ;; \
+	esac; \
 	echo "Artifacts: $(OUTPUT) ($$SIZE_MB MB, sha256:$$(echo $$SHA256 | cut -c1-12))"
 
-patch-list: ## List available patches
-	@$(NODE) $(PATCH_TOOL) --list
+patch-list: ## List available patches in the catalog (VERBOSE=1 adds category/capabilities per patch)
+	@$(NODE) $(PATCH_TOOL) --list $(CCP_VERBOSE_FLAG)
+
+patch-applied: ## List patches that actually applied to the last build (reads storage/outputs/patch-results-v$(VERSION).json)
+	@$(NODE) $(PATCH_TOOL) --applied --version $(VERSION)
 
 # `NAME` is a common environment variable (set by some shells/distros). Ignore
 # an environment-origin value so `make new-patch` with no NAME shows usage rather
@@ -344,6 +427,14 @@ release: repatch ## Package patched CLI as a versioned release artifact: make re
 test-patches: ## Run patch unit tests (apply + verify + runtime): make test-patches [VERSION=x.y.z]
 	node --test tests/patch-verification.test.mjs
 
+# Focused single-patch test. Filters the suite to one patch via Node's
+# --test-name-pattern, anchored as ^NAME$ so it matches that patch's subtest in
+# each Layer (1/2/3 are named exactly by patch name) and nothing else. NAME is
+# already env-origin-sanitized above (shared with new-patch).
+test-patch: ## Run unit tests for ONE patch: make test-patch NAME=debug
+	@test -n "$(NAME)" || (echo "usage: make test-patch NAME=<patch>  (e.g. make test-patch NAME=debug)" && exit 2)
+	node --test --test-name-pattern '^$(NAME)$$' tests/patch-verification.test.mjs
+
 patch-coverage: ## Apply + smoke-run + cross-reference patch coverage: make patch-coverage [VERSION=x.y.z] [SMOKE='node out.js --version']
 	@test -n "$(VERSION)" || (echo "Error: VERSION required" && exit 1)
 	$(MAKE) patch-claude-code VERSION=$(VERSION)
@@ -359,6 +450,7 @@ start: ## Run the patched CLI, building first if needed: make start [VERSION=x.y
 		echo "$(OUTPUT) not found — building..."; \
 		$(MAKE) patch-claude-code VERSION=$(VERSION); \
 	fi
+	@$(call verify_launch,$(OUTPUT)) || exit 1
 	node $(OUTPUT) $(CLI_ARGS)
 
 start-unsafe: ## Run the patched CLI with --dangerously-skip-permissions (opt-in unsafe mode): make start-unsafe [VERSION=x.y.z] [CLI_ARGS='...']
@@ -371,7 +463,14 @@ start-unsafe: ## Run the patched CLI with --dangerously-skip-permissions (opt-in
 		echo "$(OUTPUT) not found — building..."; \
 		$(MAKE) patch-claude-code VERSION=$(VERSION); \
 	fi
+	@$(call verify_launch,$(OUTPUT)) || exit 1
 	node $(OUTPUT) $(CLI_ARGS) --dangerously-skip-permissions
+
+dev: ## Fast inner loop — clean + patch (no sidecar/verify) + start in one shot: make dev [CLI_ARGS='--help']
+	@$(MAKE) --no-print-directory clean
+	@$(MAKE) --no-print-directory patch-claude-code VERSION=$(VERSION) PROFILE=$(PROFILE) \
+		CCP_BUILD_FLAGS='--no-sidecar --no-verify'
+	@$(MAKE) --no-print-directory start VERSION=$(VERSION) CLI_ARGS='$(CLI_ARGS)'
 
 # ── Extraction cache guard ────────────────────────────────────────────────────
 # $(CJS_EXTRACTED) is content-addressed per version: the path already encodes
