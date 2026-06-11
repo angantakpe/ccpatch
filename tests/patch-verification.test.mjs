@@ -252,6 +252,16 @@ test('Layer 1 — every patch.apply() mutates its input', async (t) => {
       }
       assert.strictEqual(typeof out, 'string', 'apply() must return a string');
       if (out === fixture) {
+        // No change. Without a REAL bundle this is inconclusive: the synthetic
+        // fixture simply may not carry this patch's anchor, so a no-op proves
+        // nothing about anchor health. Skip rather than fail — drift-check runs
+        // this same suite WITH a downloaded bundle, where the assertion is real.
+        // (The heuristic skip above misses some anchor-only core patches; this is
+        // the backstop.)
+        if (!HAS_REAL_BUNDLE) {
+          t.skip(`no change against synthetic fixture — "${name}" needs a real bundle to verify its anchor`);
+          return;
+        }
         const msg = `patch "${name}" produced no changes — anchor likely broken for this bundle version`;
         if (isEnabled(name)) {
           assert.fail(msg);
@@ -295,11 +305,26 @@ test('Layer 2 — verify.present string exists after apply()', async (t) => {
       const fixture = fixtureFor(name, patch);
       const out = applyFn(fixture, {});
 
+      // No change against a synthetic fixture (no real bundle) means the anchor
+      // simply isn't in the fixture — verify.present naturally won't be found, so
+      // asserting it would be a false negative. Skip; drift-check asserts this
+      // for real against a downloaded bundle. Mirrors the Layer 1 backstop.
+      if (!HAS_REAL_BUNDLE && out === fixture) {
+        t.skip(`no change against synthetic fixture — "${name}" needs a real bundle to verify its anchor`);
+        return;
+      }
+
       const { present, absent, count, label } = patch.verify;
       const presents = Array.isArray(present) ? present : (present ? [present] : []);
       const absents  = Array.isArray(absent)  ? absent  : (absent  ? [absent]  : []);
       const reportFail = (msg) => {
-        if (isEnabled(name)) assert.fail(msg);
+        // Without a real bundle the synthetic fixture is best-effort and may not
+        // exercise every injection site (e.g. a verify.count that only a full
+        // bundle satisfies), so a verify miss here isn't authoritative — demote
+        // to a diagnostic. drift-check asserts this strictly against a real
+        // downloaded bundle.
+        if (!HAS_REAL_BUNDLE) t.diagnostic(`${msg} (synthetic fixture — not authoritative without a real bundle)`);
+        else if (isEnabled(name)) assert.fail(msg);
         else t.diagnostic(`${msg} (disabled in ccpatch.yml — demoted to warning)`);
       };
       for (const p of presents) {
