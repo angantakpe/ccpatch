@@ -209,7 +209,7 @@ export function assertNoShimMarkers(text) {
   }
 }
 
-function normalisePatchedJs(text) {
+export function normalisePatchedJs(text) {
   // Enforce the native-repack prereq: esm_compat / bun_shim must be disabled (README). Detect
   // their injected markers and fail early, before any of the structural validation below.
   assertNoShimMarkers(text);
@@ -227,13 +227,52 @@ function normalisePatchedJs(text) {
     );
   }
 
-  // Must start with the Bun CJS wrapper opener.
-  if (!/^\(function\s*\(\s*exports\s*,\s*require\s*,\s*module\s*,\s*__filename\s*,\s*__dirname\s*\)\s*\{/.test(text)) {
-    throw new Error(
-      'The patched JS file does not start with the expected Bun CJS wrapper ' +
-      '`(function(exports, require, module, __filename, __dirname) {`. ' +
-      'Only CJS-format patched files can be embedded in a Bun SEA binary.'
-    );
+  // Relocate any leading boot code to just inside the wrapper.
+  //
+  // Several patches (contracts, fetch_interceptor, hook_noise_mute, …) inject a
+  // self-contained boot IIFE at the bundle HEAD — i.e. BEFORE the
+  // `(function(exports, require, module, __filename, __dirname) {` wrapper. That
+  // is harmless for the Node extract form (the IIFE just runs first), but Bun's
+  // SEA loader requires the embedded module to BEGIN with the wrapper opener.
+  // Since contracts and fetch_interceptor are `required: true` infra that many
+  // other patches depend on, they cannot simply be excluded — so a head-injected
+  // prefix is unavoidable for any real native build.
+  //
+  // The fix is a length-preserving relocation: move the prefix from before the
+  // wrapper to immediately after the wrapper's opening `{`. Because each injected
+  // block is a self-invoked IIFE with no dependency on running before the wrapper
+  // is *defined* (the wrapper is invoked synchronously in the same module eval),
+  // running them as the first statements INSIDE the wrapper body is
+  // execution-equivalent — and they still run before any CLI code, so e.g.
+  // hook_noise_mute's spawnSync wrap is in place before the CLI uses it. The byte
+  // length is unchanged, so the binary's stored offsets are unaffected.
+  const wrapperRe = /\(function\s*\(\s*exports\s*,\s*require\s*,\s*module\s*,\s*__filename\s*,\s*__dirname\s*\)\s*\{/;
+  const startsWithWrapperRe = /^\(function\s*\(\s*exports\s*,\s*require\s*,\s*module\s*,\s*__filename\s*,\s*__dirname\s*\)\s*\{/;
+  if (!startsWithWrapperRe.test(text)) {
+    const m = text.match(wrapperRe);
+    if (!m) {
+      throw new Error(
+        'The patched JS file does not contain the expected Bun CJS wrapper ' +
+        '`(function(exports, require, module, __filename, __dirname) {`. ' +
+        'Only CJS-format patched files can be embedded in a Bun SEA binary.'
+      );
+    }
+    const prefix = text.slice(0, m.index);
+    // Guard: a second wrapper opener inside the prefix would mean we picked the
+    // wrong (inner) match — refuse rather than risk a malformed relocation.
+    if (wrapperRe.test(prefix)) {
+      throw new Error(
+        'The patched JS has head-injected code containing a nested CJS wrapper opener; ' +
+        'cannot safely relocate it for Bun SEA embedding.'
+      );
+    }
+    const opener = m[0];
+    const afterOpener = m.index + opener.length;
+    // opener + relocated prefix + original wrapper body. This is a pure byte
+    // move (length-preserving, so stored offsets are unaffected). No separator
+    // is needed: the prefix was originally concatenated DIRECTLY before the
+    // wrapper opener by the injecting patches, so it is already self-terminating.
+    text = opener + prefix + text.slice(afterOpener);
   }
 
   // Strip the self-invocation call appended by extract-from-binary.mjs.

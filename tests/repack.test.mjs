@@ -10,6 +10,7 @@ import {
   assertRegionEndIsNul,
   detectBunVersion,
   formatSkipLine,
+  normalisePatchedJs,
 } from '../bin/repack-bundle.mjs';
 import { parseElfBunGraph, growBunSeaBinary } from '../bin/bun-sea-graph.mjs';
 import { readFileSync } from 'node:fs';
@@ -27,6 +28,50 @@ function pad(text, padBytes) {
   const closeEnd = locateWrapperCloseEnd(text);
   return text.slice(0, closeEnd) + ' '.repeat(padBytes) + text.slice(closeEnd);
 }
+
+describe('normalisePatchedJs — head-IIFE relocation', () => {
+  const WRAPPER_OPEN = '(function(exports, require, module, __filename, __dirname) {';
+  const bundle = (head, body) =>
+    head + WRAPPER_OPEN + body + '})';
+
+  it('relocates a leading boot IIFE to just inside the wrapper, length-preserving', () => {
+    const head = '(function(){globalThis.__boot=1;})();';
+    const input = bundle(head, 'module.exports=42;');
+    const out = normalisePatchedJs(input);
+
+    // Must now START with the wrapper opener (Bun SEA prereq).
+    assert.ok(out.startsWith(WRAPPER_OPEN), 'output begins with the CJS wrapper opener');
+    // The relocated boot code lives immediately after the opening brace.
+    assert.ok(out.startsWith(WRAPPER_OPEN + head), 'boot IIFE moved to first statement inside wrapper');
+    // Pure byte move — length is unchanged so stored offsets stay valid.
+    assert.equal(out.length, input.length, 'relocation preserves byte length');
+    // Still a valid function expression and still ends with the wrapper close.
+    assert.doesNotThrow(() => new Function(`return (${out})`));
+    assert.ok(out.trimEnd().endsWith('})'));
+  });
+
+  it('handles multiple concatenated head IIFEs (contracts + fetch_interceptor + hook_noise_mute shape)', () => {
+    const head = '(function(){1;})();(function(){2;})();(function(){3;})();';
+    const input = bundle(head, 'var x=1;module.exports=x;');
+    const out = normalisePatchedJs(input);
+    assert.ok(out.startsWith(WRAPPER_OPEN + head));
+    assert.equal(out.length, input.length);
+    assert.doesNotThrow(() => new Function(`return (${out})`));
+  });
+
+  it('is a no-op when the file already starts with the wrapper', () => {
+    const input = bundle('', 'module.exports=1;');
+    const out = normalisePatchedJs(input);
+    assert.equal(out, input);
+  });
+
+  it('throws when no wrapper is present at all', () => {
+    assert.throws(
+      () => normalisePatchedJs('(function(){onlyBoot();})();'),
+      /does not contain the expected Bun CJS wrapper/,
+    );
+  });
+});
 
 describe('repack padding placement — locateWrapperCloseEnd', () => {
   it('pads after the wrapper close, leaving a string literal that contains `})` byte-identical', () => {
