@@ -104,6 +104,29 @@ test('createAdk() — two instances do not share tool state', () => {
 
 // ── ToolHandle.ready + bounded poll ───────────────────────────────────────────
 
+// The tool-registry drain poller runs on an UNREF'd interval — by design, so it
+// never keeps the real CLI alive just to drain the queue. In a bare test process
+// with no other ref'd work, that means a `.ready` promise which only the poller
+// can settle may be abandoned the instant the loop drains; node:test then reports
+// "Promise resolution is still pending but the event loop has already resolved",
+// which is flaky on slow/loaded CI runners. Hold the loop open with a ref'd
+// watchdog until `.ready` settles — the same keepalive the adk-tools-hardening
+// timeout tests get from their Promise.race(...setTimeout 8000...) guard. The
+// poller resolves `.ready` long before the watchdog fires; the watchdog only
+// exists to keep the event loop from exiting first.
+const READY_TIMEOUT = Symbol('ready-watchdog-timeout');
+async function settleReady(readyPromise, ms = 8000) {
+  let timer;
+  const watchdog = new Promise((resolve) => { timer = setTimeout(() => resolve(READY_TIMEOUT), ms); });
+  try {
+    const v = await Promise.race([readyPromise, watchdog]);
+    assert.notEqual(v, READY_TIMEOUT, `.ready did not settle within ${ms}ms (watchdog fired)`);
+    return v;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 test('defineTool .ready resolves true once injected into a live __ccpRawTools', async () => {
   const restore = isolateGlobals();
   try {
@@ -114,7 +137,7 @@ test('defineTool .ready resolves true once injected into a live __ccpRawTools', 
       inputSchema: { type: 'object' },
       execute: async () => 'ok',
     });
-    assert.equal(await h.ready, true, 'synchronous inject resolves ready=true');
+    assert.equal(await settleReady(h.ready), true, 'synchronous inject resolves ready=true');
   } finally {
     restore();
   }
@@ -132,7 +155,7 @@ test('defineTool .ready resolves true after the bounded poll drains a late array
     });
     // Make the array appear after one poll cadence; the 50ms poller drains it.
     setTimeout(() => { globalThis.__ccpRawTools = []; }, 60);
-    assert.equal(await h.ready, true, 'late array → poller drains → ready=true');
+    assert.equal(await settleReady(h.ready), true, 'late array → poller drains → ready=true');
     assert.ok(
       globalThis.__ccpRawTools.some((t) => t.name === 'ready-late'),
       'tool landed in the array',
@@ -153,7 +176,7 @@ test('defineTool .ready resolves false when dispose() beats injection', async ()
       execute: async () => 'ok',
     });
     h.dispose(); // cancels the queue entry before any array shows up
-    assert.equal(await h.ready, false, 'disposed-before-injected → ready=false');
+    assert.equal(await settleReady(h.ready), false, 'disposed-before-injected → ready=false');
   } finally {
     restore();
   }
