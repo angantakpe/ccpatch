@@ -47,13 +47,21 @@ globalThis.__ccpOnFetchStream = (name, handler) => {
 // (regardless of CLAUDE_DEBUG); the original blast-radius containment is kept
 // (the error is still caught — the CLI's network path is never disrupted), it is
 // merely no longer invisible.
+// Always-on diagnostics: regardless of the stderr gating below, every
+// swallowed subscriber error is appended (one line) to the ccpatch
+// diagnostics file via globalThis.__ccpDiag — installed by the boot_banner
+// patch's diag-sink shim, which (like this hook) is required and boot-spliced,
+// so it is present before any subscriber can fire. If the sink is missing
+// (e.g. preloadCode used standalone), the record is dropped — fail-open.
 globalThis.__ccpBusWarn = globalThis.__ccpBusWarn || function __ccpBusWarn(name, phase, err) {
+  var line = 'subscriber ' + name + ' threw in ' + phase + ': ' + ((err && err.message) || err);
+  try { if (globalThis.__ccpDiag) globalThis.__ccpDiag('bus', line); } catch (_) {}
   var paranoid = false;
   try { paranoid = (process.env.CCPATCH_PARANOID === '1'); } catch (_) {}
   if (!paranoid && process.env.CLAUDE_DEBUG !== '1' && !globalThis.__ccpDebug) return;
   try {
     var prefix = paranoid ? '[ccp:bus][paranoid] ' : '[ccp:bus] ';
-    console.error(prefix + 'subscriber ' + name + ' threw in ' + phase + ': ' + ((err && err.message) || err));
+    console.error(prefix + line);
   } catch (_) {}
 };
 
@@ -126,7 +134,19 @@ function _ccpFanOut(resp, urlStr, options, isApi) {
       }
     }
   })();
-  return new Response(tee[0], { status: resp.status, statusText: resp.statusText, headers: resp.headers });
+  // Response fidelity: the Response(body, init) constructor cannot carry
+  // url/redirected/type (they're set internally by fetch), so the wrapped
+  // response would report url='' / redirected=false / type='default' and
+  // silently break any bundle code that checks response.url. Delegate those
+  // read-only views to the original response. Fail-open: if defineProperty
+  // is rejected, return the wrap with default metadata rather than throwing.
+  const wrapped = new Response(tee[0], { status: resp.status, statusText: resp.statusText, headers: resp.headers });
+  try {
+    for (const prop of ['url', 'redirected', 'type']) {
+      Object.defineProperty(wrapped, prop, { configurable: true, get: () => resp[prop] });
+    }
+  } catch (_) {}
+  return wrapped;
 }
 
 if (!globalThis.__ccpFetchInterceptorInstalled__) {
