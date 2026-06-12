@@ -60,6 +60,11 @@
       "sizeBytes": 16245218,
       "tarballIntegrity": "sha512-j+8+aD9FRo4RVA8GPR86LPWS5OimAUpOXeaWBYSu66f9Y/s7jGelWOsdmuRC4dH2MYItMZ5JMCJAaunQX+eFIQ==",
       "source": "bun-native (extracted from claude.exe linux-x64)"
+    },
+    "2.1.175": {
+      "cliSha256": "53867daae6d16db75c7ffc50990a0c671596330b746731c6c06c78969614e5a2",
+      "sizeBytes": 16926252,
+      "source": "auto-pin (TOFU: native-binary release, first verified build)"
     }
   }
 }
