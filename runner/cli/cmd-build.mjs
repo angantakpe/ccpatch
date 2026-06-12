@@ -267,6 +267,42 @@ export async function runBuild(ctx) {
     }
   }
 
+  // ── Bun API coverage scan ─────────────────────────────────────────────────
+  // The bundle is Bun-compiled but runs under Node via the polyfill in
+  // runner/shims/bun-polyfill-v1.js.txt — several entries of which are
+  // knowingly degraded (sync Bun.spawn, throwing Bun.Terminal, …). Scan the
+  // INPUT bundle for Bun.<api> usage and report, per scripts/scan-bun-api.mjs:
+  //   (a) used but UNSHIMMED  → error-level; fails the build under --strict
+  //   (b) used but degraded   → warning listing the shim's caveat
+  //   (c) new vs the previous version's committed refmaps/ baseline → drift
+  // Runs BEFORE apply so a strict failure is fail-fast (no bundle written). A
+  // scanner crash must never take down a non-strict build (fail open at
+  // runtime, loud at build time) — hence the try/catch with a warn.
+  {
+    let scan = null;
+    try {
+      const { runBunApiScan } = await import('../../scripts/scan-bun-api.mjs');
+      scan = runBunApiScan({
+        code,
+        bundleLabel: path.basename(options.inputPath),
+        version: patchOptions.version || null,
+      });
+      logger.log('');
+      for (const line of scan.lines) logger.log(line);
+    } catch (err) {
+      logger.warn(`  [!] bun-api scan failed (non-fatal): ${err.message}`);
+    }
+    if (scan && scan.unshimmed.length > 0 && patchOptions.strict) {
+      logger.error(
+        `Error: --strict: bundle uses ${scan.unshimmed.length} Bun API(s) missing from the ` +
+        `Bun polyfill: ${scan.unshimmed.map(e => `Bun.${e.name}`).join(', ')}. ` +
+        `Shim them in runner/shims/bun-polyfill-v1.js.txt (and classify in ` +
+        `refmaps/bun-api-coverage.json), or drop --strict to build anyway.`
+      );
+      return 1;
+    }
+  }
+
   const originalCode = code;
   let hadNoChange = false;
 
