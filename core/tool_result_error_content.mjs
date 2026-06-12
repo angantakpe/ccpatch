@@ -10,21 +10,15 @@
  * tool_result block with a single text placeholder so the request goes
  * through. Truth is preserved (is_error stays true) — we only fill the body.
  *
- * NOTE on injection order: patches inject content RIGHT AFTER the shebang.
- * Later-listed patches end up running EARLIER at boot because each replace
- * pushes prior blocks down. So this patch runs BEFORE fetch_interceptor has
- * defined __ccpOnFetchBefore. We poll for the hook with setImmediate.
+ * NOTE on injection order: the boot registry splices this hook AFTER
+ * fetch_interceptor's bus (order 30 > 10), so __ccpOnFetchBefore normally
+ * already exists. The setImmediate poll below is kept as a belt-and-braces
+ * fallback (it also covers shebang-anchored layouts where non-registry
+ * splices can still land ahead of the bus).
  */
 
-export default {
-  category: 'fix',
-
-  description: 'Inject placeholder content for empty tool_result blocks with is_error:true (Anthropic API requires non-empty content).',
-  capabilities: ["network"],
-  verify: { present: '__ccpTREC_init', count: { present: 1 } },
-  dependsOn: ['fetch_interceptor'],
-  apply: (code) => {
-    const hook = `
+// Module-level so bootInject can reference it.
+const hook = `
 // ══════════════════════════════════════════════════════════════════════════
 // [PATCH] tool_result_error_content
 // Empty content + is_error:true → API 400. Inject placeholder.
@@ -105,17 +99,16 @@ export default {
   setImmediate(poll);
 })();
 `;
-    const _SHEBANG_ = '#!/usr/bin/env node';
-    const _CJS_IIFE_ = '(function(exports, require, module, __filename, __dirname)';
-    // Match the shebang with startsWith(), NOT includes(): Bun-extracted bundles
-    // have no leading shebang but contain "#!/usr/bin/env node" as an interior
-    // string literal, so includes() would splice the hook into dead string content.
-    if (code.startsWith(_SHEBANG_)) return code.replace(_SHEBANG_, _SHEBANG_ + '\n' + hook);
-    // No leading shebang: anchor on the CJS-IIFE head (matches wherever it sits,
-    // even if earlier patches prepended code). Function replacement prevents any
-    // $-patterns in the hook from being expanded by replace().
-    if (code.includes(_CJS_IIFE_)) return code.replace(_CJS_IIFE_, () => hook + _CJS_IIFE_);
-    console.warn('  [!] tool_result_error_content: anchor not found — skipping');
-    return code;
-  },
+
+export default {
+  category: 'fix',
+
+  description: 'Inject placeholder content for empty tool_result blocks with is_error:true (Anthropic API requires non-empty content).',
+  capabilities: ["network"],
+  verify: { present: '__ccpTREC_init', count: { present: 1 } },
+  dependsOn: ['fetch_interceptor'],
+  // Boot hook spliced by the runner's boot registry (runner/boot-registry.mjs).
+  // order 30: after fetch_interceptor's bus (10) so __ccpOnFetchBefore exists
+  // when the subscribe runs (the poll above remains as a fallback).
+  bootInject: { order: 30, code: hook },
 };

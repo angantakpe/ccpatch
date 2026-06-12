@@ -5,10 +5,10 @@ include scripts/mk/vars.mk
 include scripts/mk/cli.mk
 
 .PHONY: help refmap refmap-check smoke-bridge smoke-integration \
-        smoke-integration-roundtrip \
+        smoke-integration-roundtrip test-tty canary \
         bridge-host bridge-host-stop bridge-tail bridge-submit \
         verticals-check lint lint-dead lint-unused \
-        test\:patches test\:patch lint\:dead lint\:unused heal
+        test\:patches test\:patch test\:tty lint\:dead lint\:unused heal
 
 # ── Naming-drift aliases ────────────────────────────────────────────────────
 # Kill the spelling drift between the two build systems: every operation that
@@ -22,6 +22,7 @@ include scripts/mk/cli.mk
 # carries the mirror dash-spelled npm scripts.
 test\:patches: test-patches ## Alias for test-patches (npm-style spelling)
 test\:patch: test-patch ## Alias for test-patch (npm-style spelling): make test:patch NAME=debug
+test\:tty: test-tty ## Alias for test-tty (npm-style spelling)
 lint\:dead: lint-dead ## Alias for lint-dead (npm-style spelling)
 lint\:unused: lint-unused ## Alias for lint-unused (npm-style spelling)
 
@@ -76,6 +77,29 @@ smoke-integration: ## Tier 3 — drive a real patched CLI over the bridge (uses 
 
 smoke-integration-roundtrip: ## Tier 3 — boot a daemon bundle, drive a full agent-loop + tool-dispatch round-trip with a stubbed API (skips cleanly if no daemon bundle)
 	@node tests/integration_roundtrip.mjs
+
+# ── Interactive pty boot smoke + canary ─────────────────────────────────────
+# Every headless tier exits before the interactive TUI initializes — which is
+# how the v2.1.175 boot deadlocks (Bun-only fullscreen PTY host; swallowed
+# require('ws') rejection) shipped through a green suite. test-tty boots the
+# patched bundle in a REAL pty (python3 helper answers terminal capability
+# queries) in a pre-trusted hermetic $HOME and asserts a UI frame renders.
+# Skips cleanly when python3 or a patched bundle is missing.
+test-tty: ## Tier 4 — interactive pty boot smoke: assert a real UI frame renders (skips without python3/bundle)
+	node --test tests/boot-tty.test.mjs
+
+# canary = build-if-needed + pty boot smoke against the current release.
+# This is the ONLY tier that catches server-side feature-gate flips (e.g.
+# tengu_pewter_brook turning the fullscreen TUI on with ZERO bundle change),
+# because it boots the real interactive path against live account state.
+# Run it before adopting a new upstream version — and after gate-flip
+# suspicion — not just on code changes.
+canary: ## Tier 4 — build (if needed) + pty boot smoke against the current release; catches server-side gate flips
+	@if [ ! -f $(OUTPUT) ]; then \
+		echo "[canary] $(OUTPUT) not found — building..."; \
+		$(MAKE) patch-claude-code VERSION=$(VERSION); \
+	fi
+	CCPATCH_TTY_BUNDLE=$(OUTPUT) node --test tests/boot-tty.test.mjs
 
 verticals-check: lint smoke-bridge ## Tier 1 — full vertical CI gate (lint + protocol smoke)
 	@echo "[verticals-check] OK"

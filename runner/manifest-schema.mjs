@@ -195,6 +195,15 @@ export const INTERFACES = Object.freeze([
       { name: 'function', type: 'FunctionSpec' },
     ],
   },
+  {
+    name: 'BootInject',
+    doc: 'Declarative boot hook — spliced ONCE by the runner boot registry (runner/boot-registry.mjs) at the canonical boot anchor.',
+    fields: [
+      { name: 'code', type: 'string | ((options: Record<string, unknown>) => string)', doc: 'Verbatim JS to run before the bundle body (or a builder receiving the build options).' },
+      { name: 'order?', type: 'number', doc: 'Lower runs first; ties broken by patch name. Use gaps of 10. Default 1000.' },
+      { name: 'sentinel?', type: 'string', doc: 'Idempotency marker; defaults to the first verify.present literal.' },
+    ],
+  },
 ]);
 
 // ── The Patch interface (author-facing) ─────────────────────────────────────
@@ -210,7 +219,8 @@ export const PATCH_FIELDS = Object.freeze([
   { name: 'target?', type: 'KindTarget', doc: "Required when kind != 'free'." },
   { name: 'code?', type: 'string', doc: "Required when kind = 'prefix' or 'postfix'. Verbatim JS to inject." },
   { name: 'transform?', type: '(functionBody: string, opts: Record<string, unknown>) => string', doc: "Required when kind = 'transpiler'." },
-  { name: 'apply?', type: '(code: string, opts?: Record<string, unknown>) => string', doc: "Free-form apply(). Required when kind = 'free' (or unset)." },
+  { name: 'apply?', type: '(code: string, opts?: Record<string, unknown>) => string', doc: "Free-form apply(). Required when kind = 'free' (or unset), unless bootInject is declared." },
+  { name: 'bootInject?', type: 'BootInject', doc: 'Declarative boot hook; the runner boot registry performs ONE combined splice for all enabled patches.' },
 
   { section: 'Recommended', name: 'category?', type: 'Category' },
   { name: 'enabled?', type: 'boolean', doc: 'Default-enabled hint; ccpatch.yml is authoritative.' },
@@ -278,6 +288,7 @@ export const FIELD_HINTS = Object.freeze({
   code:         { shape: 'string (verbatim JS to inject)', example: "code: 'console.log(\"entered\");'" },
   transform:    { shape: '(functionBody: string, opts) => string', example: 'transform: (body) => body.replace(/return!1/, \'return!0\')' },
   anchor:       { shape: '{ literal: string, byteOffset?: number }', example: "anchor: { literal: 'STABLE_SUBSTR' }" },
+  bootInject:   { shape: '{ code: string | (options) => string, order?: int, sentinel?: string }', example: "bootInject: { code: 'globalThis.__x = 1;', order: 20 }" },
   at:           { shape: '{ kind, target }', example: "at: { kind: 'HEAD', target: { function: 'foo' } }" },
   'at.kind':    { shape: `one of ${AT_KINDS_LIST.join(' | ')}`, example: "at: { kind: 'INVOKE', target: { call: 'fetch' } }" },
   dependsOn:    { shape: 'string[] (other patch names)', example: "dependsOn: ['expose_agent_tool']" },
@@ -339,6 +350,7 @@ export const NORMALIZED_FIELDS = Object.freeze([
   { name: 'applyMode', type: 'ApplyMode' },
   { name: 'anchor', type: 'Anchor | null' },
   { name: 'apply', type: '((code: string, opts?: Record<string, unknown>) => string) | null' },
+  { name: 'bootInject', type: 'BootInject | null' },
   { name: 'preload', type: 'boolean' },
   { name: 'preloadCode', type: 'string | null' },
   { name: 'verify', type: 'VerifyBlock | null' },

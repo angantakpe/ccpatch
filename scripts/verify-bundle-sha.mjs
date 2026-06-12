@@ -47,9 +47,34 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { createHash } from 'node:crypto';
-import { readFileSync, existsSync, statSync, createReadStream } from 'node:fs';
+import { readFileSync, existsSync, statSync, createReadStream, mkdirSync, writeFileSync } from 'node:fs';
 import { gunzipSync } from 'node:zlib';
-import { resolve } from 'node:path';
+import { resolve, dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// Project root = one level above scripts/. The TOFU marker lives under
+// storage/outputs/ so the build path's auto-pin (runner/auto-pin.mjs) can find
+// it after a verified build and record the pin we vouched for here.
+const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+
+/**
+ * Drop a TOFU-pending marker so a SUCCESSFUL build can auto-pin this version.
+ * Records the exact bundle sha256 the integrity gate just accepted; the build's
+ * auto-pin step binds it to the bundle it actually patched before writing the
+ * pin. Best-effort — a marker-write failure must not fail the gate.
+ */
+function writeTofuMarker(ver, sha256hex, source) {
+  if (process.env.CCPATCH_NO_AUTOPIN === '1') return;
+  try {
+    const dir = join(PROJECT_ROOT, 'storage', 'outputs');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, `tofu-pending-v${ver}.json`),
+      JSON.stringify({ version: ver, sha256: sha256hex, source, ts: new Date().toISOString() }) + '\n',
+      'utf8',
+    );
+  } catch { /* best effort */ }
+}
 
 const SKIP = process.env.CCPATCH_SKIP_SHA_CHECK === '1';
 // Loud stderr warning when the skip gate is armed — this runs unconditionally
@@ -197,7 +222,13 @@ function loadRegistry(path) {
 }
 
 function pinHint() {
-  return `run \`ccpatch pin ${version || '<x.y.z>'}\` to record it`;
+  // The build now auto-pins on a successful, verified build (see
+  // runner/auto-pin.mjs), so this is no longer a manual instruction — it's a
+  // statement of what will happen. CCPATCH_NO_AUTOPIN=1 opts out, in which case
+  // the manual command is the fallback.
+  return process.env.CCPATCH_NO_AUTOPIN === '1'
+    ? `auto-pin is disabled (CCPATCH_NO_AUTOPIN=1) — run \`ccpatch pin ${version || '<x.y.z>'}\` to record it manually`
+    : `it will be auto-pinned on a successful build (sha256 recorded to storage/known-shas.json; disable with CCPATCH_NO_AUTOPIN=1)`;
 }
 
 async function main() {
@@ -269,6 +300,9 @@ async function main() {
           `  not come from it. Refusing to patch a bundle that the authenticated\n` +
           `  package does not vouch for.`);
       }
+      // Strong TOFU: the bundle is bound to the authenticated tarball. Record a
+      // marker so a successful build auto-pins this version.
+      writeTofuMarker(version, computed.toLowerCase(), 'auto-pin (TOFU: bundle bound to verified npm tarball)');
       info(`TOFU: v${version} unpinned — bundle bound to verified npm tarball (cli.js sha256 matches). Proceeding. ${pinHint()}`);
       return done();
     }
@@ -278,7 +312,12 @@ async function main() {
     // authenticate it. Say so honestly rather than implying the bundle is vouched
     // for. This is still TOFU (proceed on first use), but the strong anchor for
     // such versions is an out-of-band --expect-sha256 pin.
-    info(`TOFU: v${version} unpinned — npm package authenticated, but this is a native-binary release so the extracted bundle is NOT bound to the tarball. Proceeding on first use; sha256 ${computed.slice(0, 16)}… · for a stronger guarantee re-run with --expect-sha256, then ${pinHint()}`);
+    // Weak TOFU: native-binary release, npm package authenticated but the
+    // extracted bundle is not bound to the tarball. Still record a marker so a
+    // successful build auto-pins the bytes we are about to patch — that pin then
+    // becomes the strong anchor for every subsequent build of this version.
+    writeTofuMarker(version, computed.toLowerCase(), 'auto-pin (TOFU: native-binary release, first verified build)');
+    info(`TOFU: v${version} unpinned — npm package authenticated, but this is a native-binary release so the extracted bundle is NOT bound to the tarball. Proceeding on first use; sha256 ${computed.slice(0, 16)}… · ${pinHint()}`);
     return done();
   }
 

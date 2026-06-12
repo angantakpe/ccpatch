@@ -215,6 +215,31 @@ patches:
 # still own ordering.
 # ──────────────────────────────────────────────────────────────────────────────
 profiles:
+  # bare — the true bisection floor: ONLY the runtime-adaptation patches
+  # without which the extracted bundle cannot execute under Node. Used by the
+  # forensic workflow in docs/BISECTING.md to answer "is it the patches or the
+  # runtime adaptation?". Profile selection never auto-includes `required:
+  # true` patches, so this resolves to EXACTLY these three; the build prints a
+  # loud ⚠⚠ warning that the skipped infra (contracts, fetch_interceptor,
+  # overlay_loader, boot_banner — verified NOT load-bearing: the 3-patch build
+  # exits 0 on --version and --help) makes subscriber-based patches silently
+  # no-op. Why each member is load-bearing (drop-one verified on v2.1.175):
+  #   esm_compat      — the extracted CJS-IIFE references module/require; as
+  #                     .mjs under Node it throws before --version without
+  #                     the ESM wrapper + react/ink preload.
+  #   bun_shim        — first Bun.* call throws "ReferenceError: Bun is not
+  #                     defined" (--help dies in Bun.stringWidth) without the
+  #                     polyfill; only --version survives.
+  #   react_singleton — without unifying bundled React with the host copy
+  #                     preloaded by esm_compat, ink renders with two React
+  #                     instances and the interactive REPL crashes on first
+  #                     render (invalid-hook-call class; not exercised by
+  #                     --version/--help, so keep it in the floor).
+  bare:
+    - react_singleton
+    - esm_compat
+    - bun_shim
+
   minimal:
     # Bug fixes + the minimum infra those fixes need to run.
     - react_singleton

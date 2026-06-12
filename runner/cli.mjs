@@ -127,6 +127,15 @@ export function parseBuildArgs(args) {
     if (args[i] === '--allow-unacked') {
       patchOptions.allowUnacked = true;
     }
+    // --no-required: do NOT auto-include `required: true` infra patches when an
+    // explicit --patch list is given. This is the patch-bisection escape hatch
+    // (see docs/BISECTING.md): without it the minimum buildable set is the
+    // requested patches + every required patch, so bugs in the required infra
+    // layer itself cannot be isolated. Emits a LOUD one-line warning naming the
+    // skipped patches — subscriber/hook-based patches will silently no-op.
+    if (args[i] === '--no-required') {
+      patchOptions.noRequired = true;
+    }
     // WS6 Item 5: --paranoid / strict mode. At build time it forces fail-closed
     // repack (never pass --allow-unverified to WS1's repacker, treat any
     // [repack:skip] degradation as a build FAILURE) and documents the loud

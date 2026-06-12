@@ -4,6 +4,7 @@ import { resolveAt } from './at-selector.mjs';
 import { compileKind } from './patch-kinds.mjs';
 import { structuredPatch } from 'diff';
 import { diffSpansFromPatch, detectOverlapsInPhase } from './conflict.mjs';
+import { sha256 } from './reverse-diff.mjs';
 import { CoordinateFrame } from './coordinate-frame.mjs';
 import { fireHook } from './lifecycle.mjs';
 import { checkVerifyCore, toList } from './verify-core.mjs';
@@ -22,6 +23,8 @@ import {
   makeVerifyFlusher,
   makeHarnessBuckets,
 } from './apply-pipeline.mjs';
+import { collectBootInjects, spliceBootRegistry } from './boot-registry.mjs';
+import { captureReverseDiff } from './reverse-diff.mjs';
 
 
 /**
@@ -119,6 +122,67 @@ export function buildPatchReport(timings, drifts, verifyIssuesReport, results, h
 }
 
 /**
+ * Log one overlap conflict and (in strict mode) collect its failure line.
+ * Shared by the fresh detection path (detectAndRecordOverlaps) and the
+ * cache-replay path (replayCachedConflicts) so both produce IDENTICAL log
+ * output and strict-gate behavior for the same conflict record.
+ *
+ * @param {{phase,a,b,overlap:{kind,rangeA,rangeB},allowed:boolean}} record
+ */
+function logConflict(record, globalStrict, logger, failures) {
+  const { phase, a, b, allowed } = record;
+  const { kind, rangeA, rangeB } = record.overlap;
+  const msg = `overlap (${kind}) phase="${phase}" ${a} <-> ${b}` +
+              ` rangeA=[${rangeA[0]},${rangeA[1]}] rangeB=[${rangeB[0]},${rangeB[1]}]`;
+  if (allowed) {
+    // An allowlisted overlap is explicitly acknowledged (via allowOverlapWith)
+    // and harmless — it fires every build for the known pairs. Demote it from
+    // a warning to debug so the compact stream isn't crying wolf; --verbose
+    // (--log-level=debug) still surfaces it with full ranges.
+    (logger.debug || logger.warn)(`  [overlap] ${msg} (allowlisted)`);
+  } else if (globalStrict) {
+    // Strict: FATAL overlaps stay loud and unchanged.
+    logger.warn(`  [overlap] ${msg}`);
+    failures.push(
+      `overlap: ${a} and ${b} touch overlapping ranges (${kind}) in phase="${phase}". ` +
+      `Add allowOverlapWith: ['${b}'] to ${a} (or vice versa) to acknowledge.`
+    );
+  } else {
+    // Non-strict mode: an unacknowledged overlap is a real WARNING (two
+    // patches touched the same bytes without declaring it) — it does not
+    // abort the build here, but --strict turns this exact condition into a
+    // failure. Boot-point overlaps between bootInject patches no longer
+    // occur at all (the registry performs one combined splice), so any
+    // overlap that still fires deserves attention: either separate the
+    // anchors or acknowledge with allowOverlapWith.
+    logger.warn(`  [overlap] WARNING: unacknowledged overlap ${a} <-> ${b} phase="${phase}" — fix the anchors or add allowOverlapWith; --strict fails the build on this (run --log-level=debug for ranges)`);
+    logger.debug?.(`  [overlap] ${msg} (unacknowledged — warning; fatal under --strict)`);
+  }
+}
+
+/**
+ * Replay a CACHED conflict report instead of recomputing it. Only called after
+ * the caller has proven the rebuilt bundle is byte-identical to the build the
+ * cache entry was recorded from (output sha256 match), so the records are
+ * exactly what detectAndRecordOverlaps would re-derive. Reproduces the same
+ * logging, the same strict-mode failures, and the same JSONL artifact write.
+ *
+ * @param {Array<object>} cachedConflicts — records as written by detectAndRecordOverlaps
+ * @returns {{ allConflicts: Array<object>, failures: string[] }}
+ */
+export function replayCachedConflicts(cachedConflicts, globalStrict, logger, warnStorageOnce, storageRoot = PROJECT_ROOT) {
+  const allConflicts = [];
+  const failures = [];
+  for (const record of cachedConflicts) {
+    if (!record || !record.overlap) continue; // tolerate malformed cache rows
+    allConflicts.push(record);
+    logConflict(record, globalStrict, logger, failures);
+  }
+  writeConflictsArtifact(allConflicts, warnStorageOnce, storageRoot);
+  return { allConflicts, failures };
+}
+
+/**
  * Scan each phase for overlapping patch ranges, record them in allConflicts[],
  * log them, and write the conflicts JSONL artifact.
  *
@@ -178,27 +242,7 @@ export function detectAndRecordOverlaps(phaseTraces, frame, globalStrict, logger
         allowed: !!allowed,
       };
       allConflicts.push(record);
-      const msg = `overlap (${c.kind}) phase="${c.phase}" ${c.a} <-> ${c.b}` +
-                  ` rangeA=[${c.rangeA[0]},${c.rangeA[1]}] rangeB=[${c.rangeB[0]},${c.rangeB[1]}]`;
-      if (allowed) {
-        // An allowlisted overlap is explicitly acknowledged (via allowOverlapWith)
-        // and harmless — it fires every build for the known pairs. Demote it from
-        // a warning to debug so the compact stream isn't crying wolf; --verbose
-        // (--log-level=debug) still surfaces it with full ranges.
-        (logger.debug || logger.warn)(`  [overlap] ${msg} (allowlisted)`);
-      } else if (globalStrict) {
-        // Strict: FATAL overlaps stay loud and unchanged.
-        logger.warn(`  [overlap] ${msg}`);
-        failures.push(
-          `overlap: ${c.a} and ${c.b} touch overlapping ranges (${c.kind}) in phase="${c.phase}". ` +
-          `Add allowOverlapWith: ['${c.b}'] to ${c.a} (or vice versa) to acknowledge.`
-        );
-      } else {
-        // DX#2: in non-strict mode an overlap is informational — it does not
-        // abort the build.
-        logger.warn(`  [overlap] ${c.a} <-> ${c.b} phase="${c.phase}" (informational — non-fatal; run --log-level=debug for ranges, or --strict to gate)`);
-        logger.debug?.(`  [overlap] ${msg} (informational — non-fatal)`);
-      }
+      logConflict(record, globalStrict, logger, failures);
     }
   }
   if (harness) harness.conflict = (harness.conflict || 0) + (Date.now() - _conflictStart);
@@ -209,6 +253,37 @@ export function detectAndRecordOverlaps(phaseTraces, frame, globalStrict, logger
 }
 
 export async function applyNamedPatches(code, patches, patchNames, logger = console, patchOptions = {}) {
+  // ── Boot-injection registry (arch item #6) ────────────────────────────────
+  // Collect every enabled patch's declarative `bootInject` block and perform
+  // EXACTLY ONE insertion at the canonical boot anchor, BEFORE any per-patch
+  // apply() runs. Doing it first means every later pre-IIFE splice (contracts,
+  // extension hooks, …) lands BETWEEN the registry block and the IIFE head —
+  // i.e. it executes AFTER the registry's hooks, preserving the standing
+  // invariant that fetch_interceptor's bus / bun_shim's polyfill exist before
+  // any later boot code runs. Patches whose sentinel is already in the input
+  // are skipped (per-patch idempotency: applying twice == applying once,
+  // byte-identical). An anchor miss leaves the code unchanged; the affected
+  // patches are then recorded as no-change below, so their verify.present
+  // gate fails the build like any other anchor drift.
+  const bootCollect = collectBootInjects(patches, patchNames, {
+    code, options: patchOptions, logger,
+  });
+  const bootInjected = new Set();
+  const bootSkipped = new Set(bootCollect.skipped);
+  if (bootCollect.entries.length > 0) {
+    const preBoot = code;
+    code = spliceBootRegistry(code, bootCollect.entries, logger);
+    if (code !== preBoot) {
+      for (const e of bootCollect.entries) bootInjected.add(e.name);
+      // Keep --emit-revert complete: the registry splice is harness work that
+      // runs outside any patch's apply(), so it needs its own reverse record
+      // (first in the sidecar — its preSha256 is the original bundle's hash).
+      if (!patchOptions.dryRun) {
+        captureReverseDiff('__boot_registry__', preBoot, code, patchOptions.captureReverse);
+      }
+    }
+  }
+
   // Item 2: `nextCode` and the deferred-verify queue (`pendingVerify`) are the
   // two pieces of mutable state shared between the apply loop and the verify
   // flush stage (an onVerifyFail heal rewrites nextCode; the loop pushes into
@@ -342,6 +417,56 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
         const added = normalized.revisit.addedIn ? ` (added in v${normalized.revisit.addedIn})` : '';
         logger.warn(`  [revisit] ${name}${added}: re-evaluate at v${normalized.revisit.until} — ${normalized.revisit.note}`);
       }
+    }
+
+    // Boot-only patches (a bootInject declaration with no apply()) were
+    // handled by the single registry splice above — there is nothing left to
+    // apply here, and no per-patch trace to feed overlap detection (the whole
+    // point: same-anchor boot overlaps disappear structurally). Verify still
+    // runs against the current snapshot so each patch's own sentinels and
+    // counts are asserted exactly as before.
+    const isBootOnly = !!patch.bootInject
+      && typeof patch.apply !== 'function'
+      && (normalized.kind ?? 'free') === 'free';
+    if (isBootOnly) {
+      timings.push({ name, ms: 0 });
+      if (bootInjected.has(name)) {
+        results[name] = 'applied';
+      } else if (bootSkipped.has(name)) {
+        // Sentinel already present in the input — idempotent re-apply.
+        results[name] = 'no-change-ok';
+      } else {
+        // Collected but never injected: the registry splice found no anchor
+        // (or the code fn failed). Mirror the no-change semantics of a normal
+        // apply(): fatal when the patch declares verify.present, unless
+        // --best-effort downgrades it (and always fatal for strict/required).
+        logger.warn(`  [!] Patch "${name}" boot hook not injected (boot-registry anchor miss).`);
+        results[name] = 'no-change';
+        const reason = 'boot hook not injected (boot-registry anchor miss)';
+        const hasPresent = toList(normalized.verify?.present)
+          .some((s) => typeof s === 'string' && s.length > 0);
+        if ((hasPresent && patchOptions.bestEffort !== true) || patchStrict) {
+          failures.push(`${name}: ${reason}`);
+        }
+      }
+      if (normalized.verify && !skipVerify) {
+        state.pendingVerify.push({
+          name,
+          patch,
+          patchStrict,
+          lifecycleCtx: {
+            name, phase: phaseOf(patch), code: state.nextCode,
+            appliedCode: state.nextCode, opts: { ...patchOptions },
+            verify: { issues: [] }, attempt: 1, logger,
+          },
+          snapshot: state.nextCode,
+          verify: normalized.verify,
+          present: toList(normalized.verify.present),
+          absent: toList(normalized.verify.absent),
+          count: normalized.verify.count,
+        });
+      }
+      continue;
     }
 
     // Per-patch lifecycle context — same object every hook fire.
@@ -499,10 +624,43 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
   // Conflicts are reported to the logger and a JSONL sidecar regardless of
   // strict mode; in strict mode they become fatal unless allowlisted.
   // Delegated to detectAndRecordOverlaps() — independently testable.
-  const { failures: overlapFailures } = detectAndRecordOverlaps(
-    phaseTraces, frame, globalStrict, logger, warnStorageOnce, storageRoot, harness,
-  );
-  for (const f of overlapFailures) failures.push(f);
+  //
+  // BUILD CACHE: when the caller (cmd-build) resolved a cache entry for this
+  // exact (input, patch set, options) key AND the rebuilt bundle's sha256
+  // matches the entry's recorded outputSha256 — a full end-to-end determinism
+  // proof, not just a key match — the conflict report is REPLAYED from the
+  // entry instead of re-deriving the per-patch diff spans (the dominant
+  // harness cost on multi-patch phases). Any doubt (no entry, sha mismatch,
+  // malformed records) falls open into the normal recompute below.
+  const bc = patchOptions.buildCache && typeof patchOptions.buildCache === 'object'
+    ? patchOptions.buildCache
+    : null;
+  let overlapOutcome = null;
+  if (bc && bc.entry && Array.isArray(bc.entry.conflicts)) {
+    try {
+      const finalSha = sha256(state.nextCode);
+      bc.finalSha256 = finalSha;
+      if (finalSha === bc.entry.outputSha256) {
+        overlapOutcome = replayCachedConflicts(
+          bc.entry.conflicts, globalStrict, logger, warnStorageOnce, storageRoot,
+        );
+        bc.conflictsFromCache = true;
+      }
+    } catch (err) {
+      // Cache infrastructure must never fail the build — recompute below.
+      (logger.debug || logger.warn)?.(`  [cache] conflict replay failed (non-fatal, recomputing): ${err.message}`);
+      overlapOutcome = null;
+    }
+  }
+  if (!overlapOutcome) {
+    overlapOutcome = detectAndRecordOverlaps(
+      phaseTraces, frame, globalStrict, logger, warnStorageOnce, storageRoot, harness,
+    );
+  }
+  // Hand the (fresh or replayed) conflict records back to the caller so a
+  // fresh build can persist them into the cache entry.
+  if (bc) bc.conflicts = overlapOutcome.allConflicts;
+  for (const f of overlapOutcome.failures) failures.push(f);
 
   // Finding #1/#2: tally the loud outcomes so the build summary can surface
   // them. `noChange` patches silently injected nothing (anchors likely drifted);

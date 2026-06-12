@@ -38,6 +38,16 @@
  *                          fatal only under --strict. See deprecationWarning() below.
  *
  * Optional fields:
+ *   bootInject   object    { code: string | (options) => string, order?: int, sentinel?: string }
+ *                          Declarative boot hook. The runner's boot registry
+ *                          (runner/boot-registry.mjs) collects all enabled patches'
+ *                          blocks, sorts by `order` (ties broken by patch name) and
+ *                          performs EXACTLY ONE splice at the canonical boot anchor
+ *                          (after a real leading shebang, else before the CJS-IIFE
+ *                          head). `sentinel` defaults to the first verify.present
+ *                          literal and gates idempotent re-application. A patch may
+ *                          be boot-only (bootInject with no apply()) or combine
+ *                          bootInject with an apply() for non-boot transformations.
  *   name         string    Must match the filename stem if provided.
  *   version      string    Semver e.g. "1.0.0" (default "0.0.0").
  *   applyMode    string    'build' | 'either'  (default 'build').
@@ -268,10 +278,46 @@ export function validateManifest(mod, filename, ctx = {}) {
     errors.push(fieldHint('kind', `must be one of: ${[...KIND_SET].join(', ')} (got "${kind}")`));
   }
 
+  // bootInject — declarative boot hook, spliced ONCE by the runner's boot
+  // registry (runner/boot-registry.mjs) instead of a hand-rolled apply()
+  // splice at the shebang / CJS-IIFE anchor. Shape:
+  //   { code: string | (options) => string, order?: int, sentinel?: string }
+  let bootInjectValid = false;
+  if (mod.bootInject !== undefined) {
+    if (!mod.bootInject || typeof mod.bootInject !== 'object' || Array.isArray(mod.bootInject)) {
+      errors.push(fieldHint('bootInject', 'must be an object: { code: string | (options) => string, order?: int, sentinel?: string }'));
+    } else {
+      const bi = mod.bootInject;
+      let ok = true;
+      if (typeof bi.code !== 'string' && typeof bi.code !== 'function') {
+        errors.push(fieldHint('bootInject', '.code is required and must be a string or a (options) => string function'));
+        ok = false;
+      } else if (typeof bi.code === 'string' && bi.code.length === 0) {
+        errors.push(fieldHint('bootInject', '.code must be a non-empty string'));
+        ok = false;
+      }
+      if (bi.order !== undefined
+          && (typeof bi.order !== 'number' || !Number.isFinite(bi.order) || !Number.isInteger(bi.order))) {
+        errors.push(fieldHint('bootInject', '.order must be a finite integer (lower runs first; use gaps of 10)'));
+        ok = false;
+      }
+      if (bi.sentinel !== undefined && (typeof bi.sentinel !== 'string' || bi.sentinel.length === 0)) {
+        errors.push(fieldHint('bootInject', '.sentinel must be a non-empty string if defined'));
+        ok = false;
+      }
+      bootInjectValid = ok;
+    }
+    if (kind !== 'free') {
+      errors.push(`bootInject is only valid on kind="free" patches (got kind="${kind}")`);
+    }
+  }
+
   if (kind === 'free') {
-    // apply() required for free kind.
-    if (typeof mod.apply !== 'function') {
-      errors.push(`apply must be a function when kind is "free" / applyMode is "${applyMode}" — e.g. apply(code) { return code; }`);
+    // apply() required for free kind — unless the patch is boot-only (a valid
+    // bootInject declaration is its entire transformation; the runner's boot
+    // registry performs the splice).
+    if (typeof mod.apply !== 'function' && !bootInjectValid) {
+      errors.push(`apply must be a function when kind is "free" / applyMode is "${applyMode}" — e.g. apply(code) { return code; } (boot-only patches may declare bootInject instead)`);
     }
   } else {
     // Non-free kinds synthesize apply() from declarative fields. A user-supplied
@@ -524,6 +570,7 @@ export function validateManifest(mod, filename, ctx = {}) {
     applyMode,
     anchor: mod.anchor ?? null,
     apply: mod.apply ?? null,
+    bootInject: bootInjectValid ? mod.bootInject : null,
     preload: mod.preload === true,
     preloadCode: mod.preloadCode ?? null,
     verify: mod.verify ?? null,

@@ -375,6 +375,20 @@ if (typeof globalThis.Bun === 'undefined') {
         plugin:               function() {},
       };
 
+      // ── Fullscreen TUI guard ─────────────────────────────────────────────
+      // The fullscreen / alternate-screen TUI (feature-gated upstream, also
+      // reachable via settings `tui: "fullscreen"` or CLAUDE_CODE_NO_FLICKER)
+      // renders through a Bun-only PTY host. Under Node that host can never
+      // start, and the boot path awaits its readiness forever: the CLI prints
+      // the boot banner, sends its terminal capability queries, and never
+      // paints a frame. Upstream's own escape hatch is checked FIRST in the
+      // fullscreen decision, so defaulting it here forces the default TUI on
+      // every entry point. An explicit user-set value (even '0') always wins.
+      if (process.env.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN === undefined) {
+        process.env.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN = '1';
+        (globalThis.__ccpBootBuf || (globalThis.__ccpBootBuf = [])).push(['bun_shim', 'fullscreen TUI disabled (Bun-only PTY host)']);
+      }
+
       (globalThis.__ccpBootBuf || (globalThis.__ccpBootBuf = [])).push(['bun_shim', 'Bun polyfill installed (Node.js runtime)']);
       if (globalThis.__ccpBootKick) globalThis.__ccpBootKick();
     })();

@@ -31,6 +31,13 @@ import {
   hostPlatformLabel,
   formatPlatformDegradation,
 } from './native-profile.mjs';
+import {
+  setupBuildCache,
+  storeCacheEntry,
+  markNondeterministic,
+  isCacheDisabled,
+} from '../build-cache.mjs';
+import { maybeAutoPin } from '../auto-pin.mjs';
 
 /**
  * The default (no-subcommand) build invocation: apply patches and write the
@@ -76,6 +83,7 @@ export async function runBuild(ctx) {
     requested: options.requestedPatches,
     profile: options.profile,
     yamlPath,
+    noRequired: po.noRequired === true,
   });
   let patchesToApply = resolution.selected;
 
@@ -267,6 +275,42 @@ export async function runBuild(ctx) {
     }
   }
 
+  // ── Bun API coverage scan ─────────────────────────────────────────────────
+  // The bundle is Bun-compiled but runs under Node via the polyfill in
+  // runner/shims/bun-polyfill-v1.js.txt — several entries of which are
+  // knowingly degraded (sync Bun.spawn, throwing Bun.Terminal, …). Scan the
+  // INPUT bundle for Bun.<api> usage and report, per scripts/scan-bun-api.mjs:
+  //   (a) used but UNSHIMMED  → error-level; fails the build under --strict
+  //   (b) used but degraded   → warning listing the shim's caveat
+  //   (c) new vs the previous version's committed refmaps/ baseline → drift
+  // Runs BEFORE apply so a strict failure is fail-fast (no bundle written). A
+  // scanner crash must never take down a non-strict build (fail open at
+  // runtime, loud at build time) — hence the try/catch with a warn.
+  {
+    let scan = null;
+    try {
+      const { runBunApiScan } = await import('../../scripts/scan-bun-api.mjs');
+      scan = runBunApiScan({
+        code,
+        bundleLabel: path.basename(options.inputPath),
+        version: patchOptions.version || null,
+      });
+      logger.log('');
+      for (const line of scan.lines) logger.log(line);
+    } catch (err) {
+      logger.warn(`  [!] bun-api scan failed (non-fatal): ${err.message}`);
+    }
+    if (scan && scan.unshimmed.length > 0 && patchOptions.strict) {
+      logger.error(
+        `Error: --strict: bundle uses ${scan.unshimmed.length} Bun API(s) missing from the ` +
+        `Bun polyfill: ${scan.unshimmed.map(e => `Bun.${e.name}`).join(', ')}. ` +
+        `Shim them in runner/shims/bun-polyfill-v1.js.txt (and classify in ` +
+        `refmaps/bun-api-coverage.json), or drop --strict to build anyway.`
+      );
+      return 1;
+    }
+  }
+
   const originalCode = code;
   let hadNoChange = false;
 
@@ -285,12 +329,42 @@ export async function runBuild(ctx) {
   // Cluster B will eventually have applyNamedPatches return { code, report }.
   // Read defensively so this code path keeps working through that migration.
   let runnerReport = {};
+
+  // ── Build cache (conflict + reverse-diff phase replay) ──────────────────────
+  // Both heavy harness phases are PURE functions of (input bundle bytes,
+  // resolved patch set, patch source bytes, output-affecting options). Resolve a
+  // content-addressed cache entry once here; the runner replays the conflict
+  // report from it (validated by output sha) and we replay the reverse-diff
+  // sidecar below. Disabled via CCPATCH_NO_CACHE=1, on dry-run, and whenever any
+  // patch source can't be hashed (setupBuildCache returns null → fail open).
+  let buildCache = null;
+  if (!patchOptions.dryRun && !isCacheDisabled()) {
+    try {
+      buildCache = setupBuildCache({
+        code, patches, patchNames: patchesToApply, patchOptions,
+        storageRoot: patchOptions.storageRoot,
+      });
+    } catch (err) {
+      logger.debug?.(`  [cache] setup skipped (non-fatal): ${err.message}`);
+      buildCache = null;
+    }
+  }
+  patchOptions.buildCache = buildCache;
+
   // Reverse-diff capture is OPT-IN: only collect splices (and pay their ~16MB
   // sha256 per changed patch) when --emit-revert is set and sidecars are not
   // suppressed. Otherwise leave captureReverse undefined so captureReverseDiff()
   // short-circuits on its `!Array.isArray` guard — no splice, no hashing.
+  //
+  // CACHE: when a cache entry carries a reverse-diff for this exact key, skip
+  // capture entirely (no hashing) and adopt the cached array AFTER the rebuilt
+  // bundle's output sha validates the entry. If validation fails (stale /
+  // non-deterministic), we recompute by re-running the apply with capture on —
+  // a rare fail-open path, kept correct over fast.
   const wantReverseDiff = emitRevert && !noSidecar;
-  const captureReverse = wantReverseDiff ? [] : undefined;
+  const reverseCacheCandidate = wantReverseDiff
+    && !!buildCache?.entry && Array.isArray(buildCache.entry.reverseDiff);
+  let captureReverse = wantReverseDiff && !reverseCacheCandidate ? [] : undefined;
   patchOptions.captureReverse = captureReverse;
   // --no-verify: skip the verify literal scan entirely. Threaded to the runner
   // so the verify-batch flush is a no-op (see applyNamedPatches).
@@ -393,6 +467,74 @@ export async function runBuild(ctx) {
   // post-write integrity check without hashing patchedCode twice.
   const outputSha256 = sha256(patchedCode);
 
+  // ── Build cache resolution ──────────────────────────────────────────────────
+  // A cache entry is TRUSTED only when the freshly-rebuilt bundle's sha256 equals
+  // the entry's recorded outputSha256 — a full end-to-end determinism proof. The
+  // conflict report was already replayed inside the runner under the same gate;
+  // here we resolve the reverse-diff sidecar and decide whether to persist a
+  // fresh entry. All of this is best-effort: a throw here must never fail a build
+  // that already produced a valid bundle.
+  let conflictsFromCache = false;
+  let reverseFromCache = false;
+  try {
+    if (buildCache) {
+      const validated = !!buildCache.entry && buildCache.entry.outputSha256 === outputSha256;
+      conflictsFromCache = validated && buildCache.conflictsFromCache === true;
+
+      if (reverseCacheCandidate) {
+        if (validated) {
+          // Adopt the cached reverse-diff splices — identical bytes, no hashing.
+          captureReverse = buildCache.entry.reverseDiff;
+          reverseFromCache = true;
+        } else {
+          // Stale: we skipped capture but the entry didn't validate. Recompute
+          // the reverse-diff by re-running the apply with capture ON and the
+          // cache OFF (fail open — correctness over speed). The re-run's bundle
+          // must match what we already wrote.
+          logger.warn('  [cache] reverse-diff entry did not validate (build non-deterministic for this key) — recomputing.');
+          const recomputeOpts = { ...patchOptions, captureReverse: [], buildCache: null };
+          try {
+            const reRet = await applyNamedPatches(code, patches, patchesToApply, activeLogger, recomputeOpts);
+            const reCode = (reRet && typeof reRet === 'object' && typeof reRet.code === 'string') ? reRet.code : reRet;
+            if (typeof reCode === 'string' && sha256(reCode) === outputSha256) {
+              captureReverse = recomputeOpts.captureReverse;
+            } else {
+              logger.warn('  [cache] reverse-diff recompute produced a different bundle — skipping reverse-diff sidecar this build.');
+              captureReverse = undefined;
+            }
+          } catch (err) {
+            logger.warn(`  [cache] reverse-diff recompute failed (${err.message}) — skipping reverse-diff sidecar this build.`);
+            captureReverse = undefined;
+          }
+        }
+      }
+
+      // Persist / tombstone the entry.
+      if (buildCache.entry && !validated) {
+        // Same key, different output bytes → the build is non-deterministic for
+        // this key. Tombstone so future builds skip the cache for it instead of
+        // paying a recompute-on-miss every time.
+        markNondeterministic(buildCache.key, buildCache.storageRoot);
+      } else if (!buildCache.entry && !buildCache.nondeterministic) {
+        // Fresh build (cold key): store conflicts (+ reverse-diff when captured)
+        // so the next identical build can replay them.
+        const entry = {
+          outputSha256,
+          conflicts: Array.isArray(buildCache.conflicts) ? buildCache.conflicts : [],
+          createdAt: new Date().toISOString(),
+          ccVersion: patchOptions.version ?? null,
+        };
+        if (wantReverseDiff && Array.isArray(captureReverse)) {
+          entry.reverseDiff = captureReverse;
+        }
+        const res = storeCacheEntry(buildCache.key, entry, buildCache.storageRoot);
+        if (!res.ok) logger.debug?.(`  [cache] store skipped (non-fatal): ${res.error?.message}`);
+      }
+    }
+  } catch (err) {
+    logger.debug?.(`  [cache] resolution skipped (non-fatal): ${err.message}`);
+  }
+
   const bundleWriteStartedAt = Date.now();
   fs.writeFileSync(options.outputPath, patchedCode, 'utf8');
   fs.chmodSync(options.outputPath, 0o755);
@@ -418,6 +560,7 @@ export async function runBuild(ctx) {
 
     // 2. Write a .sha256 sidecar next to the output bundle (skipped under
     //    --no-sidecar; the integrity check above still runs).
+    let sidecarWritten = false;
     if (noSidecar) {
       logger.log(`  [~] --no-sidecar: skipping .sha256 sidecar`);
     } else {
@@ -425,10 +568,62 @@ export async function runBuild(ctx) {
         const sha256SidecarPath = options.outputPath + '.sha256';
         fs.writeFileSync(sha256SidecarPath, outputSha256 + '\n', 'utf8');
         logger.log(`  [+] SHA-256 sidecar written to: ${sha256SidecarPath}`);
+        sidecarWritten = true;
       } catch (err) {
         logger.warn(`  [!] Could not write .sha256 sidecar: ${err.message}`);
       }
     }
+
+    // ── Auto-pin after a verified build ───────────────────────────────────────
+    // The build reached here only after: (a) the npm-tarball integrity gate
+    // passed (scripts/verify-bundle-sha.mjs, run by the Makefile BEFORE patching,
+    // which drops a TOFU marker on a first-use acceptance), (b) patches applied
+    // with verify OK (applyNamedPatches did not throw), and (c) the output
+    // integrity check + .sha256 sidecar succeeded. Record the pin for this
+    // version automatically so the TOFU window does not stay open forever.
+    // Respects CCPATCH_NO_AUTOPIN=1. An existing pin with a DIFFERENT sha is
+    // NEVER overwritten — that mismatch fails the build loud (the attack the pin
+    // exists to catch).
+    if (integrityOk && sidecarWritten) {
+      const pinVersion = patchOptions.version || process.env.CCPATCH_CLI_VERSION || null;
+      const pinRes = maybeAutoPin({
+        version: pinVersion,
+        inputPath: options.inputPath,
+      });
+      if (pinRes.status === 'pinned') {
+        logger.log(`  [+] auto-pinned v${pinVersion} (sha256 ${String(pinRes.sha256).slice(0, 16)}…) — disable with CCPATCH_NO_AUTOPIN=1`);
+      } else if (pinRes.status === 'mismatch') {
+        logger.error(`  [!] AUTO-PIN REFUSED: ${pinRes.error}`);
+        return 1;
+      } else if (pinRes.status === 'noop') {
+        logger.debug?.(`  [~] auto-pin: v${pinVersion} already pinned with matching sha`);
+      } else {
+        logger.debug?.(`  [~] auto-pin skipped: ${pinRes.reason}`);
+      }
+    }
+  }
+
+  // Bun-SEA embedded runtime deps: the extractor writes embedded-manifest.json
+  // and an embedded/ dir (native .node addons + JS wrappers) next to the
+  // EXTRACTED cli.js. The patched bundle lives elsewhere (releases/<ver>/), so
+  // copy those artifacts next to the output so (a) the esm-compat require shim
+  // can resolve `require("/$bunfs/root/<x>")` from ./embedded/ and (b) its
+  // loud-on-miss path can consult the manifest. Best-effort: older extractions
+  // (pre-manifest) simply have nothing to copy, which is fine.
+  try {
+    const inDir = path.dirname(options.inputPath);
+    const outDir = path.dirname(options.outputPath);
+    const srcManifest = path.join(inDir, 'embedded-manifest.json');
+    if (path.resolve(inDir) !== path.resolve(outDir) && fs.existsSync(srcManifest)) {
+      fs.copyFileSync(srcManifest, path.join(outDir, 'embedded-manifest.json'));
+      const srcEmbedded = path.join(inDir, 'embedded');
+      if (fs.existsSync(srcEmbedded)) {
+        fs.cpSync(srcEmbedded, path.join(outDir, 'embedded'), { recursive: true });
+      }
+      logger.log(`  [+] Embedded SEA modules + manifest copied next to bundle (${outDir})`);
+    }
+  } catch (err) {
+    logger.warn(`  [!] Could not copy embedded SEA modules: ${err.message}`);
   }
 
   // S1: persist a capability-gate-bypass sentinel next to the output bundle.
@@ -600,6 +795,11 @@ export async function runBuild(ctx) {
   const reportWithPhases = {
     ...runnerReport,
     phases: { ...(runnerReport.phases || {}), ...phaseMs },
+    cache: {
+      conflicts: conflictsFromCache,
+      reverseDiff: reverseFromCache,
+      enabled: !!buildCache,
+    },
   };
   if (options.json) {
     // JSON path: a single JSON object on stdout. The leveled logger has

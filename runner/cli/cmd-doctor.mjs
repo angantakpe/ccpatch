@@ -9,6 +9,7 @@ import { style } from './style.mjs';
 import { readPatchFlags, readProfiles } from '../config.mjs';
 import { resolveProfile } from '../manifest.mjs';
 import { probeAnchor } from '../anchors.mjs';
+import { compileBootApply } from '../boot-registry.mjs';
 import { compileKind } from '../patch-kinds.mjs';
 import { buildDriftRecord } from '../drift-record.mjs';
 import { PROJECT_ROOT } from '../paths.mjs';
@@ -113,10 +114,14 @@ export async function runDoctorCore(options, patches, logger, out = {}) {
       continue;
     }
     // Declarative kinds (prefix/postfix/transpiler) synthesize apply() via
-    // compileKind — mirror the runner so probeAnchor sees a real fn.
+    // compileKind — mirror the runner so probeAnchor sees a real fn. Boot-only
+    // patches (bootInject with no apply()) likewise get a standalone splice
+    // synthesized via compileBootApply so the anchor + verify probe is real.
     const probePatch = (patch.kind && patch.kind !== 'free' && typeof patch.apply !== 'function')
       ? { ...patch, apply: compileKind(patch) }
-      : patch;
+      : (typeof patch.apply !== 'function' && patch.bootInject)
+        ? { ...patch, apply: compileBootApply(patch, name) }
+        : patch;
     const res = probeAnchor(probePatch, code);
     if (patch.deprecated) {
       const sinceStr = patch.deprecated.since ? ` (since ${patch.deprecated.since})` : '';

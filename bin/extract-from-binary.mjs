@@ -7,8 +7,9 @@
  *   node src/cli/bin/extract-from-binary.mjs storage/archives/claude-code-v2.1.114/bin/claude.exe cli.js
  */
 
-import { readFileSync, writeFileSync, existsSync, statSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync } from 'node:fs';
+import { resolve, dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { parseModules, getModuleSlice } from '../tools/bun-decompiler/decompile.mjs';
 
@@ -83,6 +84,118 @@ function extractViaMarkerParser(buffer) {
   }
   // Shebang is prepended by extract() when --executable is passed.
   return text + '\n';
+}
+
+/**
+ * ── Bun SEA (single-executable application) on-disk layout, as reversed here ──
+ *
+ * `bun build --compile` produces a host-platform executable (ELF on Linux,
+ * Mach-O on macOS) with the normal program image first, then Bun's JS runtime,
+ * and finally an embedded virtual filesystem ("/$bunfs/root/") near the tail.
+ * There is NO separate `node_modules/` tree on disk inside the binary — every
+ * application dependency that Bun could bundle is INLINED into the entrypoint
+ * module's source text (e.g. react and ink live inside src/entrypoints/cli.js,
+ * which is why the react_singleton patch can rewrite the bundled React in place).
+ * Dependencies Bun ships as RUNTIME built-ins (notably `ws`, whose
+ * WebSocketServer / Sec-WebSocket-* strings sit in the Bun-runtime region, far
+ * below the cli.js module) are NOT in the VFS at all — under Node they must come
+ * from the host node_modules, which is what the optionalDependencies stopgap
+ * provides.
+ *
+ * Each embedded VFS entry is introduced by an ASCII marker:
+ *
+ *   JS module (doubled / bytecode-backed):
+ *     /$bunfs/root/<path>\0/$bunfs/root/<path>\0// @bun <flags>\n<CJS-wrapper-source>\0
+ *   JS module (single):
+ *     /$bunfs/root/<path>\0// @bun <flags>\n<CJS-wrapper-source>\0
+ *   Native addon (.node, raw ELF/Mach-O):
+ *     /$bunfs/root/<path>\0<ELF|MachO image bytes>
+ *
+ * `<content>` for a JS module is a `(function(exports, require, module,
+ * __filename, __dirname){…})` CJS wrapper, NUL-terminated. Native addons are the
+ * raw shared-object image (no NUL terminator; the slice runs to the next real
+ * marker). The decompiler in tools/bun-decompiler/decompile.mjs walks these
+ * markers; we reuse its parser here so this extractor and the native repack path
+ * agree byte-for-byte on module boundaries.
+ *
+ * Observed inventory for claude-code v2.1.x (5 valid headers among 14 raw
+ * `/$bunfs/root/` byte occurrences — the other 9 are false positives inside Bun
+ * runtime strings, ELF data, and `require("/$bunfs/root/*.node")` string
+ * literals, all rejected by parseModuleAt's doubled-path/@bun/ELF checks):
+ *   - src/entrypoints/cli.js   (JS, ~16 MB — the real entrypoint; react+ink inline)
+ *   - image-processor.js       (JS, tiny CJS wrapper: require("/$bunfs/root/image-processor.node"))
+ *   - audio-capture.js         (JS, tiny CJS wrapper: require("/$bunfs/root/audio-capture.node"))
+ *   - image-processor.node     (native ELF addon)
+ *   - audio-capture.node       (native ELF addon)
+ */
+
+/**
+ * Build the embedded-module manifest: one record per VFS entry the SEA carries.
+ * Each record is { path, kind, offset, size, sha256 } where:
+ *   - path    : the /$bunfs/root-relative module path (e.g. "audio-capture.node")
+ *   - kind    : "js" | "elf"
+ *   - offset  : byte offset of the module's marker within the binary
+ *   - size    : on-disk byte length of the extracted slice (post NUL-trim for JS)
+ *   - sha256  : hex sha256 of those exact extracted bytes
+ */
+function buildEmbeddedManifest(buffer) {
+  const { modules, markerCount, rawCount } = parseModules(buffer);
+  const manifest = [];
+  for (const m of modules) {
+    const slice = getModuleSlice(buffer, m, { unwrap: false });
+    manifest.push({
+      path: m.path,
+      kind: m.kind,
+      offset: m.markerStart,
+      size: slice.length,
+      sha256: sha256(slice),
+    });
+  }
+  return { manifest, markerCount, rawCount };
+}
+
+/**
+ * Materialize the complete extraction next to `outputPath` (the cli.js destination):
+ *   - <dir>/embedded-manifest.json        — array of {path,kind,offset,size,sha256}
+ *   - <dir>/embedded/<path>               — every non-entrypoint VFS entry, so the
+ *                                           patched bundle can resolve them at runtime
+ *
+ * The cli.js entrypoint itself is intentionally NOT re-written under embedded/ —
+ * it is the primary output and is written separately by extract(). The native
+ * .node addons and their thin JS wrappers ARE written so a runtime
+ * `require("/$bunfs/root/<x>")` can be redirected to disk (see esm-compat shim)
+ * instead of failing with a swallowed rejection.
+ *
+ * Returns the manifest array (also when there is nothing extra to extract).
+ */
+function writeEmbeddedArtifacts(buffer, outputPath) {
+  const outDir = dirname(resolve(outputPath));
+  const { manifest, markerCount, rawCount } = buildEmbeddedManifest(buffer);
+
+  const manifestPath = join(outDir, 'embedded-manifest.json');
+  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
+  log(`Embedded manifest: ${manifest.length} entries → ${manifestPath} (${markerCount} markers, ${rawCount} valid headers)`);
+
+  const { modules } = parseModules(buffer);
+  let extra = 0;
+  for (const m of modules) {
+    // Skip the entrypoint module — it's the main `outputPath` written by extract().
+    if (/(^|\/)cli\.js$/.test(m.path) && m.path.includes('entrypoint')) continue;
+    // Guard against path traversal — only relative, non-escaping paths.
+    const dest = resolve(outDir, 'embedded', m.path);
+    if (dest !== resolve(outDir, 'embedded') && !dest.startsWith(resolve(outDir, 'embedded') + '/')) {
+      warn(`Refusing to extract embedded module with unsafe path: ${m.path}`);
+      continue;
+    }
+    mkdirSync(dirname(dest), { recursive: true });
+    writeFileSync(dest, getModuleSlice(buffer, m, { unwrap: false }));
+    extra++;
+    log(`  embedded: ${m.kind === 'elf' ? '[native]' : '[js]    '} ${m.path} → embedded/${m.path}`);
+  }
+  if (extra === 0) {
+    log('  (no non-entrypoint embedded modules found)');
+  }
+  return manifest;
 }
 
 /**
@@ -232,6 +345,17 @@ function extract(binaryPath, outputPath) {
     const firstLine = js.split('\n')[0];
     log(`First line: ${firstLine.slice(0, 60)}...`);
 
+    // Completeness pass: enumerate ALL embedded VFS entries (not just cli.js),
+    // write the manifest, and materialize the non-entrypoint modules under
+    // <dir>/embedded/ so the patched bundle can resolve them at runtime. Fail
+    // loud at extract time: a malformed binary here is a hard error, not a
+    // silent partial extraction.
+    try {
+      writeEmbeddedArtifacts(buffer, outputPath);
+    } catch (e) {
+      error(`Embedded-module extraction failed: ${e.message}`);
+    }
+
     return true;
   } catch (e) {
     error(`Extraction failed: ${e.message}`);
@@ -239,21 +363,34 @@ function extract(binaryPath, outputPath) {
   }
 }
 
-// Main
-const args = process.argv.slice(2);
-if (args.length < 1 || args.includes('--help') || args.includes('-h')) {
-  usage();
+// Exported for unit tests (synthetic SEA fixtures); the CLI body below only runs
+// when this file is invoked directly, so importing it has no side effects.
+export { buildEmbeddedManifest, writeEmbeddedArtifacts };
+
+// `executableFlag` is read inside extract(); declare at module scope so both the
+// CLI path and any test that calls extract() resolve the same binding.
+let executableFlag = false;
+
+function main() {
+  const args = process.argv.slice(2);
+  if (args.length < 1 || args.includes('--help') || args.includes('-h')) {
+    usage();
+  }
+
+  // Fix 12: --executable flag controls whether the shebang is prepended to the output.
+  // Omit by default — Makefile targets always invoke the output as `node cli.v*.cjs`.
+  executableFlag = args.includes('--executable');
+  const filteredArgs = args.filter(a => a !== '--executable');
+
+  const binaryPath = resolve(filteredArgs[0]);
+  const outputPath = resolve(filteredArgs[1] || 'cli.js');
+
+  log(`Extracting JavaScript from: ${binaryPath}`);
+  log(`Output: ${outputPath}`);
+
+  extract(binaryPath, outputPath);
 }
 
-// Fix 12: --executable flag controls whether the shebang is prepended to the output.
-// Omit by default — Makefile targets always invoke the output as `node cli.v*.cjs`.
-const executableFlag = args.includes('--executable');
-const filteredArgs = args.filter(a => a !== '--executable');
-
-const binaryPath = resolve(filteredArgs[0]);
-const outputPath = resolve(filteredArgs[1] || 'cli.js');
-
-log(`Extracting JavaScript from: ${binaryPath}`);
-log(`Output: ${outputPath}`);
-
-extract(binaryPath, outputPath);
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main();
+}

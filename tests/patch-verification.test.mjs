@@ -20,6 +20,12 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readPatchFlags } from '../runner/config.mjs';
 import { compileKind } from '../runner/patch-kinds.mjs';
+import {
+  BOOT_REGISTRY_SENTINEL,
+  collectBootInjects,
+  compileBootApply,
+  spliceBootRegistry,
+} from '../runner/boot-registry.mjs';
 import { pickFixture } from './fixtures/registry.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -112,14 +118,18 @@ function isEnabled(name) {
 
 /**
  * Return the effective apply() for a patch. For `kind`-based (declarative)
- * patches the runner synthesizes apply() at runtime via compileKind(); mirror
- * that here so Layer 1/2 can test them without special-casing.
+ * patches the runner synthesizes apply() at runtime via compileKind(); for
+ * boot-only patches (bootInject with no apply()) the boot registry performs
+ * the splice — compileBootApply mirrors it as a standalone fn. Mirror both
+ * here so Layer 1/2/3 test OUTCOME (the hook lands and verifies) regardless
+ * of which mechanism injects it.
  */
-function resolveApply(patch) {
+function resolveApply(patch, name) {
   if (typeof patch.apply === 'function') return patch.apply;
   if (patch.kind && patch.kind !== 'free') {
     try { return compileKind(patch); } catch { return null; }
   }
+  if (patch.bootInject) return compileBootApply(patch, name);
   return null;
 }
 
@@ -226,7 +236,7 @@ test('Layer 1 — every patch.apply() mutates its input', async (t) => {
   for (const name of patchNames) {
     await t.test(name, () => {
       const patch = patches[name];
-      const applyFn = resolveApply(patch);
+      const applyFn = resolveApply(patch, name);
       if (!applyFn) {
         t.skip('no apply() exported');
         return;
@@ -289,7 +299,7 @@ test('Layer 2 — verify.present string exists after apply()', async (t) => {
   for (const name of patchesWithVerify) {
     await t.test(name, () => {
       const patch = patches[name];
-      const applyFn = resolveApply(patch);
+      const applyFn = resolveApply(patch, name);
       if (!applyFn) {
         t.skip('no apply() — declarative kind: patch is synthesized at runtime');
         return;
@@ -393,10 +403,11 @@ test('Layer 3 — IIFE patches register expected globals at runtime', async (t) 
 
     await t.test(name, () => {
       const patch = patches[name];
-      if (typeof patch.apply !== 'function') { t.skip('no apply()'); return; }
+      const applyFn = resolveApply(patch, name);
+      if (!applyFn) { t.skip('no apply()'); return; }
 
       const fixture = fixtureFor(name, patch);
-      const out = patch.apply(fixture, {});
+      const out = applyFn(fixture, {});
 
       // Custom check takes priority.
       if (spec.custom) {
@@ -417,4 +428,94 @@ test('Layer 3 — IIFE patches register expected globals at runtime', async (t) 
       }
     });
   }
+});
+
+// ── Layer 4: boot-injection registry — single splice, declared order, ───────
+// ── per-patch idempotency ────────────────────────────────────────────────────
+
+test('Layer 4 — boot registry: one splice, declared order, idempotent re-apply', async (t) => {
+  // Synthetic shebang-less CJS-IIFE bundle (the Bun-extracted shape).
+  const FIXTURE = '(function(exports, require, module, __filename, __dirname) {/* body */\n})(module.exports, require, module, __filename, __dirname);\n';
+  const IIFE_HEAD = '(function(exports, require, module, __filename, __dirname)';
+
+  const bootPatchNames = patchNames.filter(n => patches[n]?.bootInject);
+
+  await t.test('the migrated boot patches all declare bootInject', () => {
+    for (const expected of [
+      'fetch_interceptor', 'bun_shim', 'tool_result_error_content',
+      'boot_banner', 'mcp_lazy', 'stdin_da1_leak',
+    ]) {
+      assert.ok(bootPatchNames.includes(expected), `${expected} must declare bootInject`);
+    }
+  });
+
+  await t.test('single splice carries every hook in declared order, before the IIFE head', () => {
+    const { entries } = collectBootInjects(patches, bootPatchNames, { code: FIXTURE, options: { version: '0.0.0-test' } });
+    assert.equal(entries.length, bootPatchNames.length, 'no patch skipped on a pristine fixture');
+    const out = spliceBootRegistry(FIXTURE, entries);
+    assert.notEqual(out, FIXTURE, 'splice must change the fixture');
+
+    // Exactly ONE registry block.
+    const sentinelCount = out.split(BOOT_REGISTRY_SENTINEL).length - 1;
+    assert.equal(sentinelCount, 1, 'exactly one registry block');
+
+    // The whole block sits BEFORE the CJS-IIFE head.
+    const iifeAt = out.indexOf(IIFE_HEAD);
+    for (const e of entries) {
+      const at = out.indexOf(`// ── ${e.name}: boot hook`);
+      assert.ok(at !== -1 && at < iifeAt, `${e.name} hook must precede the IIFE head`);
+    }
+
+    // Declared order is reproduced top-to-bottom (order asc, name tiebreak) —
+    // in particular fetch_interceptor's bus precedes its subscribers.
+    const offsets = entries.map(e => out.indexOf(`// ── ${e.name}: boot hook`));
+    const sorted = [...offsets].sort((a, b) => a - b);
+    assert.deepEqual(offsets, sorted, 'separator offsets must be monotonically increasing');
+    const fi = out.indexOf('// ── fetch_interceptor: boot hook');
+    for (const sub of ['tool_result_error_content', 'mcp_lazy']) {
+      if (!bootPatchNames.includes(sub)) continue;
+      assert.ok(fi < out.indexOf(`// ── ${sub}: boot hook`), `fetch bus must precede ${sub}`);
+    }
+  });
+
+  await t.test('re-apply is a per-patch no-op (byte-identical)', () => {
+    const first = spliceBootRegistry(
+      FIXTURE,
+      collectBootInjects(patches, bootPatchNames, { code: FIXTURE, options: {} }).entries,
+    );
+    const again = collectBootInjects(patches, bootPatchNames, { code: first, options: {} });
+    assert.equal(again.entries.length, 0, 'all sentinels present — nothing to inject');
+    assert.deepEqual([...again.skipped].sort(), [...bootPatchNames].sort(), 'every patch skipped by its sentinel');
+    const second = spliceBootRegistry(first, again.entries);
+    assert.equal(second, first, 'second apply must be byte-identical');
+  });
+
+  await t.test('shebang bundles splice after the shebang line (startsWith, not includes)', () => {
+    const shebangFixture = '#!/usr/bin/env node\nconst x = 1;\n';
+    const { entries } = collectBootInjects(patches, ['stdin_da1_leak'], { code: shebangFixture, options: {} });
+    const out = spliceBootRegistry(shebangFixture, entries);
+    assert.ok(out.startsWith('#!/usr/bin/env node\n'), 'shebang stays first');
+    assert.ok(out.indexOf(BOOT_REGISTRY_SENTINEL) > 0, 'block lands after the shebang');
+    // Interior "#!/usr/bin/env node" literals must NOT attract the splice.
+    const interior = 'const s = "#!/usr/bin/env node";\n' + FIXTURE;
+    const out2 = spliceBootRegistry(interior, collectBootInjects(patches, ['stdin_da1_leak'], { code: interior, options: {} }).entries);
+    assert.ok(
+      out2.indexOf(BOOT_REGISTRY_SENTINEL) < out2.indexOf(IIFE_HEAD),
+      'no-leading-shebang bundles anchor on the CJS-IIFE head',
+    );
+    assert.ok(
+      out2.indexOf(BOOT_REGISTRY_SENTINEL) > out2.indexOf('#!/usr/bin/env node'),
+      'interior shebang literal is not used as an anchor',
+    );
+  });
+
+  await t.test('anchorless input fails loud but open (warn + unchanged)', () => {
+    const plain = 'const nothing = true;\n';
+    const { entries } = collectBootInjects(patches, ['stdin_da1_leak'], { code: plain, options: {} });
+    const warns = [];
+    const out = spliceBootRegistry(plain, entries, { warn: (m) => warns.push(m) });
+    assert.equal(out, plain, 'code returned unchanged');
+    assert.equal(warns.length, 1, 'one loud warning');
+    assert.match(warns[0], /boot-registry/);
+  });
 });

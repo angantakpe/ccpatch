@@ -18,8 +18,6 @@
  *   These sequences are never valid user keystrokes and safe to discard.
  */
 
-import { ccpLog } from '../runner/cli/style.mjs';
-
 const block = `var __ccpFixStdinDA1Installed=true;(function(){try{var __ccpDA1Re=/\\x1b\\[[?>][0-9;]*c/g;var __ccpStdinEmit=process.stdin.emit.bind(process.stdin);process.stdin.emit=function(event,data){if(event==='data'&&data!=null){var str=Buffer.isBuffer(data)?data.toString('binary'):(typeof data==='string'?data:null);if(str&&__ccpDA1Re.test(str)){__ccpDA1Re.lastIndex=0;var filtered=str.replace(__ccpDA1Re,'');if(!filtered)return false;data=Buffer.isBuffer(data)?Buffer.from(filtered,'binary'):filtered;}__ccpDA1Re.lastIndex=0;}return __ccpStdinEmit(event,data);};}catch(e){}})();`;
 
 export default {
@@ -30,33 +28,10 @@ export default {
   verify: { present: '__ccpFixStdinDA1Installed', count: { present: 1 } },
   preload: true,
   preloadCode: block,
-  apply: (code) => {
-    if (code.includes('__ccpFixStdinDA1Installed')) return code;
-
-    // Try a real leading shebang first. Match with startsWith(), NOT includes():
-    // bundles extracted from the Bun binary have no leading shebang but DO contain
-    // "#!/usr/bin/env node" as an interior string literal, so includes() would
-    // splice the filter into dead string content. The CJS-IIFE regex below is the
-    // correct anchor for those bundles (and tolerates code prepended before it).
-    const SHEBANG = '#!/usr/bin/env node';
-    if (code.startsWith(SHEBANG)) {
-      const afterShebang = code.indexOf('\n') + 1;
-      ccpLog('  [stdin_da1_leak] stdin DA1 filter installed (shebang anchor)');
-      return code.slice(0, afterShebang) + block + '\n' + code.slice(afterShebang);
-    }
-
-    // CJS wrapper used by npm-distributed bundles (v2.1.138+).
-    // Pattern: (function(exports,require,module,__filename,__dirname){  (spaces vary)
-    // No ^ anchor — fetch_interceptor may have prepended code before the IIFE.
-    const cjsAnchor = /\(function\s*\(\s*exports\s*,\s*require\s*,\s*module\s*,\s*__filename\s*,\s*__dirname\s*\)\s*\{/;
-    const m = code.match(cjsAnchor);
-    if (m) {
-      const insertAt = m.index + m[0].length;
-      ccpLog('  [stdin_da1_leak] stdin DA1 filter installed (CJS wrapper anchor)');
-      return code.slice(0, insertAt) + block + code.slice(insertAt);
-    }
-
-    console.warn('  [!] stdin_da1_leak: no injection anchor found — stdin DA1 filter not installed');
-    return code;
-  },
+  // Boot hook spliced by the runner's boot registry (runner/boot-registry.mjs).
+  // The filter only wraps process.stdin.emit, so any pre-body slot works;
+  // order 60 keeps it after the fetch/Bun infrastructure hooks. The old
+  // sentinel guard (`if (code.includes('__ccpFixStdinDA1Installed'))`) is now
+  // the registry's job — it skips patches whose sentinel is already present.
+  bootInject: { order: 60, code: block },
 };

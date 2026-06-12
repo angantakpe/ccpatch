@@ -51,6 +51,15 @@ Optional manifest fields you'll see in real patches: `category`, `phase`
 `preloadCode`. See [manifest-reference.md](./manifest-reference.md) for the full
 schema (the source of truth is `runner/manifest-schema.mjs`).
 
+**Boot-time code** is a special case: a patch that needs code to run before the
+bundle body declares `bootInject: { code, order, sentinel? }` instead of writing
+its own shebang/CJS-IIFE splice in `apply()`. The runner's boot registry
+(`runner/boot-registry.mjs`) collects all enabled patches' blocks and performs
+exactly ONE insertion at the canonical boot anchor, sorted by `order` (gaps of
+10; see the reserved slots in EXTENSIONS_API.md). Boot-only patches may omit
+`apply()` entirely; idempotency comes from the sentinel (defaults to the first
+`verify.present` literal).
+
 ---
 
 ## Add a new patch

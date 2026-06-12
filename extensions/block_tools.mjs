@@ -10,10 +10,6 @@ export default {
 
     description: 'Block specific tools from being used',
     capabilities: ["env","tools"],
-    // mcp_lazy and block_tools both inject at the CJS-IIFE head seam — BENIGN
-    // overlap (prepend-at-same-offset, neither clobbers the other). block_tools
-    // is the acknowledged seam owner.
-    allowOverlapWith: ['mcp_lazy'],
     // count: hook defines globalThis.__isToolBlocked__ once + the gated wire
     // references it once == 2 occurrences after a correct apply.
     verify: { present: '__isToolBlocked__', count: { present: 2 } },

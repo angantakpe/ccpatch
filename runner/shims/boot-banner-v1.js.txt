@@ -133,3 +133,251 @@
   // Drain anything buffered before this installer ran.
   kick();
 })();
+
+// ══════════════════════════════════════════════════════════════════════════
+// [PATCH] boot_banner / diagnostics sink — always-on, file-backed record of
+// swallowed errors. Other injected code (e.g. the fetch bus warn helper)
+// appends one-line records via globalThis.__ccpDiag(tag, msg); nothing here
+// ever writes to stderr in a healthy boot. Location: $CCPATCH_DIAG_DIR if
+// set, else ~/.ccpatch/diagnostics (cwd-independent). ~1MB size guard:
+// rotate to runtime.log.1, falling back to truncate.
+//
+// Also installs early LOG-ONLY process observers so the next swallowed boot
+// failure is visible in the log:
+//   - 'uncaughtExceptionMonitor': observational by Node design — it never
+//     changes crash semantics.
+//   - 'unhandledRejection': adding a listener WOULD suppress Node's default
+//     (crash, exit 1). Semantics are preserved with a sole-listener rethrow:
+//     if at emit time this listener is the ONLY one registered (the window
+//     before the bundle installs its own handlers), the reason is rethrown,
+//     which crashes the process with the error + stack and exit code 1 —
+//     the same outcome Node's default --unhandled-rejections=throw mode
+//     produces. When any other listener exists (the bundle installs its own
+//     'unhandledRejection' handler during startup — verified in
+//     cli v2.1.175), this listener only logs and the bundle's handler keeps
+//     deciding the outcome, exactly as without ccpatch. Known limitation:
+//     a user who explicitly launches node with --unhandled-rejections=warn|
+//     none gets a crash in that pre-bundle window where they'd have gotten
+//     a warning; Claude Code's own launchers never set that flag.
+// ══════════════════════════════════════════════════════════════════════════
+(function __ccpDiagSink() {
+  try {
+    if (globalThis.__ccpDiagSink_v1) return;
+    globalThis.__ccpDiagSink_v1 = true;
+
+    // Builtin access that works in every injection context: ESM output
+    // (process.getBuiltinModule / __hm_nativeRequire from the esm-compat
+    // header) and CJS output (plain require).
+    function _mod(id) {
+      try { if (typeof process.getBuiltinModule === 'function') return process.getBuiltinModule(id); } catch (_) {}
+      try { if (typeof __hm_nativeRequire === 'function') return __hm_nativeRequire(id); } catch (_) {}
+      try { if (typeof require === 'function') return require(id); } catch (_) {}
+      return null;
+    }
+
+    var MAX_BYTES = 1024 * 1024; // ~1MB rotate threshold
+
+    function diagFile() {
+      var path = _mod('path'); var os = _mod('os');
+      if (!path || !os) return null;
+      var dir = '';
+      try { dir = process.env.CCPATCH_DIAG_DIR || ''; } catch (_) {}
+      if (!dir) dir = path.join(os.homedir(), '.ccpatch', 'diagnostics');
+      return path.join(dir, 'runtime.log');
+    }
+
+    var sink = function __ccpDiagWrite(tag, msg) {
+      try {
+        var fs = _mod('fs'); var path = _mod('path');
+        if (!fs || !path) return;
+        var file = diagFile();
+        if (!file) return;
+        try { fs.mkdirSync(path.dirname(file), { recursive: true }); } catch (_) {}
+        try {
+          var st = fs.statSync(file);
+          if (st && st.size > MAX_BYTES) {
+            try { fs.renameSync(file, file + '.1'); }
+            catch (_) { try { fs.truncateSync(file, 0); } catch (_2) {} }
+          }
+        } catch (_) {}
+        var body = String(msg == null ? '' : msg).replace(/\s*\n\s*/g, ' | ').slice(0, 2000);
+        fs.appendFileSync(file,
+          new Date().toISOString() + ' [' + String(tag) + '] pid=' + process.pid + ' ' + body + '\n');
+      } catch (_) {}
+    };
+    try { sink.where = diagFile; } catch (_) {}
+    if (!globalThis.__ccpDiag) globalThis.__ccpDiag = sink;
+
+    function describe(err) {
+      try { return (err && (err.stack || err.message)) || String(err); }
+      catch (_) { return '<unprintable>'; }
+    }
+
+    try {
+      process.on('unhandledRejection', function __ccpDiagOnRejection(reason) {
+        try {
+          var m = describe(reason);
+          globalThis.__ccpDiag('unhandled-rejection', m);
+          // CCPATCH_PARANOID=1 keeps its loud-stderr contract.
+          try {
+            if (process.env.CCPATCH_PARANOID === '1') console.error('[ccp:diag][paranoid] unhandledRejection: ' + m);
+          } catch (_) {}
+        } catch (_) {}
+        // Sole-listener rethrow: preserve Node's default crash when nothing
+        // else handles the event (see header comment). Intentionally outside
+        // try/catch — the throw IS the preserved default behavior.
+        if (process.listenerCount('unhandledRejection') === 1) throw reason;
+      });
+    } catch (_) {}
+
+    try {
+      process.on('uncaughtExceptionMonitor', function __ccpDiagOnException(err) {
+        try { globalThis.__ccpDiag('uncaught-exception', describe(err)); } catch (_) {}
+      });
+    } catch (_) {}
+  } catch (_) {}
+})();
+
+// ══════════════════════════════════════════════════════════════════════════
+// [PATCH] boot_banner / boot watchdog — one-shot, unref'd hang beacon.
+//
+// Failure mode this exists for: the patched CLI prints its boot banner and
+// then sits silent forever (a boot-time deadlock with every error swallowed).
+// ~15s after boot, if the process still hasn't produced substantive UI
+// output, ONE diagnostic block is written to stderr: active handle/request
+// constructor counts, child-process count, and actionable env hints.
+//
+// "UI rendered" proxy — cumulative bytes written to process.stdout after this
+// shim runs (the boot banner itself goes to stderr and is not counted):
+//   - A hung boot emits only terminal capability queries / cursor probes on
+//     stdout: tens of bytes, well under 1KB (measured 0 bytes on the real
+//     v2.1.175 bundle hung headless).
+//   - A rendered interactive frame (Ink TUI: welcome box, trust dialog,
+//     prompt) is several KB of text + ANSI per paint, and Ink repaints
+//     continuously — measured ~5KB cumulative stdout within seconds of a
+//     healthy interactive boot even on a default 80x24 PTY. The threshold
+//     sits at 2048: comfortably above any hung boot's query traffic and
+//     under half of the smallest healthy render measured, biased toward
+//     never firing on a slow-but-healthy boot.
+// The beacon is written with fs.writeSync(2, …), NOT process.stderr.write:
+// once the TUI is up the bundle (Ink patch-console) replaces stderr.write
+// and swallows it — a direct fd-2 write bypasses that (verified against the
+// real v2.1.175 bundle under a PTY).
+// False-positive containment: the watchdog only arms when an interactive UI
+// is actually expected — stdout is a TTY and argv carries no recognized
+// non-interactive mode (-p/--print, --version, --help, mcp, install, …).
+// Piped/print/one-shot runs that legitimately stay under 4KB never arm it.
+// The timer is unref'd, so it never keeps a finished process alive, and the
+// stdout wrap restores itself as soon as the threshold is crossed (or the
+// timer fires). Opt-out: CCPATCH_NO_WATCHDOG=1.
+// Test hooks: CCPATCH_WATCHDOG_FORCE=1 (skip the interactivity gate),
+// CCPATCH_WATCHDOG_MS, CCPATCH_WATCHDOG_THRESHOLD.
+// ══════════════════════════════════════════════════════════════════════════
+(function __ccpWatchdog() {
+  try {
+    if (globalThis.__ccpWatchdog_v1) return;
+    globalThis.__ccpWatchdog_v1 = true;
+
+    var env = process.env || {};
+    if (env.CCPATCH_NO_WATCHDOG === '1') return;
+
+    var force = env.CCPATCH_WATCHDOG_FORCE === '1';
+    if (!force) {
+      if (!process.stdout || !process.stdout.isTTY) return; // no UI expected
+      var argv = (process.argv || []).slice(2);
+      var NON_INTERACTIVE = ['-p', '--print', '--version', '-v', '--help', '-h',
+        'mcp', 'install', 'update', 'doctor', 'migrate-installer', 'setup-token', 'api'];
+      for (var i = 0; i < argv.length; i++) {
+        if (NON_INTERACTIVE.indexOf(argv[i]) !== -1) return;
+      }
+    }
+
+    var delayMs = parseInt(env.CCPATCH_WATCHDOG_MS, 10);
+    if (!(delayMs > 0)) delayMs = 15000;
+    var threshold = parseInt(env.CCPATCH_WATCHDOG_THRESHOLD, 10);
+    if (!(threshold > 0)) threshold = 2048;
+
+    var bytes = 0;
+    var timer = null;
+    var origWrite = process.stdout.write;
+    var wrapped = function __ccpWatchdogStdoutCount(chunk) {
+      try {
+        bytes += (typeof chunk === 'string') ? Buffer.byteLength(chunk)
+          : (chunk && chunk.length) || 0;
+        if (bytes >= threshold) { restore(); disarm(); } // healthy — stand down early
+      } catch (_) { try { restore(); } catch (_2) {} }
+      return origWrite.apply(process.stdout, arguments);
+    };
+    function restore() {
+      try { if (process.stdout.write === wrapped) process.stdout.write = origWrite; } catch (_) {}
+    }
+    function disarm() {
+      try { if (timer) { clearTimeout(timer); timer = null; } } catch (_) {}
+    }
+
+    function tally(list) {
+      var counts = {};
+      for (var i = 0; i < list.length; i++) {
+        var n = 'unknown';
+        try { n = (list[i] && list[i].constructor && list[i].constructor.name) || 'unknown'; } catch (_) {}
+        counts[n] = (counts[n] || 0) + 1;
+      }
+      var parts = [];
+      for (var k in counts) parts.push(k + ' x' + counts[k]);
+      return parts.length ? parts.join(', ') : '(none)';
+    }
+
+    function beacon() {
+      timer = null;
+      restore();
+      if (bytes >= threshold) return; // UI rendered — stay silent
+      var handles = [];
+      var requests = [];
+      try { if (typeof process._getActiveHandles === 'function') handles = process._getActiveHandles() || []; } catch (_) {}
+      try { if (typeof process._getActiveRequests === 'function') requests = process._getActiveRequests() || []; } catch (_) {}
+      var children = 0;
+      for (var i = 0; i < handles.length; i++) {
+        try { if (handles[i] && handles[i].constructor && handles[i].constructor.name === 'ChildProcess') children++; } catch (_) {}
+      }
+      var where = '';
+      try { where = (globalThis.__ccpDiag && globalThis.__ccpDiag.where) ? (globalThis.__ccpDiag.where() || '') : ''; } catch (_) {}
+      var altScreen;
+      try { altScreen = env.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN; } catch (_) {}
+      var lines = [
+        '',
+        '[ccpatch] boot watchdog: still no substantive UI output ' + Math.round(delayMs / 1000) + 's after boot',
+        '  stdout bytes since boot: ' + bytes + ' (render threshold: ' + threshold + ')',
+        '  active handles:  ' + tally(handles),
+        '  active requests: ' + tally(requests),
+        '  child processes: ' + children,
+        '  hints:',
+      ];
+      if (!(process.versions && process.versions.bun)) {
+        lines.push('    - running under Node: fullscreen TUI unavailable — CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN should be set (currently: ' +
+          (altScreen === undefined ? '<unset>' : JSON.stringify(altScreen)) + ')');
+      }
+      if (where) lines.push('    - check the ccpatch diagnostics log for swallowed errors: ' + where);
+      lines.push('    - relaunch with CCPATCH_PARANOID=1 to surface swallowed subscriber errors on stderr');
+      lines.push('    - set CCPATCH_NO_WATCHDOG=1 to silence this beacon');
+      var block = lines.join('\n') + '\n';
+      // Direct fd-2 write: the bundle's TUI replaces process.stderr.write and
+      // swallows it once rendering starts — and a hung boot may still have
+      // gotten that far. fs.writeSync(2, …) is not interceptable from JS.
+      var wrote = false;
+      try {
+        var fs = null;
+        try { if (typeof process.getBuiltinModule === 'function') fs = process.getBuiltinModule('fs'); } catch (_) {}
+        try { if (!fs && typeof __hm_nativeRequire === 'function') fs = __hm_nativeRequire('fs'); } catch (_) {}
+        try { if (!fs && typeof require === 'function') fs = require('fs'); } catch (_) {}
+        if (fs && typeof fs.writeSync === 'function') { fs.writeSync(2, block); wrote = true; }
+      } catch (_) {}
+      if (!wrote) { try { process.stderr.write(block); } catch (_) {} }
+      try { if (globalThis.__ccpDiag) globalThis.__ccpDiag('watchdog', 'beacon fired: stdout bytes=' + bytes + ' handles=' + tally(handles) + ' requests=' + tally(requests) + ' children=' + children); } catch (_) {}
+    }
+
+    process.stdout.write = wrapped;
+    timer = setTimeout(function () { try { beacon(); } catch (_) { try { restore(); } catch (_2) {} } }, delayMs);
+    // MUST never keep an otherwise-finished process alive.
+    if (timer && typeof timer.unref === 'function') timer.unref();
+  } catch (_) {}
+})();
