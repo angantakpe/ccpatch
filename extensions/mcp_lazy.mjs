@@ -1,12 +1,5 @@
-export default {
-  category: 'feature',
-
-  description: 'Lazy MCP tool list: serve cached tools/list immediately, refresh cache in background',
-  capabilities: ["network","tools"],
-  verify: { present: '__mcpLazyInstalled__', count: { present: 2 } },
-  dependsOn: ['fetch_interceptor'],
-  apply: (code) => {
-    const hook = `
+// Module-level so bootInject can reference it.
+const hook = `
 // ══════════════════════════════════════════════════════════════════════════
 // [PATCH] MCP Lazy Tool Cache
 //
@@ -147,14 +140,17 @@ export default {
 })().catch(() => {});
 
 `;
-        const _CJS_IIFE = '(function(exports, require, module, __filename, __dirname) {';
-    if (code.startsWith('#!/usr/bin/env node')) {
-      return code.replace('#!/usr/bin/env node', '#!/usr/bin/env node' + hook);
-    } else if (code.includes(_CJS_IIFE)) {
-      return code.replace(_CJS_IIFE, () => _CJS_IIFE + hook);
-    } else {
-      console.warn('  [!] anchor not found (no shebang, no CJS-IIFE) — skipping');
-      return code;
-    }
-  },
+
+export default {
+  category: 'feature',
+
+  description: 'Lazy MCP tool list: serve cached tools/list immediately, refresh cache in background',
+  capabilities: ["network","tools"],
+  verify: { present: '__mcpLazyInstalled__', count: { present: 2 } },
+  dependsOn: ['fetch_interceptor'],
+  // Boot hook spliced by the runner's boot registry (runner/boot-registry.mjs).
+  // order 50: MUST run after fetch_interceptor's bus (order 10) — the hook
+  // checks `typeof globalThis.__ccpOnFetchBefore === 'function'` ONCE and
+  // silently skips registration if the bus doesn't exist yet (no poll).
+  bootInject: { order: 50, code: hook },
 };

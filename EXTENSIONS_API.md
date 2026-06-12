@@ -62,6 +62,27 @@ Key points for extension authors:
 
 - **Phase ordering matters.** `pre` patches run before `main` before `post`. Infrastructure globals (`__ccpRegistry`, fetch interceptor, etc.) are registered in the `pre` phase. Consumer extensions in `main` or `post` can rely on them being present.
 
+## Boot hooks (`bootInject`)
+
+A patch that needs code to run **before the bundle body** must NOT hand-roll its own splice at the shebang / CJS-IIFE anchor. Declare it instead:
+
+```js
+// extensions/my_patch.mjs
+export default {
+  description: 'My patch',
+  verify: { present: '__ccpMyHook', count: { present: 1 } },
+  bootInject: {
+    order: 70,            // lower runs first; ties broken by patch name. Use gaps of 10.
+    code: hook,           // verbatim JS string, or (options) => string (receives e.g. options.version)
+    // sentinel: '__ccpMyHook',  // optional; defaults to the first verify.present literal
+  },
+};
+```
+
+The runner's boot registry (`runner/boot-registry.mjs`) collects every enabled patch's block, sorts by `order`, and performs **exactly one** insertion at the canonical boot anchor (after a real leading shebang, else immediately before the CJS-IIFE head). Patches whose sentinel is already present in the input are skipped, so re-applying is a byte-identical no-op per patch. A patch may be boot-only (no `apply()`) or combine `bootInject` with an `apply()` for non-boot transformations.
+
+Reserved order slots (standard profile): `10` fetch_interceptor (the `__ccpOnFetch*` bus must exist before any subscriber), `20` bun_shim, `30` tool_result_error_content, `40` boot_banner (order-independent by design), `50` mcp_lazy (registers against the bus without polling), `60` stdin_da1_leak. New boot hooks should use `70+`.
+
 ## Preload companion files
 
 Instead of embedding preload code as a string inside the patch manifest, you can place it in a sibling file named `<name>.preload.mjs`. The preload-builder will automatically detect and use it.

@@ -168,6 +168,16 @@ export interface KindTarget {
   function: FunctionSpec;
 }
 
+/** Declarative boot hook — spliced ONCE by the runner boot registry (runner/boot-registry.mjs) at the canonical boot anchor. */
+export interface BootInject {
+  /** Verbatim JS to run before the bundle body (or a builder receiving the build options). */
+  code: string | ((options: Record<string, unknown>) => string);
+  /** Lower runs first; ties broken by patch name. Use gaps of 10. Default 1000. */
+  order?: number;
+  /** Idempotency marker; defaults to the first verify.present literal. */
+  sentinel?: string;
+}
+
 // ── Main Patch interface ──
 
 /**
@@ -190,8 +200,10 @@ export interface Patch {
   code?: string;
   /** Required when kind = 'transpiler'. */
   transform?: (functionBody: string, opts: Record<string, unknown>) => string;
-  /** Free-form apply(). Required when kind = 'free' (or unset). */
+  /** Free-form apply(). Required when kind = 'free' (or unset), unless bootInject is declared. */
   apply?: (code: string, opts?: Record<string, unknown>) => string;
+  /** Declarative boot hook; the runner boot registry performs ONE combined splice for all enabled patches. */
+  bootInject?: BootInject;
 
   // ── Recommended ──
   category?: Category;
@@ -264,6 +276,7 @@ export interface NormalizedPatch {
   applyMode: ApplyMode;
   anchor: Anchor | null;
   apply: ((code: string, opts?: Record<string, unknown>) => string) | null;
+  bootInject: BootInject | null;
   preload: boolean;
   preloadCode: string | null;
   verify: VerifyBlock | null;

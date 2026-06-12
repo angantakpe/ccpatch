@@ -13,8 +13,6 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
-import { spliceBoot } from '../runner/patch-helpers.mjs';
-
 const __dir = dirname(fileURLToPath(import.meta.url));
 const BOOT_BANNER_V1 = readFileSync(join(__dir, '..', 'runner', 'shims', 'boot-banner-v1.js.txt'), 'utf8');
 
@@ -25,14 +23,18 @@ export default {
   description: 'Render ccpatch boot-log lines in a responsive rounded box before the Claude Code banner.',
   // stderr-only — no network/env/exec capability.
   verify: { present: '__ccpBootBanner', count: { present: 1 } },
-  // Co-locates at the boot point (before the CJS-IIFE) with other boot hooks on
-  // shebang-less Bun-extracted bundles. Benign stacking, not a clobber.
-  allowOverlapWith: ['tool_result_error_content'],
-  apply: (code, options = {}) => {
-    const version = options && typeof options.version === 'string' ? options.version : null;
-    const title = version ? `ccpatch v${version}` : 'ccpatch';
-    // Function-form replace so any $-sequences in `title` are injected literally.
-    const shim = BOOT_BANNER_V1.replace('__CCP_BOOT_TITLE__', () => title);
-    return spliceBoot(code, shim);
+  // Boot hook spliced by the runner's boot registry (runner/boot-registry.mjs).
+  // order 40 (after fetch/bun/trec) is documentation more than constraint: the
+  // banner's __ccpBootBuf contract is order-independent by design (see the shim
+  // header) — it only owns the debounced flush, so it could flush late from any
+  // slot. `code` is a function so the box title carries the build's version.
+  bootInject: {
+    order: 40,
+    code: (options = {}) => {
+      const version = options && typeof options.version === 'string' ? options.version : null;
+      const title = version ? `ccpatch v${version}` : 'ccpatch';
+      // Function-form replace so any $-sequences in `title` are injected literally.
+      return BOOT_BANNER_V1.replace('__CCP_BOOT_TITLE__', () => title);
+    },
   },
 };
