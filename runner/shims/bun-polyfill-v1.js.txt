@@ -315,6 +315,79 @@ if (typeof globalThis.Bun === 'undefined') {
       // No-op — returns empty buffer.
       function _generateHeapSnapshot(_format, _encoding) { return Buffer.alloc(0); }
 
+      // ── Bun.deepEquals ───────────────────────────────────────────────────
+      // Recursive structural equality: Bun.deepEquals(a, b, strict?).
+      // Non-strict (the bundle's only call shape) ignores undefined-valued
+      // keys, like Jest's toEqual; strict also requires matching prototypes
+      // and undefined-valued keys, like toStrictEqual. Cycle-safe; handles
+      // Date, RegExp, Map, Set, typed arrays / ArrayBuffer, arrays, objects.
+      function _deepEquals(a, b, strict, _seen) {
+        if (a === b) return true;
+        // NaN === NaN under deepEquals (SameValueZero semantics).
+        if (typeof a === 'number' && typeof b === 'number') return a !== a && b !== b;
+        if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
+        if (strict && Object.getPrototypeOf(a) !== Object.getPrototypeOf(b)) return false;
+        if (a instanceof Date || b instanceof Date) {
+          return a instanceof Date && b instanceof Date && a.getTime() === b.getTime();
+        }
+        if (a instanceof RegExp || b instanceof RegExp) {
+          return a instanceof RegExp && b instanceof RegExp && String(a) === String(b);
+        }
+        // Cycle guard: assume equal on a revisited (a, b) pair — the pair is
+        // already being compared higher up the stack.
+        _seen = _seen || new WeakMap();
+        var prev = _seen.get(a);
+        if (prev) { if (prev.has(b)) return true; } else { _seen.set(a, prev = new WeakSet()); }
+        prev.add(b);
+        var i;
+        if (Array.isArray(a) || Array.isArray(b)) {
+          if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+          for (i = 0; i < a.length; i++) {
+            if (!_deepEquals(a[i], b[i], strict, _seen)) return false;
+          }
+          return true;
+        }
+        if (ArrayBuffer.isView(a) || ArrayBuffer.isView(b) || a instanceof ArrayBuffer || b instanceof ArrayBuffer) {
+          var ba, bb;
+          try {
+            ba = a instanceof ArrayBuffer ? new Uint8Array(a)
+               : ArrayBuffer.isView(a) ? new Uint8Array(a.buffer, a.byteOffset, a.byteLength) : null;
+            bb = b instanceof ArrayBuffer ? new Uint8Array(b)
+               : ArrayBuffer.isView(b) ? new Uint8Array(b.buffer, b.byteOffset, b.byteLength) : null;
+          } catch (_) { return false; }
+          if (!ba || !bb || ba.length !== bb.length) return false;
+          for (i = 0; i < ba.length; i++) if (ba[i] !== bb[i]) return false;
+          return true;
+        }
+        if (a instanceof Map || b instanceof Map) {
+          if (!(a instanceof Map) || !(b instanceof Map) || a.size !== b.size) return false;
+          var mapOk = true;
+          a.forEach(function (v, k) {
+            if (!mapOk) return;
+            if (!b.has(k) || !_deepEquals(v, b.get(k), strict, _seen)) mapOk = false;
+          });
+          return mapOk;
+        }
+        if (a instanceof Set || b instanceof Set) {
+          if (!(a instanceof Set) || !(b instanceof Set) || a.size !== b.size) return false;
+          var setOk = true;
+          a.forEach(function (v) { if (setOk && !b.has(v)) setOk = false; });
+          return setOk;
+        }
+        var ka = Object.keys(a), kb = Object.keys(b);
+        if (!strict) {
+          ka = ka.filter(function (k) { return a[k] !== undefined; });
+          kb = kb.filter(function (k) { return b[k] !== undefined; });
+        }
+        if (ka.length !== kb.length) return false;
+        for (i = 0; i < ka.length; i++) {
+          var key = ka[i];
+          if (!Object.prototype.hasOwnProperty.call(b, key)) return false;
+          if (!_deepEquals(a[key], b[key], strict, _seen)) return false;
+        }
+        return true;
+      }
+
       // ── Compose the globalThis.Bun shim object ───────────────────────────
       globalThis.Bun = {
         // Version info — reported as a stub so version-checks don't error
@@ -337,6 +410,7 @@ if (typeof globalThis.Bun === 'undefined') {
         generateHeapSnapshot: _generateHeapSnapshot,
 
         // Data types
+        deepEquals:           _deepEquals,
         semver:               _semverShim,
         JSONL:                _JSONL,
         YAML:                 _YAML,

@@ -27,7 +27,7 @@ import { resolve, join } from 'node:path';
 
 import { loadPatches } from '../runner/loader.mjs';
 import { probeAnchor, fuzzyMatch } from '../runner/anchors.mjs';
-import { compileKind } from '../runner/patch-kinds.mjs';
+import { buildProbePatch } from '../runner/effective-apply.mjs';
 import { resolveProfile } from '../runner/manifest.mjs';
 import { readProfiles } from '../runner/config.mjs';
 import { style, icon as glyph, isVerbose } from '../runner/cli/style.mjs';
@@ -125,12 +125,10 @@ let driftCount = 0;
 for (const name of enabledNames) {
   const patch = patches[name];
   if (!patch) continue;
-  // Declarative kinds (prefix/postfix/transpiler) synthesize apply() via
-  // compileKind — mirror runner/runner.mjs:496 so probeAnchor sees a real fn.
-  const probePatch = (patch.kind && patch.kind !== 'free' && typeof patch.apply !== 'function')
-    ? { ...patch, apply: compileKind(patch) }
-    : patch;
-  const result = probeAnchor(probePatch, code);
+  // Declarative kinds (prefix/postfix/transpiler) and boot-only patches
+  // (bootInject with no apply()) get their effective apply() synthesized by
+  // the shared helper, exactly as the runner and `ccpatch doctor` see them.
+  const result = probeAnchor(buildProbePatch(patch, name), code);
   rows.push({ name, ...result });
   if (result.status === 'missing') missingCount++;
   else if (result.status === 'drift') driftCount++;

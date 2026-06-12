@@ -8,6 +8,9 @@ export default {
   verify: { present: "'tool_result_trim'", count: { present: 1 } },
   dependsOn: ['fetch_interceptor'],
   apply: (code) => {
+    // Idempotency (rule 2): sentinel == verify.present marker. Re-apply on an
+    // already-patched bundle is a byte-identical no-op.
+    if (code.includes("'tool_result_trim'")) return code;
     const hook = `
 // ══════════════════════════════════════════════════════════════════════════
 // [PATCH] Tool Result Trim

@@ -9,8 +9,7 @@ import { style } from './style.mjs';
 import { readPatchFlags, readProfiles } from '../config.mjs';
 import { resolveProfile } from '../manifest.mjs';
 import { probeAnchor } from '../anchors.mjs';
-import { compileBootApply } from '../boot-registry.mjs';
-import { compileKind } from '../patch-kinds.mjs';
+import { buildProbePatch } from '../effective-apply.mjs';
 import { buildDriftRecord } from '../drift-record.mjs';
 import { PROJECT_ROOT } from '../paths.mjs';
 import {
@@ -113,16 +112,11 @@ export async function runDoctorCore(options, patches, logger, out = {}) {
       anchorResults.push({ name, status: 'missing', candidates: [] });
       continue;
     }
-    // Declarative kinds (prefix/postfix/transpiler) synthesize apply() via
-    // compileKind — mirror the runner so probeAnchor sees a real fn. Boot-only
-    // patches (bootInject with no apply()) likewise get a standalone splice
-    // synthesized via compileBootApply so the anchor + verify probe is real.
-    const probePatch = (patch.kind && patch.kind !== 'free' && typeof patch.apply !== 'function')
-      ? { ...patch, apply: compileKind(patch) }
-      : (typeof patch.apply !== 'function' && patch.bootInject)
-        ? { ...patch, apply: compileBootApply(patch, name) }
-        : patch;
-    const res = probeAnchor(probePatch, code);
+    // Declarative kinds (prefix/postfix/transpiler) and boot-only patches
+    // (bootInject with no apply()) get their effective apply() synthesized by
+    // the shared helper so probeAnchor sees a real fn — one definition for
+    // this doctor, the build-time doctor, and the verification tests.
+    const res = probeAnchor(buildProbePatch(patch, name), code);
     if (patch.deprecated) {
       const sinceStr = patch.deprecated.since ? ` (since ${patch.deprecated.since})` : '';
       logger.log(`  DEPRECATED   ${name} — ${patch.deprecated.reason}${sinceStr}`);

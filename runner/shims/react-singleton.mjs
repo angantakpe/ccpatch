@@ -4,8 +4,14 @@ const REACT_MOD_RE_V1 = /var \w+=d\(\((\w+)\)=>\{var \w+=Symbol\.for\("react\.(?
 const REACT_MOD_RE_V2 = /(\w+)=p\(\((\w+),\w+\)=>\{[^}]*Symbol\.for\("react\.(?:transitional\.)?element"\)/;
 const REACT_MOD_RE_V3 = /var [\w$]+=\w+\(\(([\w$]+)\)=>\{var [\w$]+=Symbol\.for\("react\.(?:transitional\.)?element"\)/;
 
+// Idempotency sentinel (rule 2): every successful branch emits it exactly once,
+// so verify can `count: { present: 1 }` on a literal no OTHER patch writes
+// (`globalThis.__hm_react` itself also appears in esm_compat's header, which
+// made any count on it impossible to hold across composed profiles).
+const SENTINEL = '__ccpReactSingleton_v1';
+
 const REACT_UNIFY_SHIM = `
-// React singleton enforcement - runtime fallback
+// React singleton enforcement - runtime fallback (${SENTINEL})
 (function __hmReactUnify() {
   if (!globalThis.__hm_react) return;
   var _hmReactProps = ['createElement', 'createContext', 'useContext', 'useState',
@@ -32,10 +38,14 @@ const REACT_UNIFY_SHIM = `
 `;
 
 export function applyReactSingletonShim(code, logger = console) {
+  // Idempotent re-apply: an already-shimmed bundle (any branch) carries the
+  // sentinel — return it unchanged, byte-identical.
+  if (code.includes(SENTINEL)) return code;
+
   const reactModMatchV1 = code.match(REACT_MOD_RE_V1);
   if (reactModMatchV1) {
     const [fullMatch, exportsVar] = reactModMatchV1;
-    const patchedMatch = fullMatch.replace('=>{', `=>{Object.assign(${exportsVar},globalThis.__hm_react);`);
+    const patchedMatch = fullMatch.replace('=>{', `=>{/*${SENTINEL}*/Object.assign(${exportsVar},globalThis.__hm_react);`);
     ccpLog(`  [builtin] Bundled React module shimmed (pattern 1). (exports: ${exportsVar})`);
     return code.replace(fullMatch, patchedMatch);
   }
@@ -43,7 +53,7 @@ export function applyReactSingletonShim(code, logger = console) {
   const reactModMatchV2 = code.match(REACT_MOD_RE_V2);
   if (reactModMatchV2) {
     const [fullMatch, moduleVar, exportsVar] = reactModMatchV2;
-    const patchedMatch = fullMatch.replace('=>{', `=>{Object.assign(${exportsVar},globalThis.__hm_react);`);
+    const patchedMatch = fullMatch.replace('=>{', `=>{/*${SENTINEL}*/Object.assign(${exportsVar},globalThis.__hm_react);`);
     ccpLog(`  [builtin] Bundled React module shimmed (pattern 2). (module: ${moduleVar}, exports: ${exportsVar})`);
     return code.replace(fullMatch, patchedMatch);
   }
@@ -51,7 +61,7 @@ export function applyReactSingletonShim(code, logger = console) {
   const reactModMatchV3 = code.match(REACT_MOD_RE_V3);
   if (reactModMatchV3) {
     const [fullMatch, exportsVar] = reactModMatchV3;
-    const patchedMatch = fullMatch.replace('=>{', `=>{Object.assign(${exportsVar},globalThis.__hm_react);`);
+    const patchedMatch = fullMatch.replace('=>{', `=>{/*${SENTINEL}*/Object.assign(${exportsVar},globalThis.__hm_react);`);
     ccpLog(`  [builtin] Bundled React module shimmed (pattern 3). (exports: ${exportsVar})`);
     return code.replace(fullMatch, patchedMatch);
   }

@@ -19,11 +19,10 @@ import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readPatchFlags } from '../runner/config.mjs';
-import { compileKind } from '../runner/patch-kinds.mjs';
+import { resolveEffectiveApply } from '../runner/effective-apply.mjs';
 import {
   BOOT_REGISTRY_SENTINEL,
   collectBootInjects,
-  compileBootApply,
   spliceBootRegistry,
 } from '../runner/boot-registry.mjs';
 import { pickFixture } from './fixtures/registry.mjs';
@@ -117,21 +116,13 @@ function isEnabled(name) {
 }
 
 /**
- * Return the effective apply() for a patch. For `kind`-based (declarative)
- * patches the runner synthesizes apply() at runtime via compileKind(); for
- * boot-only patches (bootInject with no apply()) the boot registry performs
- * the splice — compileBootApply mirrors it as a standalone fn. Mirror both
- * here so Layer 1/2/3 test OUTCOME (the hook lands and verifies) regardless
- * of which mechanism injects it.
+ * Effective apply() for a patch — shared synthesis (declarative kinds via
+ * compileKind, boot-only patches via compileBootApply) from
+ * runner/effective-apply.mjs, so Layer 1/2/3 test OUTCOME (the hook lands
+ * and verifies) regardless of which mechanism injects it, with the SAME
+ * synthesis the doctors and runner use.
  */
-function resolveApply(patch, name) {
-  if (typeof patch.apply === 'function') return patch.apply;
-  if (patch.kind && patch.kind !== 'free') {
-    try { return compileKind(patch); } catch { return null; }
-  }
-  if (patch.bootInject) return compileBootApply(patch, name);
-  return null;
-}
+const resolveApply = resolveEffectiveApply;
 
 // ── Determine the best input fixture for each patch ─────────────────────────
 
@@ -273,6 +264,63 @@ test('Layer 1 — every patch.apply() mutates its input', async (t) => {
           return;
         }
         const msg = `patch "${name}" produced no changes — anchor likely broken for this bundle version`;
+        if (isEnabled(name)) {
+          assert.fail(msg);
+        } else {
+          t.diagnostic(`${msg} (disabled in ccpatch.yml — demoted to warning)`);
+        }
+      }
+    });
+  }
+});
+
+// ── Layer 1b: idempotency — apply(apply(x)) === apply(x) (repo rule 2) ──────
+// Profiles compose onto already-patched bundles (rule 9), so a re-apply that
+// injects a second copy silently corrupts composed output and breaks every
+// count-based verify. Applying twice must be byte-identical to applying once.
+
+test('Layer 1b — re-apply is a byte-identical no-op (rule 2)', async (t) => {
+  for (const name of patchNames) {
+    await t.test(name, () => {
+      const patch = patches[name];
+      const applyFn = resolveApply(patch, name);
+      if (!applyFn) {
+        t.skip('no apply() exported');
+        return;
+      }
+      if (isNullFixture(name)) {
+        t.skip(NULL_FIXTURE_SKIP(name));
+        return;
+      }
+      if (isAgentDirOnly(patch)) {
+        t.skip('agent-dir delivery patch — apply() is intentionally a no-op');
+        return;
+      }
+      if (shouldSkipWithoutBundle(name)) {
+        t.skip('requires a real Claude Code bundle (set CC_BUNDLE_FIXTURE or place one in storage/archives/)');
+        return;
+      }
+      const fixture = fixtureFor(name, patch);
+      let once;
+      try {
+        once = applyFn(fixture, {});
+      } catch (err) {
+        assert.fail(`patch.apply() threw: ${err.message}`);
+      }
+      if (typeof once !== 'string' || once === fixture) {
+        t.skip('apply() made no change on this fixture — idempotency check is vacuous here');
+        return;
+      }
+      let twice;
+      try {
+        twice = applyFn(once, {});
+      } catch (err) {
+        assert.fail(`re-apply threw: ${err.message}`);
+      }
+      if (twice !== once) {
+        const msg =
+          `patch "${name}" is not idempotent: re-apply changed the output by ` +
+          `${Math.abs(twice.length - once.length)} byte(s) — guard apply() with its sentinel (rule 2)`;
         if (isEnabled(name)) {
           assert.fail(msg);
         } else {

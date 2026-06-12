@@ -8,6 +8,9 @@ export default {
   verify: { present: '__ccpIsComplexPrompt', count: { present: 2 } },
   dependsOn: ['fetch_interceptor'],
   apply: (code) => {
+    // Idempotency (rule 2): sentinel == verify.present marker. Re-apply on an
+    // already-patched bundle is a byte-identical no-op.
+    if (code.includes('__ccpIsComplexPrompt')) return code;
     const hook = `
 // ══════════════════════════════════════════════════════════════════════════
 // [PATCH] Extended Thinking + Effort Level injection

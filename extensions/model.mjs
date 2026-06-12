@@ -9,6 +9,9 @@ export default {
     // injected, each containing a single '[PATCH] Model' banner == 1 occurrence.
     verify: { present: '[PATCH] Model', count: { present: 1 } },
     apply: (code, options = {}) => {
+      // Idempotency (rule 2): sentinel == verify.present marker. Re-apply on an
+      // already-patched bundle is a byte-identical no-op.
+      if (code.includes('[PATCH] Model')) return code;
       const model = options.model || null;
       const modelHook = model
         ? `

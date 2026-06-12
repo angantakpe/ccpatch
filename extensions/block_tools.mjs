@@ -14,6 +14,9 @@ export default {
     // references it once == 2 occurrences after a correct apply.
     verify: { present: '__isToolBlocked__', count: { present: 2 } },
     apply: (code) => {
+      // Idempotency (rule 2): sentinel == verify.present marker. Re-apply on an
+      // already-patched bundle is a byte-identical no-op.
+      if (code.includes('__isToolBlocked__')) return code;
       const hook = `
 // ══════════════════════════════════════════════════════════════════════════
 // [PATCH] Tool Blocker

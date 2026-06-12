@@ -16,6 +16,12 @@ function headerInsertOffset(code) {
 }
 
 export function applyEsmCompatibilityShim(code) {
+  // Idempotent re-apply (rule 2): both branches write `globalThis.__hm_ink`
+  // (the patch's verify marker) — an already-wrapped bundle returns unchanged.
+  // Without this, re-applying to wrapped output misses CJS_TAIL (already
+  // rewritten), falls into the native-ESM branch, and prepends a second shim.
+  if (code.includes('globalThis.__hm_ink')) return code;
+
   const cjsTailIdx = code.lastIndexOf(CJS_TAIL);
   const isCjsIife = code.includes(CJS_HEAD) && cjsTailIdx !== -1;
 
