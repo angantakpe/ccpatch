@@ -6,6 +6,17 @@ verified against the **last three published stable versions** in CI
 and against `@latest` nightly (see
 [`.github/workflows/drift-check.yml`](.github/workflows/drift-check.yml)).
 
+A version is only considered **supported** once `refmaps/<version>.json`
+is committed. Refmaps are the anchor tier that absorbs minified-identifier
+rotation, so generating one is a mandatory release step, not optional
+augmentation: the nightly drift sweep fails when `@latest` has no refmap,
+and the PR version matrix warns per missing version. Generate one with:
+
+```
+node bin/patch-cli.mjs refmap <path/to/cli.js> --cc-version <X.Y.Z> \
+  --out refmaps/<X.Y.Z>.json
+```
+
 ## Verifying your bundle
 
 Before reporting a patch issue, confirm you're patching an unmodified
