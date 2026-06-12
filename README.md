@@ -121,6 +121,17 @@ Run the patch verification test suite:
 make test-patches
 ```
 
+Run the interactive pty boot smoke (the suite's only tier that boots the real TUI):
+
+```
+make test-tty     # pty boot smoke against the newest bundle in releases/ (skips without python3 or a bundle)
+make canary       # build the current release if needed, then run the pty boot smoke against it
+```
+
+The headless tiers (verify strings, `--version` boot smoke, daemon round-trip) all exit before the interactive TUI initializes, so a bundle can pass every one of them and still deadlock the moment a user actually opens it — that is exactly how two real boot hangs once shipped through a green suite. `test-tty` closes that gap: a python3 helper (`tests/helpers/pty-boot-probe.py`) forks the patched bundle in a real pty, answers the terminal capability queries boot blocks on (DA1, XTVERSION, OSC 11, CPR, DECRQM), runs it in a pre-trusted hermetic `$HOME`, and asserts a UI frame renders. It runs as part of `npm run test:all` and skips cleanly when python3 or a patched bundle is missing.
+
+`make canary` is the only tier that can catch **server-side feature-gate flips**: upstream can turn a code path on per-account (e.g. `tengu_pewter_brook` enabled the fullscreen TUI with zero bundle change), so a bundle that booted yesterday can hang today without a single byte differing. Run `make canary` before adopting a new upstream version — and any time boot behavior changes with no local change to explain it.
+
 ### Profiles
 
 `--profile <name>` (or `-p`) bundles a curated patch set defined under `profiles:` in `ccpatch.yml`. When set, only the patches listed in that profile are applied — the per-patch `enabled:` flags in `ccpatch.yml` are ignored for that run. When omitted, behaviour falls back to the `ccpatch.yml` enabled flags.
