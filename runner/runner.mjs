@@ -4,6 +4,7 @@ import { resolveAt } from './at-selector.mjs';
 import { compileKind } from './patch-kinds.mjs';
 import { structuredPatch } from 'diff';
 import { diffSpansFromPatch, detectOverlapsInPhase } from './conflict.mjs';
+import { sha256 } from './reverse-diff.mjs';
 import { CoordinateFrame } from './coordinate-frame.mjs';
 import { fireHook } from './lifecycle.mjs';
 import { checkVerifyCore, toList } from './verify-core.mjs';
@@ -119,6 +120,62 @@ export function buildPatchReport(timings, drifts, verifyIssuesReport, results, h
 }
 
 /**
+ * Log one overlap conflict and (in strict mode) collect its failure line.
+ * Shared by the fresh detection path (detectAndRecordOverlaps) and the
+ * cache-replay path (replayCachedConflicts) so both produce IDENTICAL log
+ * output and strict-gate behavior for the same conflict record.
+ *
+ * @param {{phase,a,b,overlap:{kind,rangeA,rangeB},allowed:boolean}} record
+ */
+function logConflict(record, globalStrict, logger, failures) {
+  const { phase, a, b, allowed } = record;
+  const { kind, rangeA, rangeB } = record.overlap;
+  const msg = `overlap (${kind}) phase="${phase}" ${a} <-> ${b}` +
+              ` rangeA=[${rangeA[0]},${rangeA[1]}] rangeB=[${rangeB[0]},${rangeB[1]}]`;
+  if (allowed) {
+    // An allowlisted overlap is explicitly acknowledged (via allowOverlapWith)
+    // and harmless — it fires every build for the known pairs. Demote it from
+    // a warning to debug so the compact stream isn't crying wolf; --verbose
+    // (--log-level=debug) still surfaces it with full ranges.
+    (logger.debug || logger.warn)(`  [overlap] ${msg} (allowlisted)`);
+  } else if (globalStrict) {
+    // Strict: FATAL overlaps stay loud and unchanged.
+    logger.warn(`  [overlap] ${msg}`);
+    failures.push(
+      `overlap: ${a} and ${b} touch overlapping ranges (${kind}) in phase="${phase}". ` +
+      `Add allowOverlapWith: ['${b}'] to ${a} (or vice versa) to acknowledge.`
+    );
+  } else {
+    // DX#2: in non-strict mode an overlap is informational — it does not
+    // abort the build.
+    logger.warn(`  [overlap] ${a} <-> ${b} phase="${phase}" (informational — non-fatal; run --log-level=debug for ranges, or --strict to gate)`);
+    logger.debug?.(`  [overlap] ${msg} (informational — non-fatal)`);
+  }
+}
+
+/**
+ * Replay a CACHED conflict report instead of recomputing it. Only called after
+ * the caller has proven the rebuilt bundle is byte-identical to the build the
+ * cache entry was recorded from (output sha256 match), so the records are
+ * exactly what detectAndRecordOverlaps would re-derive. Reproduces the same
+ * logging, the same strict-mode failures, and the same JSONL artifact write.
+ *
+ * @param {Array<object>} cachedConflicts — records as written by detectAndRecordOverlaps
+ * @returns {{ allConflicts: Array<object>, failures: string[] }}
+ */
+export function replayCachedConflicts(cachedConflicts, globalStrict, logger, warnStorageOnce, storageRoot = PROJECT_ROOT) {
+  const allConflicts = [];
+  const failures = [];
+  for (const record of cachedConflicts) {
+    if (!record || !record.overlap) continue; // tolerate malformed cache rows
+    allConflicts.push(record);
+    logConflict(record, globalStrict, logger, failures);
+  }
+  writeConflictsArtifact(allConflicts, warnStorageOnce, storageRoot);
+  return { allConflicts, failures };
+}
+
+/**
  * Scan each phase for overlapping patch ranges, record them in allConflicts[],
  * log them, and write the conflicts JSONL artifact.
  *
@@ -178,27 +235,7 @@ export function detectAndRecordOverlaps(phaseTraces, frame, globalStrict, logger
         allowed: !!allowed,
       };
       allConflicts.push(record);
-      const msg = `overlap (${c.kind}) phase="${c.phase}" ${c.a} <-> ${c.b}` +
-                  ` rangeA=[${c.rangeA[0]},${c.rangeA[1]}] rangeB=[${c.rangeB[0]},${c.rangeB[1]}]`;
-      if (allowed) {
-        // An allowlisted overlap is explicitly acknowledged (via allowOverlapWith)
-        // and harmless — it fires every build for the known pairs. Demote it from
-        // a warning to debug so the compact stream isn't crying wolf; --verbose
-        // (--log-level=debug) still surfaces it with full ranges.
-        (logger.debug || logger.warn)(`  [overlap] ${msg} (allowlisted)`);
-      } else if (globalStrict) {
-        // Strict: FATAL overlaps stay loud and unchanged.
-        logger.warn(`  [overlap] ${msg}`);
-        failures.push(
-          `overlap: ${c.a} and ${c.b} touch overlapping ranges (${c.kind}) in phase="${c.phase}". ` +
-          `Add allowOverlapWith: ['${c.b}'] to ${c.a} (or vice versa) to acknowledge.`
-        );
-      } else {
-        // DX#2: in non-strict mode an overlap is informational — it does not
-        // abort the build.
-        logger.warn(`  [overlap] ${c.a} <-> ${c.b} phase="${c.phase}" (informational — non-fatal; run --log-level=debug for ranges, or --strict to gate)`);
-        logger.debug?.(`  [overlap] ${msg} (informational — non-fatal)`);
-      }
+      logConflict(record, globalStrict, logger, failures);
     }
   }
   if (harness) harness.conflict = (harness.conflict || 0) + (Date.now() - _conflictStart);
@@ -499,10 +536,43 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
   // Conflicts are reported to the logger and a JSONL sidecar regardless of
   // strict mode; in strict mode they become fatal unless allowlisted.
   // Delegated to detectAndRecordOverlaps() — independently testable.
-  const { failures: overlapFailures } = detectAndRecordOverlaps(
-    phaseTraces, frame, globalStrict, logger, warnStorageOnce, storageRoot, harness,
-  );
-  for (const f of overlapFailures) failures.push(f);
+  //
+  // BUILD CACHE: when the caller (cmd-build) resolved a cache entry for this
+  // exact (input, patch set, options) key AND the rebuilt bundle's sha256
+  // matches the entry's recorded outputSha256 — a full end-to-end determinism
+  // proof, not just a key match — the conflict report is REPLAYED from the
+  // entry instead of re-deriving the per-patch diff spans (the dominant
+  // harness cost on multi-patch phases). Any doubt (no entry, sha mismatch,
+  // malformed records) falls open into the normal recompute below.
+  const bc = patchOptions.buildCache && typeof patchOptions.buildCache === 'object'
+    ? patchOptions.buildCache
+    : null;
+  let overlapOutcome = null;
+  if (bc && bc.entry && Array.isArray(bc.entry.conflicts)) {
+    try {
+      const finalSha = sha256(state.nextCode);
+      bc.finalSha256 = finalSha;
+      if (finalSha === bc.entry.outputSha256) {
+        overlapOutcome = replayCachedConflicts(
+          bc.entry.conflicts, globalStrict, logger, warnStorageOnce, storageRoot,
+        );
+        bc.conflictsFromCache = true;
+      }
+    } catch (err) {
+      // Cache infrastructure must never fail the build — recompute below.
+      (logger.debug || logger.warn)?.(`  [cache] conflict replay failed (non-fatal, recomputing): ${err.message}`);
+      overlapOutcome = null;
+    }
+  }
+  if (!overlapOutcome) {
+    overlapOutcome = detectAndRecordOverlaps(
+      phaseTraces, frame, globalStrict, logger, warnStorageOnce, storageRoot, harness,
+    );
+  }
+  // Hand the (fresh or replayed) conflict records back to the caller so a
+  // fresh build can persist them into the cache entry.
+  if (bc) bc.conflicts = overlapOutcome.allConflicts;
+  for (const f of overlapOutcome.failures) failures.push(f);
 
   // Finding #1/#2: tally the loud outcomes so the build summary can surface
   // them. `noChange` patches silently injected nothing (anchors likely drifted);
