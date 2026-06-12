@@ -7,14 +7,24 @@ and against `@latest` nightly (see
 [`.github/workflows/drift-check.yml`](.github/workflows/drift-check.yml)).
 
 A version is only considered **supported** once `refmaps/<version>.json`
-is committed. Refmaps are the anchor tier that absorbs minified-identifier
-rotation, so generating one is a mandatory release step, not optional
-augmentation: the nightly drift sweep fails when `@latest` has no refmap,
-and the PR version matrix warns per missing version. Generate one with:
+AND `refmaps/bun-api-usage.v<version>.json` are committed. Refmaps are the
+anchor tier that absorbs minified-identifier rotation; the bun-api usage
+baseline is what the degraded-shim drift gate compares against (a build
+fails when upstream moves a code path onto a Bun shim that is known-broken
+under Node — see `scripts/scan-bun-api.mjs`). Generating both is a
+mandatory release step, not optional augmentation: the nightly drift sweep
+fails when `@latest` has no refmap, and the PR version matrix warns per
+missing version.
+
+The nightly `refmap-pr` job in `drift-check.yml` generates both artifacts
+for `@latest` automatically and opens a PR carrying the doctor + bun-api
+reports; human review of that PR is the supported-version gate. To generate
+by hand:
 
 ```
 node bin/patch-cli.mjs refmap <path/to/cli.js> --cc-version <X.Y.Z> \
   --out refmaps/<X.Y.Z>.json
+node scripts/scan-bun-api.mjs <path/to/cli.js> --version <X.Y.Z> --write-baseline
 ```
 
 ## Verifying your bundle

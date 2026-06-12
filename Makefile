@@ -32,19 +32,36 @@ lint\:unused: lint-unused ## Alias for lint-unused (npm-style spelling)
 # Override on the command line: make bridge-host CC_BRIDGE_ADDR=tcp://127.0.0.1:7878
 CC_BRIDGE_ADDR  ?= unix:/tmp/ccpatch.sock
 # The bridge token is root-equivalent: anyone presenting it can submit prompts
-# and dispatch tools in the running CLI. Generate a random ephemeral token per
-# invocation rather than shipping a guessable literal. Falls back to a clearly
-# marked stub only if openssl is unavailable (warned about in the dev targets).
-CC_BRIDGE_TOKEN ?= $(shell openssl rand -hex 16 2>/dev/null || echo "INSECURE-STUB-set-CC_BRIDGE_TOKEN")
+# and dispatch tools in the running CLI. It is therefore never echoed to stdout
+# and never given a guessable fallback: bridge-host generates a random token
+# into a 0600 file and the client targets (bridge-submit / bridge-tail) read it
+# back from that same file — which also means a second shell's `make
+# bridge-submit` authenticates against the running host (the old per-invocation
+# `?= $(shell openssl rand …)` default generated a DIFFERENT token in each make
+# run, so cross-shell submits could never match). Set CC_BRIDGE_TOKEN explicitly
+# to pin your own secret instead; missing openssl is a hard error, not a stub.
+CC_BRIDGE_TOKEN      ?=
+CC_BRIDGE_TOKEN_FILE ?= storage/outputs/bridge-host.token
 
 smoke-bridge: ## Tier 1 — NDJSON protocol smoke against a stubbed host (no patched CLI)
 	@node tests/smoke_bridge.mjs
 
 bridge-host: ## Tier 2 — boot a stub bridge host so you can prod it with ccpatch-bridge / nc
 	@echo "[bridge-host] CC_BRIDGE_ADDR=$(CC_BRIDGE_ADDR)"
-	@echo "[bridge-host] CC_BRIDGE_TOKEN=$(CC_BRIDGE_TOKEN)"
-	@case "$(CC_BRIDGE_TOKEN)" in INSECURE-STUB*) echo "[bridge-host] WARNING: openssl missing — using an INSECURE stub token. Set CC_BRIDGE_TOKEN to a real secret (e.g. openssl rand -hex 16)." ;; esac
-	@CC_BRIDGE_ADDR=$(CC_BRIDGE_ADDR) CC_BRIDGE_TOKEN=$(CC_BRIDGE_TOKEN) node tests/bridge_host.mjs
+	@mkdir -p $(dir $(CC_BRIDGE_TOKEN_FILE))
+	@if [ -n "$(CC_BRIDGE_TOKEN)" ]; then \
+		umask 177 && printf '%s\n' "$(CC_BRIDGE_TOKEN)" > $(CC_BRIDGE_TOKEN_FILE); \
+	else \
+		command -v openssl >/dev/null 2>&1 || { \
+			echo "[bridge-host] ERROR: openssl not found and CC_BRIDGE_TOKEN unset."; \
+			echo "[bridge-host] The bridge token is root-equivalent — refusing to start with a guessable one."; \
+			echo "[bridge-host] Install openssl, or pass CC_BRIDGE_TOKEN=<secret> explicitly."; \
+			exit 1; }; \
+		umask 177 && openssl rand -hex 16 > $(CC_BRIDGE_TOKEN_FILE); \
+	fi
+	@chmod 600 $(CC_BRIDGE_TOKEN_FILE)
+	@echo "[bridge-host] token written to $(CC_BRIDGE_TOKEN_FILE) (0600, not echoed) — bridge-submit/bridge-tail read it from there"
+	@CC_BRIDGE_ADDR=$(CC_BRIDGE_ADDR) CC_BRIDGE_TOKEN=$$(head -n1 $(CC_BRIDGE_TOKEN_FILE)) node tests/bridge_host.mjs
 
 bridge-host-stop: ## Tier 2 — kill any stray bridge-host and unlink the unix socket
 	@-pkill -f tests/bridge_host.mjs 2>/dev/null || true
@@ -52,14 +69,30 @@ bridge-host-stop: ## Tier 2 — kill any stray bridge-host and unlink the unix s
 		SOCK=$$(echo $(CC_BRIDGE_ADDR) | sed 's/^unix://'); \
 		rm -f "$$SOCK" && echo "removed $$SOCK"; \
 	fi
+	@rm -f $(CC_BRIDGE_TOKEN_FILE) && echo "removed $(CC_BRIDGE_TOKEN_FILE)"
+
+# Shared token resolution for the client targets: explicit CC_BRIDGE_TOKEN
+# wins; otherwise read the 0600 file bridge-host wrote. No token → hard error
+# (never fall back to anything guessable).
+define resolve_bridge_token
+	TOKEN="$(CC_BRIDGE_TOKEN)"; \
+	if [ -z "$$TOKEN" ] && [ -f $(CC_BRIDGE_TOKEN_FILE) ]; then TOKEN=$$(head -n1 $(CC_BRIDGE_TOKEN_FILE)); fi; \
+	if [ -z "$$TOKEN" ]; then \
+		echo "[bridge] ERROR: no CC_BRIDGE_TOKEN set and no $(CC_BRIDGE_TOKEN_FILE) found."; \
+		echo "[bridge] Start the host first (make bridge-host) or pass CC_BRIDGE_TOKEN=<secret>."; \
+		exit 2; \
+	fi
+endef
 
 bridge-submit: ## Tier 2 — send PROMPT to the running bridge-host: make bridge-submit PROMPT="hi"
 	@test -n "$(PROMPT)" || (echo "usage: make bridge-submit PROMPT=\"...\"" && exit 2)
-	@CC_BRIDGE_ADDR=$(CC_BRIDGE_ADDR) CC_BRIDGE_TOKEN=$(CC_BRIDGE_TOKEN) \
+	@$(resolve_bridge_token); \
+	CC_BRIDGE_ADDR=$(CC_BRIDGE_ADDR) CC_BRIDGE_TOKEN=$$TOKEN \
 		node tools/ccpatch-bridge.mjs submit "$(PROMPT)"
 
 bridge-tail: ## Tier 2 — tail bus events from the running bridge-host
-	@CC_BRIDGE_ADDR=$(CC_BRIDGE_ADDR) CC_BRIDGE_TOKEN=$(CC_BRIDGE_TOKEN) \
+	@$(resolve_bridge_token); \
+	CC_BRIDGE_ADDR=$(CC_BRIDGE_ADDR) CC_BRIDGE_TOKEN=$$TOKEN \
 		node tools/ccpatch-bridge.mjs tail '*'
 
 patch-daemon: ## Tier 3 prep — patch cli with the daemon profile (event_bus + bridge + emits)

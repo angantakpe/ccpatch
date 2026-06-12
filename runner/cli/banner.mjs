@@ -18,16 +18,18 @@ import { style, vwidth } from './style.mjs';
  * renderer, so the wording stays in one place.
  *
  * The capability gate is enforced at BUILD time (it decides which patches enter
- * the bundle); --dangerously-skip-permissions removes RUNTIME prompts, so the
- * patched tool-dispatch code then runs unprompted. The middle line below makes
- * that build-time-vs-runtime distinction explicit in a single ⚠ row, sized to
- * stay within the responsive box width.
+ * the bundle); it does not constrain anything at runtime. In particular,
+ * UPSTREAM Claude Code's own --dangerously-skip-permissions flag (not a ccpatch
+ * flag) removes runtime tool prompts, so patched tool-dispatch code then runs
+ * unprompted. The middle line below attributes the flag to upstream explicitly
+ * — in a security-sensitive tool, ambiguity about WHO enforces WHAT is itself
+ * a defect — sized to stay within the responsive box width.
  *
  * @type {string[]}
  */
 export const SAFETY_WARNINGS = [
   '⚠ Unofficial — may break when Claude Code updates.',
-  '⚠ Cap gate is build-time; --dangerously-skip-permissions runs patched code unprompted.',
+  '⚠ Cap gate is build-time; upstream\'s --dangerously-skip-permissions skips runtime prompts.',
   '⚠ Review THREAT_MODEL.md before enabling network/env patches.',
 ];
 
