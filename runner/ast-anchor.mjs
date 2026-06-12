@@ -11,10 +11,9 @@ import { getAst } from './ast-cache.mjs';
  * literal→offsets[] index keyed by the bundle's `code` string and reuse it
  * for the lifetime of that bundle.
  *
- * identity-slot cache: sequential applies share the same string reference so
- * this hits 100% of the time in the common case. Interleaved bundles thrash
- * the slot and recompute -- acceptable, same trade-off as conflict.mjs
- * lineStartsFor().
+ * identity cache: sequential applies share the same string reference so the
+ * front slot hits 100% of the time in the common case; up to MAX_BUNDLE_SLOTS
+ * interleaved bundles stay cached (see the concurrency contract below).
  *
  * No hashing at all: the previous implementation keyed a Map by a SHA1 digest
  * of the bundle (≈16 MB hashed per miss) and maintained a one-slot
@@ -28,41 +27,63 @@ import { getAst } from './ast-cache.mjs';
  */
 
 /**
- * CONCURRENCY CONTRACT: Single-slot identity cache keyed on string reference (===).
- * Correct only when all apply() calls are sequential and each call passes the
- * previous call's output string as its input (same reference chain). If called
- * concurrently with different bundle strings the slot thrashes -- correctness is
- * preserved (a miss recomputes) but performance degrades to O(n) per call.
- * Do NOT share this module between concurrent workers.
+ * CONCURRENCY CONTRACT: bounded move-to-front identity cache keyed on string
+ * reference (===). The sequential single-bundle case (each apply() passes the
+ * previous apply()'s output string onward) hits slot 0 on the first === — the
+ * exact cost profile of the old single slot. Up to MAX_BUNDLE_SLOTS distinct
+ * bundle strings can be live at once without thrashing, so interleaved callers
+ * (e.g. a future parallelized apply pipeline, or doctor probing pristine +
+ * patched bundles alternately) keep their indexes instead of degrading to
+ * O(bundle) per call. The (K+1)-th live bundle evicts the least-recently-used
+ * slot — correctness is preserved (a miss recomputes), and the eviction is
+ * reported once per process so the degradation is never silent (the old slot
+ * thrashed silently unless CCPATCH_ASSERT_SERIAL was set; that env var now
+ * upgrades the once-only warning to every-eviction).
+ *
+ * All functions here are synchronous, so single-threaded interleaving is safe;
+ * the module is still NOT shareable across worker_threads (each thread gets
+ * its own module state anyway).
  */
-// identity-slot cache: sequential applies share the same string
-// reference so this hits 100% of the time in the common case.
-// Interleaved bundles thrash the slot and recompute -- acceptable,
-// same trade-off as conflict.mjs lineStartsFor().
-let _lastBundleRef = null;
-let _lastBundleIndex = null;
+const MAX_BUNDLE_SLOTS = 4;
+/** @type {Array<{ ref: string, index: Map<string, number[]> }>} */
+let _bundleSlots = [];
+let _evictionWarned = false;
 
 /**
  * Reset the cached per-bundle index. Useful for test isolation.
  * Kept exported (signature locked) for tests and any future wiring.
  */
 export function resetBundleIndex() {
-  _lastBundleRef = null;
-  _lastBundleIndex = null;
+  _bundleSlots = [];
+  _evictionWarned = false;
 }
 
 /**
  * Fetch (or lazily create) the literal→offsets map for a given `code` string.
- * Uses a single identity-slot cache keyed by string reference (===).
+ * Move-to-front over at most MAX_BUNDLE_SLOTS identity-keyed slots.
  */
 function indexForCode(code) {
-  if (_lastBundleRef === code && _lastBundleIndex !== null) return _lastBundleIndex;
-  if (process.env.CCPATCH_ASSERT_SERIAL && _lastBundleRef !== null && _lastBundleRef !== code) {
-    process.stderr.write('[ccpatch] WARNING: ast-anchor cache thrash detected -- concurrent applies share a bundle index slot. Set CCPATCH_ASSERT_SERIAL= to silence.\n');
+  for (let i = 0; i < _bundleSlots.length; i++) {
+    if (_bundleSlots[i].ref === code) {
+      if (i > 0) {
+        const [slot] = _bundleSlots.splice(i, 1);
+        _bundleSlots.unshift(slot);
+      }
+      return _bundleSlots[0].index;
+    }
+  }
+  if (_bundleSlots.length >= MAX_BUNDLE_SLOTS) {
+    _bundleSlots.pop();
+    if (!_evictionWarned || process.env.CCPATCH_ASSERT_SERIAL) {
+      _evictionWarned = true;
+      process.stderr.write(
+        `[ccpatch] WARNING: ast-anchor bundle-index cache evicting — more than ${MAX_BUNDLE_SLOTS} ` +
+        'distinct bundles live at once; literal lookups on the evicted bundle degrade to full rescans.\n'
+      );
+    }
   }
   const index = new Map();
-  _lastBundleRef = code;
-  _lastBundleIndex = index;
+  _bundleSlots.unshift({ ref: code, index });
   return index;
 }
 
@@ -229,7 +250,9 @@ export function findFunctionByLiteral(code, literal) {
 }
 
 /**
- * False: this module uses a single-slot cache that is not safe for concurrent callers.
+ * False: the bounded identity cache makes single-threaded interleaving safe
+ * (up to MAX_BUNDLE_SLOTS live bundles without degradation), but the module
+ * still must not be shared across worker_threads.
  * @knipignore Documented concurrency-contract marker retained for callers/tests
  *   that assert this module's threading guarantee by name.
  */

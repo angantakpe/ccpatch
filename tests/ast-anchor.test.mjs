@@ -112,6 +112,25 @@ describe('resetBundleIndex', () => {
   });
 });
 
+describe('bounded multi-bundle identity cache', () => {
+  it('stays correct when more bundles than cache slots interleave', () => {
+    resetBundleIndex();
+    // 6 distinct bundles > MAX_BUNDLE_SLOTS (4): forces evictions while
+    // alternating, the scenario the old single slot thrashed on. Resolution
+    // must stay correct for every bundle on every pass (a miss recomputes).
+    const bundles = Array.from({ length: 6 }, (_, i) =>
+      `function Multi${i}(){return h("multi_lit_${i}")};`);
+    for (let pass = 0; pass < 3; pass++) {
+      for (let i = 0; i < bundles.length; i++) {
+        const res = findFunctionByLiteral(bundles[i], `multi_lit_${i}`);
+        assert.ok(res, `bundle ${i} pass ${pass} should resolve`);
+        assert.equal(res.name, `Multi${i}`);
+      }
+    }
+    resetBundleIndex();
+  });
+});
+
 describe('resetAstCache', () => {
   it('clears the AST cache and keeps findFunctionByLiteral correct afterward', () => {
     // findFunctionByLiteral parses via getAst (which is backed by the AST cache).
