@@ -178,7 +178,8 @@ patches, so standing up the bridge is always a deliberate, auditable act.
 **The capability gate protects BUILD time, not RUNTIME.** The gate decides
 *whether a patch is allowed into the bundle*; it does nothing once the bundle is
 running. In particular, running the patched bundle with
-`--dangerously-skip-permissions` means patched tool-dispatch code runs with **no
+`--dangerously-skip-permissions` (upstream Claude Code's own flag — ccpatch
+neither implements nor controls it) means patched tool-dispatch code runs with **no
 runtime allow/deny prompts at all** — the bundle you acknowledged at build time
 then executes its tool calls unprompted. Acknowledging a `tools`/`exec`/`network`
 capability is a build-time decision; it is not a substitute for the runtime
@@ -431,6 +432,8 @@ Canonical registry:
 | `CCPATCH_BEST_EFFORT=1` | required-patch failure → hard error | build | degraded-host builds |
 | `allowOverlapWith` (manifest field) | per-phase conflict detection for the named pair | per-patch | known-benign overlapping injections |
 | `ccpatch pin --force` | re-pin refusal for a known version | registry | intentional upstream re-release |
+| `--allow-bun-drift` | degraded-Bun-shim drift gate (new call sites on a known-broken shim) | build | one-off build while the shim review + `--write-baseline` commit is in flight |
+| `--no-coverage` | runtime coverage gate in `--strict` builds | build | cross-building a bundle the build host cannot execute |
 
 Audit policy:
 

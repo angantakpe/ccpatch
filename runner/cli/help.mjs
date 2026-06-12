@@ -47,6 +47,11 @@ export const HELP = Object.freeze({
     '  --model <id>             Override default model for patches that consult it\n' +
     '  --allow-capabilities <l> Comma-list, "all", or "none". Acks high-risk caps.\n' +
     '  --allow-unacked          Warn-instead-of-fail for unacked network/exec/env caps\n' +
+    '  --allow-bun-drift        One-off bypass of the degraded-Bun-shim drift gate\n' +
+    '                           (durable fix: review shim, scan-bun-api --write-baseline, commit)\n' +
+    '  --coverage               Run the post-build runtime coverage gate even without --strict\n' +
+    '  --no-coverage            Skip the runtime coverage gate in --strict builds\n' +
+    '                           (e.g. cross-building a bundle this host cannot execute)\n' +
     '  --json                   Emit a single JSON build report to stdout\n' +
     '  --log-level <lvl>        silent | error | warn | info | debug (default: info)\n' +
     '  --quiet                  Alias for --log-level=error\n' +
@@ -198,7 +203,7 @@ export const HELP = Object.freeze({
  */
 export const USAGE =
   'Usage:\n' +
-  '  node patch-cli.mjs <input.js> <output.js> [--patch <name>] [--no-required] [--profile <name>] [--preload <preload.mjs>] [--strict] [--paranoid] [--allow-unverified] [--dry-run] [--write-on-clean] [--allow-capabilities <list>] [--allow-unacked] [--dev]\n' +
+  '  node patch-cli.mjs <input.js> <output.js> [--patch <name>] [--no-required] [--profile <name>] [--preload <preload.mjs>] [--strict] [--paranoid] [--allow-unverified] [--dry-run] [--write-on-clean] [--allow-capabilities <list>] [--allow-unacked] [--allow-bun-drift] [--dev]\n' +
   '  node patch-cli.mjs watch <input.js> <output.js> [--patch <name>] [--profile <name>] [--debounce <ms>]\n' +
   '  node patch-cli.mjs doctor <input.js> [--profile <name>] [--strict] [--suggest]\n' +
   '  node patch-cli.mjs heal [--write] [--drift <path>] [--anchors <path>]\n' +

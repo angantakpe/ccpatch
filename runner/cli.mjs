@@ -127,6 +127,21 @@ export function parseBuildArgs(args) {
     if (args[i] === '--allow-unacked') {
       patchOptions.allowUnacked = true;
     }
+    // --allow-bun-drift: audited one-off bypass of the degraded-shim drift
+    // gate (bunApiScanGate class d). The durable path is reviewing the shim
+    // and committing an updated refmaps/bun-api-usage.v<ver>.json baseline.
+    if (args[i] === '--allow-bun-drift') {
+      patchOptions.allowBunDrift = true;
+    }
+    // Runtime coverage gate: --coverage forces the post-build headless boot +
+    // marker check in non-strict builds; --no-coverage opts a --strict build
+    // out of it (e.g. cross-building a bundle this host cannot execute).
+    if (args[i] === '--coverage') {
+      patchOptions.coverage = true;
+    }
+    if (args[i] === '--no-coverage') {
+      patchOptions.noCoverage = true;
+    }
     // --no-required: do NOT auto-include `required: true` infra patches when an
     // explicit --patch list is given. This is the patch-bisection escape hatch
     // (see docs/BISECTING.md): without it the minimum buildable set is the

@@ -26,12 +26,14 @@ import {
   loadCoverage,
   classifyUsage,
   findPreviousBaseline,
+  pickBaseline,
   loadBaseline,
   writeBaseline,
   baselinePathFor,
   renderReport,
   runBunApiScan,
 } from '../scripts/scan-bun-api.mjs';
+import { bunApiScanGate } from '../runner/cli/build-gates.mjs';
 
 const COVERAGE_PATH = path.join(PROJECT_ROOT, 'refmaps', 'bun-api-coverage.json');
 const PAYLOAD_PATH = path.join(PROJECT_ROOT, 'runner', 'shims', 'bun-polyfill-v1.js.txt');
@@ -210,6 +212,28 @@ describe('classifyUsage (drift classes a/b/c)', () => {
     const r = classifyUsage({ usage, shimKeys, coverage: FIXTURE_COVERAGE, baseline: null });
     assert.equal(r.newApis, null);
   });
+
+  it('(d) degraded shims that GAINED sites vs baseline are isolated as drift', () => {
+    // Fixture usage: spawn=2, Terminal=2, hash=1 (all degraded/throws).
+    // Baseline: spawn was 1 (gained), Terminal absent (gained from 0),
+    // hash was 6 (shrank — NOT drift).
+    const baseline = { version: '2.1.160', apis: { spawn: 1, hash: 6, deepEquals: 1, which: 1 } };
+    const r = classifyUsage({ usage, shimKeys, coverage: FIXTURE_COVERAGE, baseline });
+    assert.deepEqual(
+      r.degradedDrift.map(e => [e.name, e.baselineCount, e.count]),
+      [['Terminal', 0, 2], ['spawn', 1, 2]]
+    );
+    const term = r.degradedDrift.find(e => e.name === 'Terminal');
+    assert.equal(term.status, 'throws');
+  });
+
+  it('(d) equal or shrinking degraded usage is NOT drift; null without baseline', () => {
+    const baseline = { version: '2.1.160', apis: { spawn: 2, Terminal: 2, hash: 6, deepEquals: 1, which: 1 } };
+    const r = classifyUsage({ usage, shimKeys, coverage: FIXTURE_COVERAGE, baseline });
+    assert.deepEqual(r.degradedDrift, []);
+    const r2 = classifyUsage({ usage, shimKeys, coverage: FIXTURE_COVERAGE, baseline: null });
+    assert.equal(r2.degradedDrift, null);
+  });
 });
 
 // ── Baseline selection / round-trip ──────────────────────────────────────────
@@ -240,6 +264,20 @@ describe('baseline selection and round-trip', () => {
 
   it('returns null for a missing refmaps dir instead of throwing', () => {
     assert.equal(findPreviousBaseline('2.1.175', path.join(os.tmpdir(), 'ccp-no-such-dir')), null);
+  });
+
+  it('pickBaseline prefers the exact-version baseline, falls back to previous', () => {
+    const { refmaps } = mkFixtureRepo({
+      baselines: {
+        '2.1.160': { spawn: 2 },
+        '2.1.175': { spawn: 3 },
+      },
+    });
+    // Exact hit: a rebuild of a recorded version drifts against ITSELF.
+    assert.equal(pickBaseline('2.1.175', refmaps).version, '2.1.175');
+    // Miss: a new version drifts against its predecessor.
+    assert.equal(pickBaseline('2.1.180', refmaps).version, '2.1.175');
+    assert.equal(pickBaseline('2.1.100', refmaps), null);
   });
 });
 
@@ -294,6 +332,90 @@ describe('runBunApiScan (end-to-end on fixtures)', () => {
     const text = renderReport({ usage, result, baseline: null, bundleLabel: 'x', version: null }).join('\n');
     assert.match(text, /unshimmed: none/);
     assert.match(text, /no earlier baseline/);
+  });
+});
+
+// ── Degraded-shim drift: report rendering + build gate ──────────────────────
+
+describe('degraded-shim drift (class d): report + bunApiScanGate', () => {
+  // vs this baseline the fixture bundle GAINS a spawn site (1 → 2) and a
+  // Terminal site (0 → 2): both degraded/throws → drift. deepEquals/which stay
+  // unshimmed (class a), which must not double-report as drift.
+  const DRIFT_BASELINE = { '2.1.160': { spawn: 1, hash: 6, deepEquals: 1, which: 1 } };
+
+  function mkLogger() {
+    const out = { logs: [], warns: [], errors: [] };
+    return {
+      sink: out,
+      log: (m) => out.logs.push(String(m)),
+      warn: (m) => out.warns.push(String(m)),
+      error: (m) => out.errors.push(String(m)),
+    };
+  }
+
+  it('runBunApiScan renders the drift block with before → after counts', () => {
+    const { refmaps, payloadPath, coveragePath } = mkFixtureRepo({ baselines: DRIFT_BASELINE });
+    const scan = runBunApiScan({
+      code: FIXTURE_BUNDLE,
+      version: '2.1.175',
+      refmapsDir: refmaps,
+      shimPayloadPath: payloadPath,
+      coveragePath,
+    });
+    assert.deepEqual(scan.degradedDrift.map(e => e.name), ['Terminal', 'spawn']);
+    const text = scan.lines.join('\n');
+    assert.match(text, /DEGRADED-SHIM DRIFT vs v2\.1\.160 baseline \(2\)/);
+    assert.match(text, /Bun\.spawn {2}1 → 2 site\(s\)/);
+    assert.match(text, /Bun\.Terminal {2}0 → 2 site\(s\) — \[throws\]/);
+  });
+
+  it('bunApiScanGate FAILS the build on drift in default (non-strict) mode', async () => {
+    const { refmaps, payloadPath, coveragePath } = mkFixtureRepo({ baselines: DRIFT_BASELINE });
+    const logger = mkLogger();
+    const r = await bunApiScanGate({
+      code: FIXTURE_BUNDLE,
+      inputPath: 'fixture.cjs',
+      patchOptions: { version: '2.1.175' },
+      logger,
+      scanOverrides: { refmapsDir: refmaps, shimPayloadPath: payloadPath, coveragePath },
+    });
+    assert.equal(r.ok, false);
+    const err = logger.sink.errors.join('\n');
+    assert.match(err, /degraded-shim drift vs the v2\.1\.160 baseline/);
+    assert.match(err, /--write-baseline/, 'error must name the durable fix');
+    assert.match(err, /--allow-bun-drift/, 'error must name the one-off bypass');
+  });
+
+  it('bunApiScanGate proceeds with a warning under --allow-bun-drift', async () => {
+    const { refmaps, payloadPath, coveragePath } = mkFixtureRepo({ baselines: DRIFT_BASELINE });
+    const logger = mkLogger();
+    const r = await bunApiScanGate({
+      code: FIXTURE_BUNDLE,
+      inputPath: 'fixture.cjs',
+      patchOptions: { version: '2.1.175', allowBunDrift: true },
+      logger,
+      scanOverrides: { refmapsDir: refmaps, shimPayloadPath: payloadPath, coveragePath },
+    });
+    assert.equal(r.ok, true);
+    assert.match(logger.sink.warns.join('\n'), /--allow-bun-drift set/);
+  });
+
+  it('bunApiScanGate passes clean when usage matches the committed baseline', async () => {
+    const usage = scanBundle(FIXTURE_BUNDLE);
+    const { refmaps, payloadPath, coveragePath } = mkFixtureRepo({
+      baselines: { '2.1.175': usage.apis },
+    });
+    const logger = mkLogger();
+    const r = await bunApiScanGate({
+      code: FIXTURE_BUNDLE,
+      inputPath: 'fixture.cjs',
+      patchOptions: { version: '2.1.175' },
+      logger,
+      scanOverrides: { refmapsDir: refmaps, shimPayloadPath: payloadPath, coveragePath },
+    });
+    assert.equal(r.ok, true);
+    assert.equal(logger.sink.errors.length, 0);
+    assert.match(logger.sink.logs.join('\n'), /drift vs v2\.1\.175 baseline: none/);
   });
 });
 

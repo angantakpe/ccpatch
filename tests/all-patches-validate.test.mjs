@@ -103,3 +103,76 @@ for (const { dir, file, name } of patchFiles) {
     );
   });
 }
+
+// ── Runtime instrumentation pressure gate ───────────────────────────────────
+// Apply-time verify proves a patch's bytes LANDED; only a coverageMarker
+// proves it EXECUTES (the `ccpatch coverage` / --strict runtime gate). For
+// patches that touch network/exec/env that distinction is the whole security
+// story: "silently dead" and "silently active" are both bad. So: every NEW
+// patch declaring one of those capabilities must declare a coverageMarker.
+//
+// The list below is the KNOWN DEBT at the time this gate landed — it may only
+// SHRINK (same pattern as lint-anchors' ALLOWED_REGEX_ANCHORS). Instrumenting
+// one of these patches means deleting its entry here. Adding a name to this
+// list is a review smell and needs a written justification in the PR.
+const UNINSTRUMENTED_HOT_CAP_DEBT = new Set([
+  'auth_token',
+  'block_tools',
+  'bun_shim',
+  'cache_responses',
+  'capture_interactive_request',
+  'context_budget_warn',
+  'cost_tracker',
+  'debug',
+  'dotenv_loader',
+  'expose_api_client',
+  'extended_thinking',
+  'fetch_interceptor',
+  'force_thinking',
+  'headless_bridge',
+  'hook_noise_mute',
+  'mcp_lazy',
+  'model',
+  'policy_gate',
+  'project_root',
+  'rate_limit',
+  'save_conversations',
+  'tool_result_error_content',
+  'tool_result_trim',
+  'tools_log',
+  'webhook',
+]);
+const HOT_CAPS = new Set(['network', 'exec', 'env']);
+
+test('network/exec/env patches declare a coverageMarker (debt list may only shrink)', async () => {
+  const missing = [];
+  const stale = new Set(UNINSTRUMENTED_HOT_CAP_DEBT);
+  for (const { file, name } of patchFiles) {
+    const imported = await import(pathToFileURL(file).href);
+    const mod = imported.default || imported;
+    if (!mod || typeof mod !== 'object') continue;
+    const stem = name.replace(/\.mjs$/, '');
+    const caps = Array.isArray(mod.capabilities) ? mod.capabilities : [];
+    if (!caps.some(c => HOT_CAPS.has(c))) continue;
+    if (mod.coverageMarker) {
+      stale.delete(stem); // instrumented — entry (if any) is now removable
+      continue;
+    }
+    stale.delete(stem);
+    if (!UNINSTRUMENTED_HOT_CAP_DEBT.has(stem)) missing.push(stem);
+  }
+  assert.deepEqual(
+    missing,
+    [],
+    `new network/exec/env patch(es) without a coverageMarker: ${missing.join(', ')}. ` +
+    'Declare coverageMarker so the runtime coverage gate can prove the patch executes ' +
+    '(do NOT extend UNINSTRUMENTED_HOT_CAP_DEBT without written justification).',
+  );
+  // Shrinking-only: entries whose patch is gone or now instrumented must be
+  // deleted, otherwise the list silently rots into an unbounded allowlist.
+  assert.deepEqual(
+    [...stale].sort(),
+    [],
+    `stale UNINSTRUMENTED_HOT_CAP_DEBT entries (patch removed or instrumented — delete them): ${[...stale].join(', ')}`,
+  );
+});

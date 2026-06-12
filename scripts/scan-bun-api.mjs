@@ -13,6 +13,11 @@
  *   (a) used but UNSHIMMED            → error-level (fails --strict builds)
  *   (b) used and shimmed-but-degraded → warning with the shim's caveat
  *   (c) NEW vs the previous version's committed baseline → highlighted drift
+ *   (d) degraded-shim DRIFT — a degraded/throwing shim gained call sites vs
+ *       the committed baseline → error-level; FAILS the build by default
+ *       (bypass: --allow-bun-drift, or review + --write-baseline + commit).
+ *       Baseline pick: exact-version baseline when committed (rebuilds must
+ *       show zero drift), else newest strictly-older version.
  *
  * ── Why a regex pass, not an AST pass ────────────────────────────────────────
  * Measured against the real v2.1.175 bundle (16.9 MB): the single-regex scan
@@ -198,6 +203,22 @@ function compareVersions(a, b) {
 }
 
 /**
+ * Pick the committed baseline to drift against. Exact-version baseline first:
+ * when refmaps/bun-api-usage.v<version>.json exists, drift against it (a
+ * rebuild of a recorded version must show ZERO drift — non-empty means the
+ * bundle changed without a baseline update). Otherwise fall back to the
+ * newest strictly-older baseline (a new version drifts against its
+ * predecessor until its own baseline is reviewed and committed).
+ */
+export function pickBaseline(version, refmapsDir = REFMAPS_DIR) {
+  if (version) {
+    const exact = loadBaseline(version, refmapsDir);
+    if (exact) return exact;
+  }
+  return findPreviousBaseline(version, refmapsDir);
+}
+
+/**
  * Find the committed usage baseline to drift against: the newest
  * bun-api-usage.v*.json strictly OLDER than `version` (or the newest overall
  * when `version` is null). Returns { version, apis } or null when none exists.
@@ -265,6 +286,7 @@ export function writeBaseline({ version, usage, refmapsDir = REFMAPS_DIR }) {
  *   degraded:  Array<{name:string,count:number,status:string,caveat:string}>,
  *   ok:        Array<{name:string,count:number}>,
  *   newApis:   string[]|null,
+ *   degradedDrift: Array<{name:string,count:number,baselineCount:number,status:string,caveat:string}>|null,
  * }}
  */
 export function classifyUsage({ usage, shimKeys, coverage, baseline = null }) {
@@ -297,7 +319,17 @@ export function classifyUsage({ usage, shimKeys, coverage, baseline = null }) {
   const newApis = baseline
     ? Object.keys(usage.apis).filter(name => !(name in baseline.apis)).sort()
     : null;
-  return { unshimmed, degraded, ok, newApis };
+  // Drift gate input: a degraded/throwing shim with MORE call sites than the
+  // baseline recorded (including previously-unused, baselineCount 0). That is
+  // the "upstream moved a code path onto a shim we know is broken" scenario —
+  // the one class of drift that must fail the build, not warn (the
+  // fullscreen-TUI deadlock shipped through a warning).
+  const degradedDrift = baseline
+    ? degraded
+        .map(e => ({ ...e, baselineCount: baseline.apis[e.name] || 0 }))
+        .filter(e => e.count > e.baselineCount)
+    : null;
+  return { unshimmed, degraded, ok, newApis, degradedDrift };
 }
 
 // ── Report rendering ─────────────────────────────────────────────────────────
@@ -335,6 +367,19 @@ export function renderReport({ usage, result, baseline, bundleLabel, version }) 
       const tag = e.status === 'throws' ? '[throws] ' : '';
       lines.push(
         `  [bun-api]     Bun.${e.name.padEnd(w)} (${sites(e.count)}) — ${tag}${e.caveat}`
+      );
+    }
+  }
+
+  if (baseline && result.degradedDrift && result.degradedDrift.length > 0) {
+    lines.push(
+      `  [bun-api] ❌ DEGRADED-SHIM DRIFT vs v${baseline.version} baseline ` +
+      `(${result.degradedDrift.length}) — new call site(s) on a shim that is known-broken under Node:`
+    );
+    for (const e of result.degradedDrift) {
+      const tag = e.status === 'throws' ? '[throws] ' : '';
+      lines.push(
+        `  [bun-api]     Bun.${e.name}  ${e.baselineCount} → ${e.count} site(s) — ${tag}${e.caveat}`
       );
     }
   }
@@ -388,7 +433,7 @@ export function runBunApiScan({
   const coverage = loadCoverage(coveragePath);
   const baseline = baselineVersion
     ? loadBaseline(baselineVersion, refmapsDir)
-    : findPreviousBaseline(version, refmapsDir);
+    : pickBaseline(version, refmapsDir);
   if (baselineVersion && !baseline) {
     throw new Error(
       `no committed baseline for --baseline ${baselineVersion} ` +
@@ -428,8 +473,9 @@ Scans <bundle> for Bun.<identifier> usage and reports:
   (a) APIs used but missing from runner/shims/bun-polyfill-v1.js.txt  [error]
   (b) APIs used whose shim is degraded/throwing (with caveat)         [warn]
   (c) APIs new vs the previous version's committed baseline           [drift]
+  (d) degraded shims that GAINED call sites vs the baseline           [error]
 
---strict exits 1 on class (a). --write-baseline records
+--strict exits 1 on classes (a) and (d). --write-baseline records
 refmaps/bun-api-usage.v<version>.json for future drift comparison.`;
 
 async function main() {
@@ -465,6 +511,7 @@ async function main() {
       ok: scan.ok,
       baseline: scan.baseline ? scan.baseline.version : null,
       newApis: scan.newApis,
+      degradedDrift: scan.degradedDrift,
     }, null, 2) + '\n');
   } else {
     for (const line of scan.lines) console.log(line);
@@ -483,6 +530,15 @@ async function main() {
     console.error(
       `error: --strict: ${scan.unshimmed.length} Bun API(s) used by the bundle are missing ` +
       `from the polyfill: ${scan.unshimmed.map(e => `Bun.${e.name}`).join(', ')}`
+    );
+    return 1;
+  }
+  if (opts.strict && scan.degradedDrift && scan.degradedDrift.length > 0) {
+    console.error(
+      `error: --strict: ${scan.degradedDrift.length} degraded shim(s) gained call sites vs the ` +
+      `v${scan.baseline.version} baseline: ` +
+      scan.degradedDrift.map(e => `Bun.${e.name} (${e.baselineCount} → ${e.count})`).join(', ') +
+      `. Verify the shim semantics, then re-record with --write-baseline.`
     );
     return 1;
   }

@@ -153,18 +153,29 @@ export function capabilityGate({ patches, patchesToApply, patchOptions, isSingle
  *   (a) used but UNSHIMMED  → error-level; fails the build under --strict
  *   (b) used but degraded   → warning listing the shim's caveat
  *   (c) new vs the previous version's committed refmaps/ baseline → drift
+ *   (d) degraded-shim DRIFT — a degraded/throwing shim GAINED call sites vs
+ *       the committed baseline → fails the build in EVERY mode (not just
+ *       --strict): upstream moved a code path onto a shim we know is broken
+ *       under Node, which is exactly how the fullscreen-TUI deadlock shipped.
+ *       Operator path: verify the shim handles the new site, re-record the
+ *       baseline (scripts/scan-bun-api.mjs --write-baseline) and commit it;
+ *       --allow-bun-drift is the audited one-off bypass.
  * Runs BEFORE apply so a strict failure is fail-fast (no bundle written). A
  * scanner crash must never take down a non-strict build (fail open at
  * runtime, loud at build time) — hence the try/catch with a warn.
  */
-export async function bunApiScanGate({ code, inputPath, patchOptions, logger }) {
+export async function bunApiScanGate({ code, inputPath, patchOptions, logger, scanOverrides = {} }) {
   let scan = null;
   try {
     const { runBunApiScan } = await import('../../scripts/scan-bun-api.mjs');
+    // scanOverrides (refmapsDir/shimPayloadPath/coveragePath) exists for the
+    // test suite, which gates against tmp-dir fixtures instead of the repo's
+    // committed artifacts. Production callers pass nothing.
     scan = runBunApiScan({
       code,
       bundleLabel: path.basename(inputPath),
       version: patchOptions.version || null,
+      ...scanOverrides,
     });
     logger.log('');
     for (const line of scan.lines) logger.log(line);
@@ -179,6 +190,27 @@ export async function bunApiScanGate({ code, inputPath, patchOptions, logger }) 
       `refmaps/bun-api-coverage.json), or drop --strict to build anyway.`
     );
     return { ok: false };
+  }
+  if (scan && scan.degradedDrift && scan.degradedDrift.length > 0) {
+    if (patchOptions.allowBunDrift) {
+      logger.warn(
+        `  [bun-api] WARN: --allow-bun-drift set — proceeding despite ` +
+        `${scan.degradedDrift.length} degraded shim(s) with new call sites ` +
+        `(${scan.degradedDrift.map(e => `Bun.${e.name}`).join(', ')})`
+      );
+    } else {
+      const list = scan.degradedDrift
+        .map(e => `  Bun.${e.name.padEnd(24)} ${e.baselineCount} → ${e.count} site(s)  [${e.status}] ${e.caveat}`)
+        .join('\n');
+      logger.error(
+        `Error: degraded-shim drift vs the v${scan.baseline.version} baseline — upstream moved ` +
+        `code onto ${scan.degradedDrift.length} shim(s) known to be degraded/throwing under Node:\n${list}\n` +
+        `Verify each shim handles the new call site, then re-record and commit the baseline:\n` +
+        `  node scripts/scan-bun-api.mjs ${inputPath} --version ${patchOptions.version || '<x.y.z>'} --write-baseline\n` +
+        `Or pass --allow-bun-drift for an audited one-off build.`
+      );
+      return { ok: false };
+    }
   }
   return { ok: true };
 }

@@ -152,9 +152,19 @@ export async function runBuild(ctx) {
     patchOptions.bestEffort = true;
   }
 
+  // Coarse wall-clock phase timers (ms). Filled in as each major phase runs so
+  // the end-of-run report can attribute wall time beyond the per-patch
+  // transform sums (the "unattributed" remainder in the summary box shrinks to
+  // genuine residue — process exit, GC — instead of silently absorbing gates,
+  // cache hashing, and artifact emission). Defensive: applyNamedPatches may
+  // later expose its own finer-grained timings under report.phases — we merge
+  // ours, never assume its.
+  const phaseMs = {};
+
   // ── Pre-build gates (see runner/cli/build-gates.mjs) ─────────────────────
   // strict-version → capability ack → Bun API scan, all fail-fast before any
   // apply work. Each gate emits its own user-facing messages.
+  const gatesStartedAt = Date.now();
   if (!strictVersionGate(patchOptions, logger).ok) return 1;
 
   const capGate = capabilityGate({ patches, patchesToApply, patchOptions, isSinglePatchDryRun, logger });
@@ -162,6 +172,7 @@ export async function runBuild(ctx) {
   const capabilitiesGateBypassed = capGate.capabilitiesGateBypassed;
 
   if (!(await bunApiScanGate({ code, inputPath: options.inputPath, patchOptions, logger })).ok) return 1;
+  phaseMs.gates = Date.now() - gatesStartedAt;
 
   const originalCode = code;
   let hadNoChange = false;
@@ -190,6 +201,7 @@ export async function runBuild(ctx) {
   // sidecar below. Disabled via CCPATCH_NO_CACHE=1, on dry-run, and whenever any
   // patch source can't be hashed (setupBuildCache returns null → fail open).
   let buildCache = null;
+  const cacheSetupStartedAt = Date.now();
   if (!patchOptions.dryRun && !isCacheDisabled()) {
     try {
       buildCache = setupBuildCache({
@@ -201,6 +213,9 @@ export async function runBuild(ctx) {
       buildCache = null;
     }
   }
+  // Cache-key derivation hashes the input bundle + every patch source — real
+  // wall time on a 16 MB bundle, previously invisible in the report.
+  phaseMs.cacheSetup = Date.now() - cacheSetupStartedAt;
   patchOptions.buildCache = buildCache;
 
   // Reverse-diff capture is OPT-IN: only collect splices (and pay their ~16MB
@@ -221,11 +236,6 @@ export async function runBuild(ctx) {
   // --no-verify: skip the verify literal scan entirely. Threaded to the runner
   // so the verify-batch flush is a no-op (see applyNamedPatches).
   if (noVerify) patchOptions.skipVerify = true;
-  // Coarse wall-clock phase timers (ms). Filled in as each major phase runs so
-  // the end-of-run report can attribute wall time beyond the per-patch
-  // transform sums. Defensive: applyNamedPatches may later expose its own
-  // finer-grained timings under report.phases — we merge ours, never assume its.
-  const phaseMs = {};
   const applyStartedAt = Date.now();
   try {
     const ret = await applyNamedPatches(code, patches, patchesToApply, activeLogger, patchOptions);
@@ -396,6 +406,7 @@ export async function runBuild(ctx) {
   // ── Post-build artifacts (see runner/cli/build-artifacts.mjs) ────────────
   // Issue #8: post-write integrity check + .sha256 sidecar + auto-pin
   // (skipped in dry-run). Auto-pin sha mismatch is the one loud failure.
+  const artifactsStartedAt = Date.now();
   if (!options.patchOptions?.dryRun) {
     const pinRes = writeShaSidecarAndAutoPin({
       outputPath: options.outputPath,
@@ -410,6 +421,9 @@ export async function runBuild(ctx) {
 
   emitOverlayArtifact({ patches, patchesToApply, outputPath: options.outputPath, patchOptions, logger });
   emitAgentsArtifacts({ patches, patchesToApply, outputPath: options.outputPath, logger });
+  // Integrity hash + auto-pin + SEA copy + overlay/agents emission — disjoint
+  // from sidecarWrite (which times only the reverse-diff sidecar below).
+  phaseMs.artifacts = Date.now() - artifactsStartedAt;
 
   // Reverse-diff sidecar (`ccpatch revert` input) — no-op on the fast/default
   // path (captureReverse undefined unless --emit-revert without --no-sidecar).
@@ -485,6 +499,45 @@ export async function runBuild(ctx) {
         `If the patched bundle exceeds the original embedded region, the repack will ` +
         `drop patches to fit (or fail) on this host. Build on linux-x64 for the full set.`
       );
+    }
+  }
+
+  // ── Runtime coverage gate ─────────────────────────────────────────────────
+  // Apply-time verify proves the bytes LANDED; only a runtime hit proves the
+  // patch EXECUTES. Under --strict (or an explicit --coverage) the freshly
+  // written bundle is booted headlessly (node <bundle> --version, hard-capped)
+  // and every coverageMarker-instrumented patch must report a hit: DEAD
+  // (applied but never executed) fails the build. This turns the old
+  // "→ Next: ccpatch coverage …" suggestion into an enforced stage.
+  // --no-coverage opts out (e.g. cross-compiling a bundle the build host
+  // cannot execute). Skipped in dry-run (no bundle on disk).
+  if (!options.patchOptions?.dryRun &&
+      (patchOptions.strict === true || patchOptions.coverage === true) &&
+      patchOptions.noCoverage !== true) {
+    const covStartedAt = Date.now();
+    logger.log('');
+    logger.log('  [coverage] runtime coverage gate (--strict/--coverage): booting the patched bundle…');
+    let covExit = 2;
+    try {
+      const { runCoverage } = await import('./cmd-coverage.mjs');
+      covExit = await runCoverage({
+        bundlePath: options.outputPath,
+        ccVersion: patchOptions.version || null,
+        smoke: null,
+        outPath: null,
+      }, logger);
+    } catch (err) {
+      logger.error(`Error: runtime coverage gate crashed: ${err.message}`);
+    }
+    phaseMs.runtimeCoverage = Date.now() - covStartedAt;
+    if (covExit !== 0) {
+      logger.error(
+        'Error: runtime coverage gate failed — an instrumented patch applied but never executed ' +
+        '(or the coverage run could not complete). See the table above. ' +
+        'Use `ccpatch coverage <bundle> --smoke "<cmd>"` to drive a richer session, ' +
+        'or --no-coverage to skip the gate.'
+      );
+      return 1;
     }
   }
 
