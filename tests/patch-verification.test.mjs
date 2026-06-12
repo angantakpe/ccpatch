@@ -61,14 +61,6 @@ function makeSandbox(overrides = {}) {
   return ctx;
 }
 
-/** Extract the first IIFE block injected after the shebang. */
-function extractIIFE(code) {
-  const afterShebang = code.replace(/^#!.*\n/, '');
-  // Match (function() { ... })(); or (()=>{ ... })();
-  const m = afterShebang.match(/^\s*(\(function\(\)\s*\{[\s\S]*?\}\)\(\);)/);
-  return m ? m[1] : null;
-}
-
 /** Run a code string in a fresh vm context; return the context globals. */
 function runInSandbox(code, extra = {}) {
   const sandbox = makeSandbox(extra);
@@ -419,11 +411,165 @@ test('Layer 2 — verify.present string exists after apply()', async (t) => {
   }
 });
 
-// ── Layer 3: runtime eval — IIFE patches actually register their globals ────
+// ── Layer 3: runtime eval — injected code actually registers its surface ────
+//
+// Layers 1/2 prove the bytes changed and the expected substrings exist; this
+// layer proves the injected code RUNS: globals register, hook subscriptions
+// land. Three generic modes cover the corpus's injection mechanisms:
+//
+//   preload  — run patch.preloadCode in a sandbox
+//   boot     — run the patch's collectBootInjects() block in a sandbox
+//   inserted — diff fixture→output, extract the inserted segments, run them
+//
+// Inserted segments are recovered with a resync diff: walk fixture and output
+// in lockstep; on divergence, search the output for the next 64 chars of the
+// fixture — the gap is an inserted segment. Patches that REPLACE code (not
+// just insert) return null and are skipped here (Layers 1/2 still cover them).
 
-test('Layer 3 — IIFE patches register expected globals at runtime', async (t) => {
-  // Patches that inject a prepend IIFE and the globals they must set.
+/** Extract inserted-only segments from a single apply. Null on replacement. */
+function insertedSegments(input, out, maxSegs = 40) {
+  const segs = [];
+  let i = 0, j = 0;
+  while (i < input.length && j < out.length) {
+    if (input[i] === out[j]) { i++; j++; continue; }
+    if (segs.length >= maxSegs) return null;
+    const probe = input.slice(i, i + 64);
+    const found = probe ? out.indexOf(probe, j) : -1;
+    if (found === -1) return null; // deletion/replacement — not insert-only
+    segs.push(out.slice(j, found));
+    j = found;
+  }
+  if (i >= input.length && j < out.length) segs.push(out.slice(j));
+  return segs;
+}
+
+/** Host-API stubs the injected code may consume, with recorders so checks can
+ *  assert that a patch SUBSCRIBED to a hook (not just that it didn't crash). */
+function makeHostStubs(env = {}) {
+  const provided = new Map();
+  const subscribed = { __ccpOnFetch: 0, __ccpOnFetchBefore: 0, __ccpOnFetchStream: 0 };
+  // Hooks accept both signatures in the corpus: fn(cb) and fn('label', cb).
+  const sub = (key) => (a, b) => {
+    const fn = typeof b === 'function' ? b : a;
+    if (typeof fn === 'function') subscribed[key]++;
+    return () => {};
+  };
+  // Module fakes for the node built-ins injected code touches at install time.
+  const moduleFakes = {
+    os: { homedir: () => '/tmp/ccp-test-home', tmpdir: () => '/tmp', platform: () => 'linux' },
+    fs: {
+      existsSync: () => false, readFileSync: () => '', writeFileSync: () => {},
+      appendFileSync: () => {}, mkdirSync: () => {}, statSync: () => ({ mode: 0o600 }),
+      watch: () => ({ close: () => {} }),
+    },
+    path: { join: (...a) => a.join('/'), resolve: (...a) => a.join('/'), dirname: (p) => String(p) },
+    net: { createServer: () => ({ listen: () => {}, on: () => {}, close: () => {} }) },
+    crypto: {
+      randomUUID: () => 'test-uuid', randomBytes: (n) => Buffer.alloc(n),
+      createHash: () => ({ update() { return this; }, digest: () => 'x'.repeat(64) }),
+      timingSafeEqual: (a, b) => a.length === b.length,
+    },
+  };
+  const fakeRequire = (id) => moduleFakes[String(id).replace(/^node:/, '')] ?? {};
+  const extras = {
+    __ccpProvide: (k, v) => { provided.set(k, v); return v; },
+    __ccpRequire: (k) => provided.get(k),
+    __ccpOnFetch: sub('__ccpOnFetch'),
+    __ccpOnFetchBefore: sub('__ccpOnFetchBefore'),
+    __ccpOnFetchStream: sub('__ccpOnFetchStream'),
+    __ccpBus: { on: () => () => {}, emit: () => {}, topics: () => [] },
+    require: fakeRequire,
+    module: { exports: {} },
+    process: {
+      env: { ...env }, argv: [], versions: { node: '20.0.0' }, pid: 1234,
+      platform: 'linux', cwd: () => '/tmp', on: () => {}, once: () => {},
+      exit: () => {}, stderr: { write: () => {} }, stdout: { write: () => {} },
+    },
+    Buffer,
+    URL,
+    URLSearchParams,
+    TextEncoder,
+    TextDecoder,
+    queueMicrotask: () => {},
+    setInterval: () => 0,
+    clearInterval: () => {},
+    fetch: async () => ({ ok: true, body: null }),
+    AbortController: class { signal = {}; abort() {} },
+  };
+  return { extras, provided, subscribed };
+}
+
+/** Run a list of code blocks in ONE sandbox; skip blocks that don't parse
+ *  standalone (mid-expression splices). Async because some boot hooks are
+ *  async IIFEs (dynamic import()) — we give their microtasks a few turns to
+ *  settle before the caller asserts. Returns { sandbox, ran, skipped }. */
+async function runBlocks(blocks, extras) {
+  const sandbox = makeSandbox(extras);
+  vm.createContext(sandbox);
+  // Resolve dynamic import() of node built-ins via the main-context loader
+  // (async boot hooks like mcp_lazy use `await import('node:fs')`).
+  const scriptOpts = { importModuleDynamically: vm.constants.USE_MAIN_CONTEXT_DEFAULT_LOADER };
+  let ran = 0, skipped = 0;
+  for (const block of blocks) {
+    let script;
+    try {
+      script = new vm.Script(block, scriptOpts);
+    } catch {
+      skipped++; // fragment spliced inside a host function — not runnable alone
+      continue;
+    }
+    try {
+      script.runInContext(sandbox);
+      ran++;
+    } catch (e) {
+      // Injected code is rule-4 fail-open; tolerate missing bundle-local refs.
+      if (!/is not defined|async/.test(e.message)) throw e;
+      ran++;
+    }
+  }
+  // Let async IIFEs settle (a few macrotask turns is plenty for import()s).
+  for (let i = 0; i < 4; i++) await new Promise(r => setTimeout(r, 5));
+  return { sandbox, ran, skipped };
+}
+
+test('Layer 3 — injected code registers its runtime surface', async (t) => {
+  // Per-patch expectations. `globals` must be set on globalThis after the
+  // injected code runs; `subscribes` hooks must have gained >=1 subscriber.
   const runtimeChecks = {
+    // ── preload patches ──
+    contracts: { mode: 'preload', globals: ['__ccpRegistry', '__ccpProvide', '__ccpRequire'] },
+    coverage_kernel: { mode: 'preload', globals: ['__ccpCoverage'] },
+    cost_tracker: { mode: 'preload', subscribes: ['__ccpOnFetch'] },
+    tools_log: { mode: 'preload', subscribes: ['__ccpOnFetch'] },
+
+    // ── boot-inject patches ──
+    bun_shim: { mode: 'boot', globals: ['Bun'] },
+    tool_result_error_content: { mode: 'boot', subscribes: ['__ccpOnFetchBefore'] },
+    mcp_lazy: { mode: 'boot', subscribes: ['__ccpOnFetchBefore'] },
+
+    // ── inserted (spliceBoot / mid-bundle) patches ──
+    event_bus: { mode: 'inserted', globals: ['__ccpBus', '__ccpBus_v1'] },
+    auth_token: { mode: 'inserted', globals: ['__ccpAuth_v1'] },
+    agent_lifecycle: { mode: 'inserted', globals: ['__ccpAgentLifecycle_v1'] },
+    agent_tree: { mode: 'inserted', globals: ['__ccpAgentTree_v1'] },
+    assistant_stream_events: { mode: 'inserted', globals: ['__ccpAssistantStream_v1'] },
+    custom_commands: { mode: 'inserted', globals: ['__ccpRegisterSlashCommand'] },
+    slash_dispatch: { mode: 'inserted', globals: ['__ccpSlashDispatchInstalled'] },
+    subagent_hooks_stub: { mode: 'inserted', globals: ['__ccpSubagent', '__ccpSubagentStubInstalled'] },
+    // The bridge only installs when CC_BRIDGE_ADDR is set (off-by-default gate).
+    headless_bridge: { mode: 'inserted', globals: ['__ccpHeadlessBridge_v1'], env: { CC_BRIDGE_ADDR: '127.0.0.1:0' } },
+    rate_limit: { mode: 'inserted', globals: ['__ccpRateLimitRegistered'] },
+    policy_gate: { mode: 'inserted', globals: ['__ccpPolicyGateInstalled_v1'] },
+    dotenv_loader: { mode: 'inserted', globals: ['__ccpDotenvLoaded'] },
+    // The boot half registers the globals; the mid-function override-apply
+    // fragment is context-dependent and skipped by the parse filter.
+    expose_system_prompt: { mode: 'inserted', globals: ['__ccpSystemPromptExposed_v1', '__ccpGetSystemPrompt'] },
+    // NOT covered: expose_tool_dispatch — ALL its globals are registered
+    // inside the bundle's tool-context function (they close over host locals),
+    // so no injected block is runnable standalone. Behavioral coverage for it
+    // lives in the daemon-profile integration round-trip (test:integration).
+
+    // ── custom ──
     fetch_interceptor: {
       // fetch_interceptor prepends flat code (not a self-contained IIFE) before
       // the bundle's CJS wrapper. Extract only the prepended portion, run it in
@@ -445,36 +591,67 @@ test('Layer 3 — IIFE patches register expected globals at runtime', async (t) 
 
   for (const [name, spec] of Object.entries(runtimeChecks)) {
     if (!patches[name]) {
-      await t.test(name, () => { t.skip('patch not found'); });
+      await t.test(name, (tt) => { tt.skip('patch not found'); });
       continue;
     }
 
-    await t.test(name, () => {
+    await t.test(name, async (tt) => {
       const patch = patches[name];
-      const applyFn = resolveApply(patch, name);
-      if (!applyFn) { t.skip('no apply()'); return; }
+      const { extras, subscribed } = makeHostStubs(spec.env);
+      let blocks = null;
 
-      const fixture = fixtureFor(name, patch);
-      const out = applyFn(fixture, {});
-
-      // Custom check takes priority.
       if (spec.custom) {
-        spec.custom({}, out);
+        const applyFn = resolveApply(patch, name);
+        if (!applyFn) { tt.skip('no apply()'); return; }
+        spec.custom({}, applyFn(fixtureFor(name, patch), {}));
         return;
       }
 
-      const iife = extractIIFE(out.replace(/^#!.*\n/, ''));
-      if (!iife) { t.skip('no IIFE block in output'); return; }
-
-      const sandbox = runInSandbox(iife, spec.extra || {});
-
-      for (const g of spec.globals) {
-        assert.ok(
-          sandbox[g] !== undefined,
-          `patch "${name}" must set globalThis.${g} at runtime`
+      if (spec.mode === 'preload') {
+        if (typeof patch.preloadCode !== 'string') { tt.skip('no preloadCode'); return; }
+        blocks = [patch.preloadCode];
+      } else if (spec.mode === 'boot') {
+        const { entries } = collectBootInjects(
+          { [name]: patch }, [name],
+          { code: '', options: { version: '0.0.0-test' } },
         );
+        if (!entries.length) { tt.skip('no boot entry resolved'); return; }
+        blocks = entries.map(e => e.code);
+      } else {
+        const applyFn = resolveApply(patch, name);
+        if (!applyFn) { tt.skip('no apply()'); return; }
+        const fixture = fixtureFor(name, patch);
+        if (fixture == null) { tt.skip(NULL_FIXTURE_SKIP(name)); return; }
+        const out = applyFn(fixture, {});
+        if (out === fixture) { tt.skip('apply() was a no-op on this fixture'); return; }
+        blocks = insertedSegments(fixture, out);
+        if (blocks === null) { tt.skip('patch replaces code (not insert-only) — segments unrecoverable'); return; }
+      }
+
+      const { sandbox, ran } = await runBlocks(blocks, extras);
+      assert.ok(ran > 0, `patch "${name}": no injected block was runnable standalone`);
+
+      for (const g of spec.globals ?? []) {
+        assert.ok(sandbox[g] !== undefined, `patch "${name}" must set globalThis.${g} at runtime`);
+      }
+      for (const hook of spec.subscribes ?? []) {
+        assert.ok(subscribed[hook] > 0, `patch "${name}" must subscribe to ${hook} at runtime`);
       }
     });
+  }
+
+  // Coverage floor: every enabled patch that registers a __ccp* global should
+  // eventually have a Layer-3 entry. Surface the uncovered set as a diagnostic
+  // (not a failure) so additions are visible, and ratchet via the count below.
+  const registersGlobal = (name) => {
+    const src = readFileSync(patchPaths[name].path, 'utf8');
+    return /globalThis\.__ccp[A-Za-z_]+\s*=/.test(src);
+  };
+  const uncovered = patchNames.filter(
+    n => isEnabled(n) && registersGlobal(n) && !runtimeChecks[n],
+  );
+  if (uncovered.length) {
+    t.diagnostic(`Layer 3 uncovered global-registering patches: ${uncovered.join(', ')}`);
   }
 });
 
