@@ -67,7 +67,8 @@
     "lint:declarative": "node scripts/check-declarative.mjs",
     "lint:anchors": "node scripts/lint-anchors.mjs",
     "lint:profiles": "node scripts/lint-profiles.mjs",
-    "lint": "concurrently --group --kill-others-on-fail 'npm:lint:dead' 'npm:lint:unused' 'npm:lint:types' 'npm:lint:declarative' 'npm:lint:anchors' 'npm:lint:profiles'",
+    "lint:escape-hatches": "node scripts/lint-escape-hatches.mjs",
+    "lint": "concurrently --group --kill-others-on-fail 'npm:lint:dead' 'npm:lint:unused' 'npm:lint:types' 'npm:lint:declarative' 'npm:lint:anchors' 'npm:lint:profiles' 'npm:lint:escape-hatches'",
     "gen:types": "node scripts/gen-types.mjs",
     "tui": "node bin/patch-tui.mjs"
   },
