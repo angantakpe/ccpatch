@@ -18,17 +18,24 @@ function fmtSize(bytes) {
 function scanOutputs(dir) {
   if (!fs.existsSync(dir)) return [];
   const entries = [];
-  for (const name of fs.readdirSync(dir)) {
-    if (!name.endsWith('.jsonl') && !name.endsWith('.json')) continue;
-    const file = path.join(dir, name);
-    let size = 0;
-    try {
-      size = fs.statSync(file).size;
-    } catch {
-      // If stat fails skip silently — the file may have disappeared.
-      continue;
+  // Top-level *.json/*.jsonl plus the build-cache subdirectory (cache/*.json),
+  // so `outputs clear` sweeps cached phase entries alongside the JSONL logs.
+  const roots = [dir];
+  const cacheDir = path.join(dir, 'cache');
+  if (fs.existsSync(cacheDir)) roots.push(cacheDir);
+  for (const root of roots) {
+    for (const name of fs.readdirSync(root)) {
+      if (!name.endsWith('.jsonl') && !name.endsWith('.json')) continue;
+      const file = path.join(root, name);
+      let size = 0;
+      try {
+        size = fs.statSync(file).size;
+      } catch {
+        // If stat fails skip silently — the file may have disappeared.
+        continue;
+      }
+      entries.push({ file, size });
     }
-    entries.push({ file, size });
   }
   // Sort deterministically: by name within the directory.
   entries.sort((a, b) => a.file.localeCompare(b.file));

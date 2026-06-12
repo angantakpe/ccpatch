@@ -77,6 +77,15 @@ export function buildJsonReport({ ok, durationMs, report, patchNames, paranoid, 
   if (r.harness && typeof r.harness === 'object') {
     out.harness = { ...r.harness };
   }
+  // Build-cache replay status: which heavy phases were served from the
+  // content-addressed cache this build (skipping recompute).
+  if (r.cache && typeof r.cache === 'object') {
+    out.cache = {
+      enabled: !!r.cache.enabled,
+      conflicts: !!r.cache.conflicts,
+      reverseDiff: !!r.cache.reverseDiff,
+    };
+  }
   // WS6: surface paranoid/strict mode and any native grow-path platform
   // degradation in the machine-readable report. Both are optional — older
   // callers that don't pass them leave the report shape unchanged.
@@ -158,17 +167,30 @@ export function renderTextSummary({ ok, durationMs, report, outputPath, drySugge
       coverage: 'coverage',
       conflict: 'conflict',
     };
+    const cachePre = (r.cache && typeof r.cache === 'object') ? r.cache : null;
+    // A phase served from the cache is shown as "(cached)" below; suppress its
+    // (near-zero) measured bucket so we don't print e.g. both "reverse-diff 0.0s"
+    // and "reverse-diff (cached)" for the same phase.
+    const cachedKeys = new Set();
+    if (cachePre?.conflicts) cachedKeys.add('conflict');
+    if (cachePre?.reverseDiff) cachedKeys.add('reverseDiff');
     const measured = harness
       ? Object.entries(harness)
           .map(([k, ms]) => [k, Number(ms) || 0])
-          .filter(([, ms]) => ms > 0)
+          .filter(([k, ms]) => ms > 0 && !cachedKeys.has(k))
           .sort((a, b) => b[1] - a[1])
       : [];
-    if (measured.length > 0) {
+    // Phases served from the build cache appear with near-zero measured ms (the
+    // work was skipped), so surface them explicitly as "(cached)" entries even
+    // when their bucket is 0 and would otherwise be filtered out above.
+    const cachedParts = [];
+    if (cachePre?.conflicts) cachedParts.push('conflict (cached)');
+    if (cachePre?.reverseDiff) cachedParts.push('reverse-diff (cached)');
+    if (measured.length > 0 || cachedParts.length > 0) {
       // Named breakdown: "Harness breakdown: reverse-diff 9.1s · verify 2.3s · …".
       const parts = measured.map(
         ([k, ms]) => `${harnessLabels[k] || k} ${(ms / 1000).toFixed(1)}s`
-      );
+      ).concat(cachedParts);
       lines.push(`Harness breakdown: ${parts.join(' · ')}`);
       const measuredTotal = measured.reduce((sum, [, ms]) => sum + ms, 0);
       // Remainder = overhead the measured buckets don't explain (bundle/sidecar
