@@ -179,15 +179,11 @@ export default {
   },
   preload: true,
   preloadCode: hook,
-  apply: (code) => {
-    const __shebang__ = '#!/usr/bin/env node';
-    const __cjsIife__ = '(function(exports, require, module, __filename, __dirname)';
-    if (code.startsWith(__shebang__)) {
-      return code.replace(__shebang__, () => __shebang__ + hook);
-    } else if (code.includes(__cjsIife__)) {
-      return code.replace(__cjsIife__, () => hook + __cjsIife__);
-    }
-    console.warn('  [!] patch: no shebang or CJS-IIFE anchor found — skipping');
-    return code;
-  },
+  // Boot hook spliced by the runner's boot registry (runner/boot-registry.mjs)
+  // — ONE combined insertion at the canonical boot anchor replaces the old
+  // hand-rolled shebang/CJS-IIFE splice here. order 10: the fan-out bus
+  // (__ccpOnFetch / __ccpOnFetchBefore / __ccpOnFetchStream) must exist before
+  // any subscriber's boot hook runs (tool_result_error_content order 30,
+  // mcp_lazy order 50) and before every later non-boot splice.
+  bootInject: { order: 10, code: hook },
 };

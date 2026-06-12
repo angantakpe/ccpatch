@@ -53,7 +53,18 @@ const USAGE =
   '[--kind=free|prefix|postfix|transpiler|splice|flag] [--force]';
 
 function templateSplice(name) {
-  return `import { spliceBoot } from '../runner/patch-helpers.mjs';
+  return `// Boot hook — injected by the runner's boot registry (runner/boot-registry.mjs):
+// ONE combined splice at the canonical boot anchor for all enabled patches'
+// bootInject blocks. Do NOT hand-roll a shebang / CJS-IIFE splice in apply().
+const snippet = \`
+// ── [patch:${name}] ────────────────────────────────────────────────────────
+(function(){
+  if (globalThis.__ccp_${name}_installed__) return;
+  globalThis.__ccp_${name}_installed__ = true;
+  // TODO: your code here. Runs at bundle boot, before the bundle body.
+})();
+var __ccp_${name}_installed__ = true;
+\`;
 
 /** @type {import('../types/patch').Patch} */
 export default {
@@ -67,19 +78,11 @@ export default {
     present: '__ccp_${name}_installed__',
     weak: true,
   },
-  apply(code) {
-    if (code.includes('__ccp_${name}_installed__')) return code; // idempotent guard
-    const snippet = \`
-// ── [patch:${name}] ────────────────────────────────────────────────────────
-(function(){
-  if (globalThis.__ccp_${name}_installed__) return;
-  globalThis.__ccp_${name}_installed__ = true;
-  // TODO: your code here. Runs at bundle boot, before anything else.
-})();
-var __ccp_${name}_installed__ = true;
-\`;
-    return spliceBoot(code, snippet);
-  },
+  // order: lower runs first (gaps of 10). Slots 10–60 are reserved by the
+  // standard-profile boot hooks — see EXTENSIONS_API.md "Boot hooks".
+  // Idempotency is sentinel-based (defaults to the first verify.present
+  // literal), so no includes() guard is needed here.
+  bootInject: { order: 100, code: snippet },
 };
 `;
 }

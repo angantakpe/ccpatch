@@ -22,6 +22,8 @@ import {
   makeVerifyFlusher,
   makeHarnessBuckets,
 } from './apply-pipeline.mjs';
+import { collectBootInjects, spliceBootRegistry } from './boot-registry.mjs';
+import { captureReverseDiff } from './reverse-diff.mjs';
 
 
 /**
@@ -194,10 +196,15 @@ export function detectAndRecordOverlaps(phaseTraces, frame, globalStrict, logger
           `Add allowOverlapWith: ['${c.b}'] to ${c.a} (or vice versa) to acknowledge.`
         );
       } else {
-        // DX#2: in non-strict mode an overlap is informational — it does not
-        // abort the build.
-        logger.warn(`  [overlap] ${c.a} <-> ${c.b} phase="${c.phase}" (informational — non-fatal; run --log-level=debug for ranges, or --strict to gate)`);
-        logger.debug?.(`  [overlap] ${msg} (informational — non-fatal)`);
+        // Non-strict mode: an unacknowledged overlap is a real WARNING (two
+        // patches touched the same bytes without declaring it) — it does not
+        // abort the build here, but --strict turns this exact condition into a
+        // failure. Boot-point overlaps between bootInject patches no longer
+        // occur at all (the registry performs one combined splice), so any
+        // overlap that still fires deserves attention: either separate the
+        // anchors or acknowledge with allowOverlapWith.
+        logger.warn(`  [overlap] WARNING: unacknowledged overlap ${c.a} <-> ${c.b} phase="${c.phase}" — fix the anchors or add allowOverlapWith; --strict fails the build on this (run --log-level=debug for ranges)`);
+        logger.debug?.(`  [overlap] ${msg} (unacknowledged — warning; fatal under --strict)`);
       }
     }
   }
@@ -209,6 +216,37 @@ export function detectAndRecordOverlaps(phaseTraces, frame, globalStrict, logger
 }
 
 export async function applyNamedPatches(code, patches, patchNames, logger = console, patchOptions = {}) {
+  // ── Boot-injection registry (arch item #6) ────────────────────────────────
+  // Collect every enabled patch's declarative `bootInject` block and perform
+  // EXACTLY ONE insertion at the canonical boot anchor, BEFORE any per-patch
+  // apply() runs. Doing it first means every later pre-IIFE splice (contracts,
+  // extension hooks, …) lands BETWEEN the registry block and the IIFE head —
+  // i.e. it executes AFTER the registry's hooks, preserving the standing
+  // invariant that fetch_interceptor's bus / bun_shim's polyfill exist before
+  // any later boot code runs. Patches whose sentinel is already in the input
+  // are skipped (per-patch idempotency: applying twice == applying once,
+  // byte-identical). An anchor miss leaves the code unchanged; the affected
+  // patches are then recorded as no-change below, so their verify.present
+  // gate fails the build like any other anchor drift.
+  const bootCollect = collectBootInjects(patches, patchNames, {
+    code, options: patchOptions, logger,
+  });
+  const bootInjected = new Set();
+  const bootSkipped = new Set(bootCollect.skipped);
+  if (bootCollect.entries.length > 0) {
+    const preBoot = code;
+    code = spliceBootRegistry(code, bootCollect.entries, logger);
+    if (code !== preBoot) {
+      for (const e of bootCollect.entries) bootInjected.add(e.name);
+      // Keep --emit-revert complete: the registry splice is harness work that
+      // runs outside any patch's apply(), so it needs its own reverse record
+      // (first in the sidecar — its preSha256 is the original bundle's hash).
+      if (!patchOptions.dryRun) {
+        captureReverseDiff('__boot_registry__', preBoot, code, patchOptions.captureReverse);
+      }
+    }
+  }
+
   // Item 2: `nextCode` and the deferred-verify queue (`pendingVerify`) are the
   // two pieces of mutable state shared between the apply loop and the verify
   // flush stage (an onVerifyFail heal rewrites nextCode; the loop pushes into
@@ -342,6 +380,56 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
         const added = normalized.revisit.addedIn ? ` (added in v${normalized.revisit.addedIn})` : '';
         logger.warn(`  [revisit] ${name}${added}: re-evaluate at v${normalized.revisit.until} — ${normalized.revisit.note}`);
       }
+    }
+
+    // Boot-only patches (a bootInject declaration with no apply()) were
+    // handled by the single registry splice above — there is nothing left to
+    // apply here, and no per-patch trace to feed overlap detection (the whole
+    // point: same-anchor boot overlaps disappear structurally). Verify still
+    // runs against the current snapshot so each patch's own sentinels and
+    // counts are asserted exactly as before.
+    const isBootOnly = !!patch.bootInject
+      && typeof patch.apply !== 'function'
+      && (normalized.kind ?? 'free') === 'free';
+    if (isBootOnly) {
+      timings.push({ name, ms: 0 });
+      if (bootInjected.has(name)) {
+        results[name] = 'applied';
+      } else if (bootSkipped.has(name)) {
+        // Sentinel already present in the input — idempotent re-apply.
+        results[name] = 'no-change-ok';
+      } else {
+        // Collected but never injected: the registry splice found no anchor
+        // (or the code fn failed). Mirror the no-change semantics of a normal
+        // apply(): fatal when the patch declares verify.present, unless
+        // --best-effort downgrades it (and always fatal for strict/required).
+        logger.warn(`  [!] Patch "${name}" boot hook not injected (boot-registry anchor miss).`);
+        results[name] = 'no-change';
+        const reason = 'boot hook not injected (boot-registry anchor miss)';
+        const hasPresent = toList(normalized.verify?.present)
+          .some((s) => typeof s === 'string' && s.length > 0);
+        if ((hasPresent && patchOptions.bestEffort !== true) || patchStrict) {
+          failures.push(`${name}: ${reason}`);
+        }
+      }
+      if (normalized.verify && !skipVerify) {
+        state.pendingVerify.push({
+          name,
+          patch,
+          patchStrict,
+          lifecycleCtx: {
+            name, phase: phaseOf(patch), code: state.nextCode,
+            appliedCode: state.nextCode, opts: { ...patchOptions },
+            verify: { issues: [] }, attempt: 1, logger,
+          },
+          snapshot: state.nextCode,
+          verify: normalized.verify,
+          present: toList(normalized.verify.present),
+          absent: toList(normalized.verify.absent),
+          count: normalized.verify.count,
+        });
+      }
+      continue;
     }
 
     // Per-patch lifecycle context — same object every hook fire.
