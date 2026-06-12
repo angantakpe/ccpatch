@@ -113,6 +113,17 @@ jobs:
           # Doctor exits 1 only on missing; drift is non-fatal.
           exit $STATUS
 
+      - name: Check refmap coverage for v${{ matrix.version }}
+        # Refmaps are mandatory for supported versions (the nightly drift
+        # sweep fails without one); on the PR guard this is a warning so a
+        # brand-new upstream release doesn't block unrelated PRs.
+        run: |
+          if [ ! -f "refmaps/${{ matrix.version }}.json" ]; then
+            echo "::warning title=Missing refmap::refmaps/${{ matrix.version }}.json does not exist. Generate and commit one: node bin/patch-cli.mjs refmap \$BUNDLE --cc-version ${{ matrix.version }} --out refmaps/${{ matrix.version }}.json"
+          else
+            echo "refmap present for v${{ matrix.version }}"
+          fi
+
       - name: Upload anchor-drift log
         if: always()
         uses: actions/upload-artifact@v4

@@ -78,6 +78,38 @@ hand to a colleague without explaining a list of footguns.
 
 ---
 
+## Patch budget & deprecation policy
+
+The extension corpus is the long tail of drift liability: every patch is a
+recurring per-release maintenance cost, paid each time upstream ships. To keep
+that cost bounded:
+
+**New extensions must clear the settings-first bar.** A PR adding an extension
+must state, in the PR description, why the behavior cannot be achieved with a
+documented `settings.json` hook event (rule 10 in
+[.claude/rules/hook-patches.md](./.claude/rules/hook-patches.md)). "A hook
+exists but is less convenient" does not clear the bar — patches are reserved
+for behavior the hook surface cannot express.
+
+**New extensions must justify their anchor cost.** Prefer a stable
+string-literal anchor or an existing `runner/anchors.mjs` entry. A patch that
+needs a new version-specific regex variant per release (the `project_root`
+pattern) needs an explicit maintainer sign-off acknowledging the treadmill.
+
+**Idle extensions get deprecated.** An extension that is in no profile, has no
+`ccpatch.yml` ack, and has needed no anchor maintenance interest for **6
+upstream releases** is a candidate for removal: it is unexercised surface that
+still costs a verify probe, a doctor row, and a drift-sweep cell every night.
+Deprecation path: mark `enabled: false` with a `# deprecated:` comment in
+`ccpatch.yml` for one release cycle, then delete the patch, its tests, and its
+threat-model row together.
+
+**Upstreamed behavior retires the patch.** When Claude Code ships a feature an
+extension was papering over, the patch is deleted in the same PR that bumps
+the supported version — not kept "just in case".
+
+---
+
 ## Patch-authoring guidance
 
 The deep how-to lives in [`docs/authoring-patches.md`](./docs/authoring-patches.md).

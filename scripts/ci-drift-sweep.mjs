@@ -189,8 +189,24 @@ function main() {
 
   // 1. @latest — the leading indicator.
   const latest = resolveInstalledLatest(opts.latest, opts.latestVersion);
+  let refmapGateFailed = false;
   if (latest) {
     results.push(runDoctor(latest, opts.strict));
+
+    // Refmap coverage gate: refmaps are MANDATORY for every supported
+    // version, not optional augmentation — the refmap tier is what absorbs
+    // minified-identifier rotation, and it only helps if it exists. A new
+    // upstream release without a committed refmap keeps the nightly red
+    // until one is generated.
+    if (latest.version && !fs.existsSync(path.join(PROJECT_ROOT, 'refmaps', `${latest.version}.json`))) {
+      console.error(
+        `[drift-sweep] FAIL refmap gate — no refmaps/${latest.version}.json for @latest. ` +
+        `Generate and commit one:\n` +
+        `  node bin/patch-cli.mjs refmap ${latest.bundle} --cc-version ${latest.version} ` +
+        `--out refmaps/${latest.version}.json`,
+      );
+      refmapGateFailed = true;
+    }
   } else {
     console.error('[drift-sweep] could not resolve @latest bundle; skipping that target');
   }
@@ -221,6 +237,10 @@ function main() {
   if (failed) {
     console.error('[drift-sweep] FAIL — anchor drift or missing anchors detected. ' +
       'Re-anchor the affected patches (see anchor-drift.jsonl).');
+    return 1;
+  }
+  if (refmapGateFailed) {
+    console.error('[drift-sweep] FAIL — anchors clean but the refmap gate failed (see above).');
     return 1;
   }
   console.error('[drift-sweep] PASS — all probed bundles clean.');

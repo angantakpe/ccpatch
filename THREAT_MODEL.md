@@ -369,6 +369,83 @@ path; and entries are written `0600` (owner-only). This remains a dev/testing
 feature — do not enable it in any setting where the cache directory is shared or
 writable by another principal.
 
+## Systemic risk: upstream toolchain change (anchor extinction)
+
+Every anchor-resolution tier — version-specific regexes, refmap symbol tables,
+multi-tier fallback chains, `findFunctionByLiteral` AST anchors — shares one
+unstated assumption about the shape of the upstream bundle: **string literals
+survive minification intact, functions are textually contiguous, and the
+brace-walker can find an enclosing function around a literal.** That assumption
+holds for esbuild's current output. It is not guaranteed.
+
+An upstream toolchain change — aggressive string concatenation/interning, a
+different mangling scheme, code splitting into multiple chunks, bytecode or
+snapshot embedding — would break **all patches simultaneously**, and no
+fallback tier helps, because every tier shares the same textual-bundle
+assumption. This is an accepted bet, not an oversight: the alternative
+(full-fidelity parsing of a ~10 MB bundle per patch) was rejected on cost.
+
+**Detection signal.** The nightly drift sweep (`drift-check.yml`, which probes
+`@latest` plus every refmap'd version) lights up **entirely red in one run** —
+every patch reporting anchor MISS at once, rather than the usual one-or-two
+patch drift. `ccpatch doctor` against the new bundle shows the same all-MISS
+pattern. Treat "all anchors missed on a new version" as a toolchain-change
+event, not as N independent regressions.
+
+**Response plan, in order:**
+
+1. **Do not chase individual anchors.** Per-patch regex fixes are wasted work
+   against a toolchain change; confirm the failure mode first with
+   `ccpatch dissect` / `doctor` on the new bundle (changed format? split
+   chunks? mangled literals?).
+2. **Pin users to the last working version.** `SUPPORTED_VERSIONS.md` and the
+   known-shas registry identify the last bundle every patch verified against;
+   communicate that as the supported ceiling until re-targeting lands.
+3. **Re-target the resolution layer, not the patches.** The patch corpus
+   anchors through `runner/anchors.mjs` / refmaps / AST helpers precisely so
+   the bundle-shape knowledge lives in one layer. The port is: teach
+   `dissect`/refmap generation the new bundle shape, regenerate refmaps, and
+   let the corpus follow.
+4. **Triage the corpus by tier.** Core (12 patches) is re-validated first;
+   extensions re-enable per-patch as their anchors verify. The capability ack
+   gate and `verify` blocks already prevent a half-ported patch from shipping
+   silently.
+
+## Escape-hatch registry & audit policy
+
+Every gate in ccpatch has a deliberate bypass. Each is individually justified;
+collectively they are the attack surface a reviewer must audit, because a gate
+with a permanent hole is only as strong as the discipline around the hole.
+Canonical registry:
+
+| Escape hatch | Bypasses | Scope | Legitimate use |
+|---|---|---|---|
+| `--allow-unacked` | capability ack gate (`ccpatch.yml ack:`) | build | first-run exploration before writing acks |
+| `--allow-capabilities=<list>` | per-capability gate for listed caps | build | CI with enumerated caps (`network,env`) |
+| `--allow-capabilities=all` | **entire** capability gate | build | interactive one-off only — never scripts/CI (see above) |
+| `--allow-unverified` | post-build verify failures / native smoke check | build | debugging a drifted anchor locally |
+| `CCPATCH_SKIP_SHA_CHECK=1` | known-shas input pinning (never an explicit `--expect-sha256`) | build | testing against a deliberately modified bundle |
+| `CCPATCH_SKIP_LAUNCH_VERIFY=1` | launch-time bundle integrity check (`make start`) | launch | running a deliberately hand-edited bundle |
+| `CCPATCH_NO_AUTOPIN=1` | first-verified-build auto-pin into known-shas | build | keeping a registry pristine while experimenting |
+| `CCPATCH_NO_CACHE=1` | build cache | build | cache-corruption debugging (no security impact) |
+| `CCPATCH_BEST_EFFORT=1` | required-patch failure → hard error | build | degraded-host builds |
+| `allowOverlapWith` (manifest field) | per-phase conflict detection for the named pair | per-patch | known-benign overlapping injections |
+| `ccpatch pin --force` | re-pin refusal for a known version | registry | intentional upstream re-release |
+
+Audit policy:
+
+- **Annual audit** (or on any security review): enumerate live usage with
+  `node scripts/lint-escape-hatches.mjs` and reconcile against this table.
+- **Unused for 12 months → delete the hatch.** A bypass nobody needs is pure
+  attack surface.
+- **Used routinely → the gate is miscalibrated.** Recurring `--allow-unacked`
+  in scripts means acks should be written; recurring `allowOverlapWith` pairs
+  mean the conflict detector needs a smarter rule. Fix the gate, don't
+  normalize the bypass.
+- **New hatches land here first.** A PR adding a bypass flag must add a row to
+  this table in the same change (the lint enforces drift between code and
+  table).
+
 ## How to disable a patch
 
 Three options, any of them is fine:

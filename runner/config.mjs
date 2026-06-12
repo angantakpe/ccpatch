@@ -5,28 +5,10 @@ import { resolveProfile } from './manifest.mjs';
 import { resolvePatchNames } from './runner.mjs';
 import { applyNativeProfileFilter } from './cli/native-profile.mjs';
 
-/**
- * Issue #8: return the expected sha256 hex string for the given CC version
- * from the `bundle_sha:` block in ccpatch.yml, or undefined if not configured.
- *
- * Looks for ccpatch.yml in cwd (same convention as the rest of config.mjs).
- * Callers must pass an absolute yamlPath if they need a different location.
- * @knipignore Public config reader retained for sha-pinning callers; no in-repo
- *   consumer wires it yet (verify-bundle-sha.mjs computes its own digest).
- */
-export function getBundleSha(version, yamlPath) {
-  const p = yamlPath || (process.cwd() + '/ccpatch.yml');
-  if (!existsSync(p)) return undefined;
-  let doc;
-  try {
-    doc = yamlLoad(readFileSync(p, 'utf8'));
-  } catch (_) {
-    return undefined;
-  }
-  if (!doc?.bundle_sha || typeof doc.bundle_sha !== 'object') return undefined;
-  const val = doc.bundle_sha[String(version)];
-  return typeof val === 'string' ? val : undefined;
-}
+// NOTE: sha pinning is owned by storage/known-shas.json (runner/known-shas.mjs
+// + scripts/verify-bundle-sha.mjs). The old ccpatch.yml `bundle_sha:` reader
+// (getBundleSha, issue #8) was removed — it never gained a consumer and
+// duplicated the registry.
 
 /**
  * Parse ccpatch.yml and return a name → boolean map.

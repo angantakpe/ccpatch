@@ -8,23 +8,19 @@ import path from 'node:path';
 import { renderBuildStatusHeader } from './banner.mjs';
 import { buildJsonReport, renderTextSummary } from './build-report.mjs';
 import { isVerbose, icon } from './style.mjs';
+import { strictVersionGate, capabilityGate, bunApiScanGate } from './build-gates.mjs';
 import {
-  parseAllowCapabilities,
-  findGateViolations,
-  findUnackedAckRequired,
-  isCapabilityGateBypassed,
-} from './capabilities.mjs';
-import { sha256, sidecarPathFor, REVERT_SIDECAR_VERSION } from './sidecar.mjs';
+  writeShaSidecarAndAutoPin,
+  copyEmbeddedSea,
+  writeCapGateSentinel,
+  emitOverlayArtifact,
+  emitAgentsArtifacts,
+  writeRevertSidecar,
+  writePreloadArtifact,
+} from './build-artifacts.mjs';
+import { sha256 } from './sidecar.mjs';
 import { applyNamedPatches } from '../runner.mjs';
-import { readAcks, resolveEffectivePatches } from '../config.mjs';
-import { CAPABILITIES } from '../manifest.mjs';
-import { buildPreload } from '../preload-builder.mjs';
-import { emitOverlay } from '../overlay-builder.mjs';
-import {
-  collectAgentDirPatches,
-  emitAgentsDir,
-  emitAdkRuntime,
-} from '../agents-dir-builder.mjs';
+import { resolveEffectivePatches } from '../config.mjs';
 import {
   parseRepackSkip,
   nativeGrowPathAvailable,
@@ -37,7 +33,6 @@ import {
   markNondeterministic,
   isCacheDisabled,
 } from '../build-cache.mjs';
-import { maybeAutoPin } from '../auto-pin.mjs';
 
 /**
  * The default (no-subcommand) build invocation: apply patches and write the
@@ -157,159 +152,16 @@ export async function runBuild(ctx) {
     patchOptions.bestEffort = true;
   }
 
-  // Strict mode requires --version (or CCPATCH_CLI_VERSION) so version-pinned
-  // anchors in runner/anchors.mjs can resolve to a specific entry instead of
-  // silently falling through to `default`.
-  if (patchOptions.strict && !patchOptions.version) {
-    logger.error(
-      'Error: --strict requires --version <x.y.z> (or CCPATCH_CLI_VERSION env). ' +
-      'Without a version, anchor entries in runner/anchors.mjs cannot pin to a release.'
-    );
-    return 1;
-  }
+  // ── Pre-build gates (see runner/cli/build-gates.mjs) ─────────────────────
+  // strict-version → capability ack → Bun API scan, all fail-fast before any
+  // apply work. Each gate emits its own user-facing messages.
+  if (!strictVersionGate(patchOptions, logger).ok) return 1;
 
-  // ── Capability gate ───────────────────────────────────────────────────────
-  // Track B (default-strict): patches with `network`, `exec`, or `env`
-  // capabilities require explicit acknowledgement via the `ack:` block in
-  // ccpatch.yml (or via --allow-capabilities). `--allow-unacked` restores
-  // legacy warn-and-proceed behaviour. Other high-risk caps (tools, telemetry)
-  // continue to follow the legacy strict-mode-only gate below.
-  let capabilitiesGateBypassed = false;
-  {
-    const allow = parseAllowCapabilities(patchOptions.allowCapabilitiesRaw);
-    if (allow && allow.unknown.length > 0) {
-      logger.error(
-        `Error: --allow-capabilities contains unknown value(s): ${allow.unknown.join(', ')}. ` +
-        `Allowed: ${CAPABILITIES.join(', ')}`
-      );
-      return 1;
-    }
+  const capGate = capabilityGate({ patches, patchesToApply, patchOptions, isSinglePatchDryRun, logger });
+  if (!capGate.ok) return 1;
+  const capabilitiesGateBypassed = capGate.capabilitiesGateBypassed;
 
-    // S6/S1: `--allow-capabilities=all` is a blunt opt-out that waves every
-    // high-risk cap through and short-circuits both gates below. Leave an audit
-    // trail in CI logs by enumerating the CONCRETE (patch -> capabilities) set
-    // it is actually covering, instead of silently proceeding — AND set a flag
-    // so a `capabilitiesGateBypassed` marker can be persisted into the manifest.
-    capabilitiesGateBypassed = isCapabilityGateBypassed(allow);
-    if (capabilitiesGateBypassed) {
-      // Prominent, hard-to-miss warning: the entire ack/high-risk gate is being
-      // skipped. Routed through logger.warn so it lands on stderr (and under
-      // --json stays off the machine-readable stdout payload).
-      logger.warn('');
-      logger.warn('  ⚠ ─────────────────────────────────────────────────────────────────');
-      logger.warn('  ⚠ CAPABILITY GATE BYPASSED via --allow-capabilities=all');
-      logger.warn('  ⚠ all network/exec/env acks skipped — no per-patch acknowledgement');
-      logger.warn('  ⚠ ─────────────────────────────────────────────────────────────────');
-      logger.warn('');
-    }
-    if (allow && allow.all) {
-      const covered = patchesToApply
-        .map(name => ({ name, caps: Array.isArray(patches[name]?.capabilities) ? patches[name].capabilities : [] }))
-        .filter(e => e.caps.length > 0);
-      if (covered.length > 0) {
-        const summary = covered
-          .map(e => `  ${e.name.padEnd(28)} ${e.caps.join(', ')}`)
-          .join('\n');
-        logger.log(
-          `  [capabilities] --allow-capabilities=all acknowledging ${covered.length} patch(es) ` +
-          `with declared capabilities:\n${summary}`
-        );
-      } else {
-        logger.log(`  [capabilities] --allow-capabilities=all set; no selected patch declares capabilities`);
-      }
-    }
-
-    // Default-strict ack gate for network/exec/env.
-    const ackYamlPath = path.resolve(process.cwd(), 'ccpatch.yml');
-    const acks = readAcks(ackYamlPath);
-    const ackViolations = findUnackedAckRequired(patches, patchesToApply, acks, allow);
-    if (ackViolations.length > 0) {
-      if (patchOptions.allowUnacked || isSinglePatchDryRun) {
-        const reason = patchOptions.allowUnacked ? '--allow-unacked set' : 'single --patch dry-run';
-        const summary = ackViolations
-          .map(v => `  ${v.name.padEnd(28)} ${v.capabilities.join(', ')}  [unacked: ${v.missing.join(', ')}]`)
-          .join('\n');
-        logger.log(
-          `  [capabilities] WARN: ${ackViolations.length} patch(es) with unacked capabilities ` +
-          `(${reason}, proceeding):\n${summary}`
-        );
-      } else {
-        const first = ackViolations[0];
-        const yamlSnippet =
-          `  ack:\n` +
-          `    ${first.name}: [${first.missing.join(', ')}]`;
-        logger.error(
-          `Patch "${first.name}" needs capability ack. Add to ccpatch.yml:\n` +
-          `${yamlSnippet}\n` +
-          `Or pass --allow-unacked to skip this check.`
-        );
-        if (ackViolations.length > 1) {
-          const rest = ackViolations.slice(1)
-            .map(v => `  ${v.name}: [${v.missing.join(', ')}]`)
-            .join('\n');
-          logger.error(`Additional unacked patch(es):\n${rest}`);
-        }
-        return 1;
-      }
-    }
-
-    // Legacy strict-mode-only gate for the broader high-risk set.
-    const violations = findGateViolations(patches, patchesToApply, allow, acks);
-    if (violations.length > 0) {
-      const summary = violations
-        .map(v => `  ${v.name.padEnd(28)} ${v.capabilities.join(', ')}  [missing: ${v.missing.join(', ')}]`)
-        .join('\n');
-      if (patchOptions.strict) {
-        logger.error(
-          `Error: --strict mode requires --allow-capabilities for high-risk patches:\n` +
-          `${summary}\n` +
-          `Pass --allow-capabilities <list> (or =all) to acknowledge.`
-        );
-        return 1;
-      } else {
-        logger.log(
-          `  [capabilities] WARN: ${violations.length} high-risk patch(es) not acknowledged ` +
-          `(non-strict mode, proceeding):\n${summary}`
-        );
-      }
-    }
-  }
-
-  // ── Bun API coverage scan ─────────────────────────────────────────────────
-  // The bundle is Bun-compiled but runs under Node via the polyfill in
-  // runner/shims/bun-polyfill-v1.js.txt — several entries of which are
-  // knowingly degraded (sync Bun.spawn, throwing Bun.Terminal, …). Scan the
-  // INPUT bundle for Bun.<api> usage and report, per scripts/scan-bun-api.mjs:
-  //   (a) used but UNSHIMMED  → error-level; fails the build under --strict
-  //   (b) used but degraded   → warning listing the shim's caveat
-  //   (c) new vs the previous version's committed refmaps/ baseline → drift
-  // Runs BEFORE apply so a strict failure is fail-fast (no bundle written). A
-  // scanner crash must never take down a non-strict build (fail open at
-  // runtime, loud at build time) — hence the try/catch with a warn.
-  {
-    let scan = null;
-    try {
-      const { runBunApiScan } = await import('../../scripts/scan-bun-api.mjs');
-      scan = runBunApiScan({
-        code,
-        bundleLabel: path.basename(options.inputPath),
-        version: patchOptions.version || null,
-      });
-      logger.log('');
-      for (const line of scan.lines) logger.log(line);
-    } catch (err) {
-      logger.warn(`  [!] bun-api scan failed (non-fatal): ${err.message}`);
-    }
-    if (scan && scan.unshimmed.length > 0 && patchOptions.strict) {
-      logger.error(
-        `Error: --strict: bundle uses ${scan.unshimmed.length} Bun API(s) missing from the ` +
-        `Bun polyfill: ${scan.unshimmed.map(e => `Bun.${e.name}`).join(', ')}. ` +
-        `Shim them in runner/shims/bun-polyfill-v1.js.txt (and classify in ` +
-        `refmaps/bun-api-coverage.json), or drop --strict to build anyway.`
-      );
-      return 1;
-    }
-  }
+  if (!(await bunApiScanGate({ code, inputPath: options.inputPath, patchOptions, logger })).ok) return 1;
 
   const originalCode = code;
   let hadNoChange = false;
@@ -541,187 +393,37 @@ export async function runBuild(ctx) {
   phaseMs.bundleWrite = Date.now() - bundleWriteStartedAt;
   logger.log(`\nSuccessfully saved patched bundle to: ${options.outputPath}`);
 
-  // Issue #8: post-write integrity check + .sha256 sidecar (skipped in dry-run).
+  // ── Post-build artifacts (see runner/cli/build-artifacts.mjs) ────────────
+  // Issue #8: post-write integrity check + .sha256 sidecar + auto-pin
+  // (skipped in dry-run). Auto-pin sha mismatch is the one loud failure.
   if (!options.patchOptions?.dryRun) {
-    // 1. Cheap integrity check: compare the on-disk byte length against what we
-    //    wrote. A full re-read + sha256 of the ~16MB bundle on every build is a
-    //    redundant cost for a check that almost never fails, so only escalate to
-    //    the re-read + hash compare when the lengths actually differ.
-    const expectedBytes = Buffer.byteLength(patchedCode, 'utf8');
-    const onDiskBytes = fs.statSync(options.outputPath).size;
-    const integrityOk =
-      onDiskBytes === expectedBytes ||
-      sha256(fs.readFileSync(options.outputPath, 'utf8')) === outputSha256;
-    if (integrityOk) {
-      logger.log(`  [+] Output integrity: OK`);
-    } else {
-      logger.warn(`  [!] Output integrity: MISMATCH`);
-    }
-
-    // 2. Write a .sha256 sidecar next to the output bundle (skipped under
-    //    --no-sidecar; the integrity check above still runs).
-    let sidecarWritten = false;
-    if (noSidecar) {
-      logger.log(`  [~] --no-sidecar: skipping .sha256 sidecar`);
-    } else {
-      try {
-        const sha256SidecarPath = options.outputPath + '.sha256';
-        fs.writeFileSync(sha256SidecarPath, outputSha256 + '\n', 'utf8');
-        logger.log(`  [+] SHA-256 sidecar written to: ${sha256SidecarPath}`);
-        sidecarWritten = true;
-      } catch (err) {
-        logger.warn(`  [!] Could not write .sha256 sidecar: ${err.message}`);
-      }
-    }
-
-    // ── Auto-pin after a verified build ───────────────────────────────────────
-    // The build reached here only after: (a) the npm-tarball integrity gate
-    // passed (scripts/verify-bundle-sha.mjs, run by the Makefile BEFORE patching,
-    // which drops a TOFU marker on a first-use acceptance), (b) patches applied
-    // with verify OK (applyNamedPatches did not throw), and (c) the output
-    // integrity check + .sha256 sidecar succeeded. Record the pin for this
-    // version automatically so the TOFU window does not stay open forever.
-    // Respects CCPATCH_NO_AUTOPIN=1. An existing pin with a DIFFERENT sha is
-    // NEVER overwritten — that mismatch fails the build loud (the attack the pin
-    // exists to catch).
-    if (integrityOk && sidecarWritten) {
-      const pinVersion = patchOptions.version || process.env.CCPATCH_CLI_VERSION || null;
-      const pinRes = maybeAutoPin({
-        version: pinVersion,
-        inputPath: options.inputPath,
-      });
-      if (pinRes.status === 'pinned') {
-        logger.log(`  [+] auto-pinned v${pinVersion} (sha256 ${String(pinRes.sha256).slice(0, 16)}…) — disable with CCPATCH_NO_AUTOPIN=1`);
-      } else if (pinRes.status === 'mismatch') {
-        logger.error(`  [!] AUTO-PIN REFUSED: ${pinRes.error}`);
-        return 1;
-      } else if (pinRes.status === 'noop') {
-        logger.debug?.(`  [~] auto-pin: v${pinVersion} already pinned with matching sha`);
-      } else {
-        logger.debug?.(`  [~] auto-pin skipped: ${pinRes.reason}`);
-      }
-    }
+    const pinRes = writeShaSidecarAndAutoPin({
+      outputPath: options.outputPath,
+      inputPath: options.inputPath,
+      patchedCode, outputSha256, noSidecar, patchOptions, logger,
+    });
+    if (!pinRes.ok) return 1;
   }
 
-  // Bun-SEA embedded runtime deps: the extractor writes embedded-manifest.json
-  // and an embedded/ dir (native .node addons + JS wrappers) next to the
-  // EXTRACTED cli.js. The patched bundle lives elsewhere (releases/<ver>/), so
-  // copy those artifacts next to the output so (a) the esm-compat require shim
-  // can resolve `require("/$bunfs/root/<x>")` from ./embedded/ and (b) its
-  // loud-on-miss path can consult the manifest. Best-effort: older extractions
-  // (pre-manifest) simply have nothing to copy, which is fine.
-  try {
-    const inDir = path.dirname(options.inputPath);
-    const outDir = path.dirname(options.outputPath);
-    const srcManifest = path.join(inDir, 'embedded-manifest.json');
-    if (path.resolve(inDir) !== path.resolve(outDir) && fs.existsSync(srcManifest)) {
-      fs.copyFileSync(srcManifest, path.join(outDir, 'embedded-manifest.json'));
-      const srcEmbedded = path.join(inDir, 'embedded');
-      if (fs.existsSync(srcEmbedded)) {
-        fs.cpSync(srcEmbedded, path.join(outDir, 'embedded'), { recursive: true });
-      }
-      logger.log(`  [+] Embedded SEA modules + manifest copied next to bundle (${outDir})`);
-    }
-  } catch (err) {
-    logger.warn(`  [!] Could not copy embedded SEA modules: ${err.message}`);
-  }
+  copyEmbeddedSea({ inputPath: options.inputPath, outputPath: options.outputPath, logger });
+  writeCapGateSentinel({ outputPath: options.outputPath, capabilitiesGateBypassed, logger });
 
-  // S1: persist a capability-gate-bypass sentinel next to the output bundle.
-  // The make step (scripts/mk/cli.mk) reads this to set the manifest's
-  // `capabilitiesGateBypassed` field, so a bundle built with the gate waved
-  // through stays traceable after the fact. We always write the sentinel (true
-  // OR false) so a stale marker from a prior build can't leak into this one.
-  try {
-    const sentinelPath = options.outputPath + '.capgate.json';
-    fs.writeFileSync(
-      sentinelPath,
-      JSON.stringify({ capabilitiesGateBypassed }) + '\n',
-      'utf8',
-    );
-  } catch (err) {
-    logger.warn(`  [!] Could not write capability-gate sentinel: ${err.message}`);
-  }
+  emitOverlayArtifact({ patches, patchesToApply, outputPath: options.outputPath, patchOptions, logger });
+  emitAgentsArtifacts({ patches, patchesToApply, outputPath: options.outputPath, logger });
 
-  // Emit the overlay sibling file (Magisk-style overlay-don't-mutate). The
-  // core/overlay_loader patch injects a single require() into the bundle that
-  // pulls this file in at startup. Each enabled patch that declared
-  // `overlay: { register, code }` contributes one __ccpProvide() block.
-  try {
-    const dev = patchOptions.dev === true;
-    if (dev) {
-      logger.log(`  [DEV MODE] shims hot-reload from ./ccpatch-overlay-shims/`);
-    }
-    const emitted = emitOverlay(patches, patchesToApply, path.dirname(options.outputPath), { dev });
-    if (emitted) {
-      logger.log(`  [+] Overlay file written to: ${emitted.overlayPath}`);
-      if (dev && emitted.shimDir) {
-        logger.log(`  [+] Hot-reload shims (${emitted.shimPaths.length}) written under: ${emitted.shimDir}`);
-      }
-    }
-  } catch (err) {
-    logger.warn(`  [!] Could not write overlay file: ${err.message}`);
-  }
-
-  // Emit the agents dir (ccpatch-agents/) for every enabled patch that declared
-  // `agentDir: { name, code }`. The core/overlay_loader patch injects a boot
-  // block that require()s each *.mjs there (integrity-gated via .sha256). When
-  // any agent ships, also copy the ADK runtime next to the bundle so those
-  // entries can `require('../ccpatch-adk/index.mjs')` without an install-layout
-  // assumption.
-  try {
-    const outputDir = path.dirname(options.outputPath);
-    const agentEntries = collectAgentDirPatches(patches, patchesToApply);
-    if (agentEntries.length > 0) {
-      const adkFiles = emitAdkRuntime(outputDir);
-      if (adkFiles.length > 0) {
-        logger.log(`  [+] ADK runtime (${adkFiles.length} files) copied to: ${path.join(outputDir, 'ccpatch-adk')}`);
-      }
-      const written = emitAgentsDir(agentEntries, outputDir);
-      if (written.length > 0) {
-        logger.log(`  [+] Agents dir (${written.length}) written under: ${path.join(outputDir, 'ccpatch-agents')}`);
-      }
-    }
-  } catch (err) {
-    logger.warn(`  [!] Could not write agents dir: ${err.message}`);
-  }
-
-  // Write the reverse-diff sidecar so `ccpatch revert` can restore the input.
-  // captureReverse is undefined unless --emit-revert was set (and sidecars are
-  // not suppressed), so this whole block is skipped on the fast/default path.
+  // Reverse-diff sidecar (`ccpatch revert` input) — no-op on the fast/default
+  // path (captureReverse undefined unless --emit-revert without --no-sidecar).
   const sidecarStartedAt = Date.now();
-  if (Array.isArray(captureReverse) && captureReverse.length > 0) {
-    const sidecar = {
-      version: REVERT_SIDECAR_VERSION,
-      timestamp: new Date().toISOString(),
-      ccVersion: patchOptions.version ?? null,
-      // Perf#4: the first captured record's preCode is the bundle state the
-      // first changing patch saw — byte-identical to originalCode (any earlier
-      // patches were no-change), so its preSha256 already equals
-      // sha256(originalCode). Reuse it instead of re-hashing the ~15MB input.
-      inputSha256: captureReverse[0]?.preSha256 ?? sha256(originalCode),
-      outputSha256,
-      patches: captureReverse,
-    };
-    const sidecarPath = sidecarPathFor(options.outputPath);
-    try {
-      fs.writeFileSync(sidecarPath, JSON.stringify(sidecar, null, 2), 'utf8');
-      logger.log(`  [+] Reverse-diff sidecar written to: ${sidecarPath}`);
-    } catch (err) {
-      logger.warn(`  [!] Could not write reverse-diff sidecar: ${err.message}`);
-    }
-  }
+  writeRevertSidecar({
+    captureReverse, outputPath: options.outputPath,
+    originalCode, outputSha256, patchOptions, logger,
+  });
   phaseMs.sidecarWrite = Date.now() - sidecarStartedAt;
 
-  if (options.preloadPath) {
-    const preload = buildPreload(patches, patchesToApply);
-    if (preload) {
-      fs.writeFileSync(options.preloadPath, preload, 'utf8');
-      logger.log(`  [+] Preload script written to: ${options.preloadPath}`);
-      logger.log(`      Usage: node --require ${options.preloadPath} ${options.outputPath}`);
-    } else {
-      logger.log(`  [~] --preload: no preload-capable patches in current selection`);
-    }
-  }
+  writePreloadArtifact({
+    patches, patchesToApply,
+    preloadPath: options.preloadPath, outputPath: options.outputPath, logger,
+  });
 
   // ── WS6 Item 8: surface native grow-path platform degradation ────────────
   // Two sources, consumed best-effort:
