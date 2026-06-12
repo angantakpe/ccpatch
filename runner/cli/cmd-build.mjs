@@ -467,6 +467,29 @@ export async function runBuild(ctx) {
     }
   }
 
+  // Bun-SEA embedded runtime deps: the extractor writes embedded-manifest.json
+  // and an embedded/ dir (native .node addons + JS wrappers) next to the
+  // EXTRACTED cli.js. The patched bundle lives elsewhere (releases/<ver>/), so
+  // copy those artifacts next to the output so (a) the esm-compat require shim
+  // can resolve `require("/$bunfs/root/<x>")` from ./embedded/ and (b) its
+  // loud-on-miss path can consult the manifest. Best-effort: older extractions
+  // (pre-manifest) simply have nothing to copy, which is fine.
+  try {
+    const inDir = path.dirname(options.inputPath);
+    const outDir = path.dirname(options.outputPath);
+    const srcManifest = path.join(inDir, 'embedded-manifest.json');
+    if (path.resolve(inDir) !== path.resolve(outDir) && fs.existsSync(srcManifest)) {
+      fs.copyFileSync(srcManifest, path.join(outDir, 'embedded-manifest.json'));
+      const srcEmbedded = path.join(inDir, 'embedded');
+      if (fs.existsSync(srcEmbedded)) {
+        fs.cpSync(srcEmbedded, path.join(outDir, 'embedded'), { recursive: true });
+      }
+      logger.log(`  [+] Embedded SEA modules + manifest copied next to bundle (${outDir})`);
+    }
+  } catch (err) {
+    logger.warn(`  [!] Could not copy embedded SEA modules: ${err.message}`);
+  }
+
   // S1: persist a capability-gate-bypass sentinel next to the output bundle.
   // The make step (scripts/mk/cli.mk) reads this to set the manifest's
   // `capabilitiesGateBypassed` field, so a bundle built with the gate waved
