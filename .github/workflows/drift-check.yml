@@ -258,3 +258,158 @@ jobs:
               });
               core.info(`Opened new issue #${created.data.number}`);
             }
+
+  # ── Refmap auto-PR ──────────────────────────────────────────────────────────
+  # Detection of a missing refmap was automated (the drift job fails on it);
+  # the REPAIR was a human remembering `make refmap`. This job closes that
+  # loop: when @latest has no committed refmaps/<ver>.json, it generates the
+  # refmap + the bun-api usage baseline, runs doctor and a --strict build
+  # against the new bundle, and opens a PR carrying the artifacts plus both
+  # reports. Review stays human — refmaps are trust-bearing — but the latency
+  # drops from "whenever someone notices" to the next PR-queue pass.
+  #
+  # NOTE: PRs created with the default GITHUB_TOKEN do not trigger `on:
+  # pull_request` workflows (GitHub recursion guard). CI runs on the PR after
+  # a maintainer closes/reopens it (or pushes to the branch) — or switch
+  # REFMAP_PR_TOKEN to a fine-grained PAT to get CI on creation.
+  refmap-pr:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies (frozen lockfile)
+        run: bun install --frozen-lockfile
+
+      - name: Install latest Claude Code CLI
+        run: |
+          npm i -g @anthropic-ai/claude-code@latest
+          CC_VERSION="$(npm ls -g @anthropic-ai/claude-code --depth=0 --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);process.stdout.write(j.dependencies["@anthropic-ai/claude-code"].version)})')"
+          echo "CC_VERSION=${CC_VERSION}" >> "$GITHUB_ENV"
+          echo "Installed claude-code version: ${CC_VERSION}"
+
+      - name: Skip when the refmap is already committed
+        id: presence
+        run: |
+          if [ -f "refmaps/${CC_VERSION}.json" ]; then
+            echo "refmaps/${CC_VERSION}.json already exists — nothing to do."
+            echo "missing=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "refmaps/${CC_VERSION}.json is MISSING — generating a PR."
+            echo "missing=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip when a refmap PR is already open
+        id: existing
+        if: steps.presence.outputs.missing == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          OPEN="$(gh pr list --head "ci/refmap-v${CC_VERSION}" --state open --json number --jq length)"
+          if [ "${OPEN}" != "0" ]; then
+            echo "PR from ci/refmap-v${CC_VERSION} already open — not duplicating."
+            echo "open=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "open=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Locate installed claude-code bundle
+        if: steps.presence.outputs.missing == 'true' && steps.existing.outputs.open == 'false'
+        run: |
+          CC_BIN="$(npm root -g)/@anthropic-ai/claude-code"
+          if [ -f "${CC_BIN}/cli.js" ]; then
+            echo "CC_BUNDLE=${CC_BIN}/cli.js" >> "$GITHUB_ENV"
+          elif [ -f "${CC_BIN}/cli.mjs" ]; then
+            echo "CC_BUNDLE=${CC_BIN}/cli.mjs" >> "$GITHUB_ENV"
+          else
+            echo "cli.js/cli.mjs not found under ${CC_BIN}; extracting from native binary"
+            make extract-from-binary VERSION="${CC_VERSION}"
+            echo "CC_BUNDLE=storage/archives/claude-code-v${CC_VERSION}/cli.v${CC_VERSION}.cjs" >> "$GITHUB_ENV"
+          fi
+
+      - name: Generate refmap + bun-api usage baseline
+        if: steps.presence.outputs.missing == 'true' && steps.existing.outputs.open == 'false'
+        run: |
+          make refmap VERSION="${CC_VERSION}" BUNDLE="${CC_BUNDLE}"
+          node scripts/scan-bun-api.mjs "${CC_BUNDLE}" --version "${CC_VERSION}" --write-baseline \
+            | tee /tmp/bun-api-report.txt
+
+      - name: Doctor + strict build against the new bundle (reported, not blocking)
+        if: steps.presence.outputs.missing == 'true' && steps.existing.outputs.open == 'false'
+        run: |
+          set +e
+          node bin/patch-cli.mjs doctor "${CC_BUNDLE}" --version "${CC_VERSION}" > /tmp/doctor-report.txt 2>&1
+          echo "DOCTOR_EXIT=$?" >> "$GITHUB_ENV"
+          node bin/patch-cli.mjs "${CC_BUNDLE}" /tmp/cli.refmap.mjs \
+            --version "${CC_VERSION}" --strict --allow-capabilities=network,env \
+            > /tmp/strict-build.txt 2>&1
+          echo "STRICT_EXIT=$?" >> "$GITHUB_ENV"
+          tail -40 /tmp/doctor-report.txt
+          tail -20 /tmp/strict-build.txt
+
+      - name: Open the refmap PR
+        if: steps.presence.outputs.missing == 'true' && steps.existing.outputs.open == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BRANCH="ci/refmap-v${CC_VERSION}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "${BRANCH}"
+          git add "refmaps/${CC_VERSION}.json" "refmaps/bun-api-usage.v${CC_VERSION}.json"
+          git commit -m "ci(refmaps): add refmap + bun-api baseline for v${CC_VERSION}"
+          git push -u origin "${BRANCH}" --force
+          {
+            echo "Nightly drift-check found no committed refmap for upstream \`v${CC_VERSION}\`."
+            echo ""
+            echo "Generated by \`.github/workflows/drift-check.yml\` (refmap-pr job):"
+            echo "- \`refmaps/${CC_VERSION}.json\` — \`make refmap\` output"
+            echo "- \`refmaps/bun-api-usage.v${CC_VERSION}.json\` — degraded-shim drift baseline"
+            echo ""
+            echo "**Doctor exit: ${DOCTOR_EXIT} · Strict build exit: ${STRICT_EXIT}** (0 = clean)"
+            echo ""
+            echo "<details><summary>bun-api scan</summary>"
+            echo ""
+            echo '```'
+            cat /tmp/bun-api-report.txt
+            echo '```'
+            echo "</details>"
+            echo ""
+            echo "<details><summary>doctor report (tail)</summary>"
+            echo ""
+            echo '```'
+            tail -60 /tmp/doctor-report.txt
+            echo '```'
+            echo "</details>"
+            echo ""
+            echo "<details><summary>strict build (tail)</summary>"
+            echo ""
+            echo '```'
+            tail -40 /tmp/strict-build.txt
+            echo '```'
+            echo "</details>"
+            echo ""
+            echo "Review checklist (refmaps are trust-bearing — do not rubber-stamp):"
+            echo "- [ ] doctor is clean (0 missing / 0 drift) or the drift is understood"
+            echo "- [ ] bun-api scan shows no DEGRADED-SHIM DRIFT, or the shim was verified for the new call site(s)"
+            echo "- [ ] strict build (incl. runtime coverage gate) passed"
+          } > /tmp/pr-body.md
+          gh pr create \
+            --title "ci(refmaps): v${CC_VERSION} refmap + bun-api baseline (auto-generated)" \
+            --body-file /tmp/pr-body.md \
+            --base main \
+            --head "${BRANCH}"
