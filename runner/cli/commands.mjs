@@ -292,13 +292,15 @@ export function buildCommandTable(impl) {
       parse(rest) {
         let profile = null;
         let json = false;
+        let noRequired = false;
         const requestedPatches = [];
         for (let i = 0; i < rest.length; i++) {
           if (rest[i] === '--patch' && rest[i + 1]) requestedPatches.push(rest[++i]);
           else if ((rest[i] === '--profile' || rest[i] === '-p') && rest[i + 1]) profile = rest[++i];
           else if (rest[i] === '--json') json = true;
+          else if (rest[i] === '--no-required') noRequired = true;
         }
-        return { explain: true, requestedPatches, profile, json };
+        return { explain: true, requestedPatches, profile, json, noRequired };
       },
       run: (ctx) => runExplain(ctx),
     },
