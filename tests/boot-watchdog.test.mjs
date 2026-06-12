@@ -30,8 +30,14 @@ function runChild(driver, env = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'ccp-wd-'));
   const script = join(dir, 'driver.cjs');
   writeFileSync(script, SHIM + '\n' + driver);
+  // The watchdog hint reports the live CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN
+  // value, and the suite itself may run inside a Claude Code session that
+  // exports it — strip it from the inherited env so the "<unset>" assertion
+  // holds everywhere; tests that care set it explicitly via `env`.
+  const baseEnv = { ...process.env, CCPATCH_DIAG_DIR: dir };
+  delete baseEnv.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN;
   const res = spawnSync(process.execPath, [script], {
-    env: { ...process.env, CCPATCH_DIAG_DIR: dir, ...env },
+    env: { ...baseEnv, ...env },
     encoding: 'utf8',
     timeout: 20_000,
   });
