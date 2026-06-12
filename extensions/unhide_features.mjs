@@ -64,11 +64,20 @@ export default {
       // appears in an `isEnabled(){return …(…,!1,<ref>)}` method later in the
       // bundle, but findFunctionByLiteral resolves the FIRST hit — the standalone
       // getter — which is exactly the one we want.
-      const pushRes = forceFeatureFlag(code, 'tengu_kairos_push_notifications', { allowMissing: true });
-      if (pushRes.changed) {
-        code = pushRes.code;
-        ccpLog('  [unhide_features] push notifications enabled (' + pushRes.fnName + ')');
-        patched++;
+      // Idempotency (rule 2): only attempt the rewrite while the GATED getter
+      // form ( …("tengu_kairos_push_notifications",!1) — the same form
+      // verify.absent asserts is gone) still exists. After the first apply the
+      // getter body is `return !0` and no longer carries the literal, so a
+      // re-apply would resolve the flag literal to its NEXT occurrence — an
+      // unrelated enclosing function — and destroy that function's body
+      // (observed: a 322KB function flattened to `return !0` on v2.1.175).
+      if (code.includes('"tengu_kairos_push_notifications",!1)')) {
+        const pushRes = forceFeatureFlag(code, 'tengu_kairos_push_notifications', { allowMissing: true });
+        if (pushRes.changed) {
+          code = pushRes.code;
+          ccpLog('  [unhide_features] push notifications enabled (' + pushRes.fnName + ')');
+          patched++;
+        }
       }
 
       // H-4: Unlock tengu_streaming_tool_execution2 direct flag.
@@ -88,7 +97,12 @@ export default {
       }
 
       if (patched === 0) {
-        console.warn('  [!] unhide_features: no matching patterns found --- CLI may have been updated');
+        if (code.includes('isHidden(){return!1}')) {
+          // Already-applied input (doctor probe / composed profile re-build).
+          ccpLog('  [unhide_features] already applied — no-op');
+        } else {
+          console.warn('  [!] unhide_features: no matching patterns found --- CLI may have been updated');
+        }
       } else {
         ccpLog('  [unhide_features] total: ' + patched + ' features exposed');
       }

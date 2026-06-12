@@ -14,6 +14,9 @@ export default {
   anchor: { literal: '(function(exports, require, module, __filename, __dirname)' },
 
   apply: (code) => {
+    // Idempotency (rule 2): sentinel == verify.present marker. Re-apply on an
+    // already-patched bundle is a byte-identical no-op.
+    if (code.includes('__ccpNoiseMuted')) return code;
     // Wrap child_process.spawnSync globally so hook stderr is filtered before
     // it reaches the TUI. Version-resilient: no minified-name dependencies.
     const patch = `

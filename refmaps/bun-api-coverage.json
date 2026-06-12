@@ -14,6 +14,7 @@
     "gc": { "status": "degraded", "caveat": "no-op; does not trigger Node GC" },
     "generateHeapSnapshot": { "status": "degraded", "caveat": "no-op; returns an empty buffer instead of a v8 snapshot" },
     "semver": { "status": "degraded", "caveat": "full only when the semver package resolves; otherwise naive numeric compare and satisfies() always false" },
+    "deepEquals": { "status": "degraded", "caveat": "pure-JS structural compare (cycle-safe; Date/RegExp/Map/Set/typed arrays) — symbol keys and exotic class semantics not compared; equivalent for the bundle's plain-data call site" },
     "JSONL": { "status": "degraded", "caveat": "undefined — only safe behind optional chaining (Bun.JSONL?.parseChunk)" },
     "YAML": { "status": "degraded", "caveat": "js-yaml when resolvable; otherwise a JSON-parse fallback that cannot read real YAML" },
     "embeddedFiles": { "status": "degraded", "caveat": "always an empty array; embedded-asset code paths see 'no embedded files'" },

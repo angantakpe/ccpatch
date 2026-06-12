@@ -11,6 +11,9 @@ export default {
     capabilities: ["prompt","tools"],
     verify: { present: '__ccpRegisterSlashCommand', count: { present: 2 } },
     apply: (code) => {
+      // Idempotency (rule 2): sentinel == verify.present marker. Re-apply on an
+      // already-patched bundle is a byte-identical no-op.
+      if (code.includes('__ccpRegisterSlashCommand')) return code;
       const hook = `
 // ══════════════════════════════════════════════════════════════════════════
 // [PATCH] Custom Commands — registry + generic commands

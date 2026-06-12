@@ -56,6 +56,19 @@ describe('patch-kinds: prefix', () => {
     };
     assert.equal(compileKind(patch)(code), code);
   });
+
+  it('re-apply is a byte-identical no-op (rule 2)', () => {
+    const code = `function foo(){let x="STABLE_LITERAL";return x}`;
+    const patch = {
+      kind: 'prefix',
+      target: { function: { literal: 'STABLE_LITERAL' } },
+      code: 'console.log("entered");',
+    };
+    const apply = compileKind(patch);
+    const once = apply(code);
+    assert.notEqual(once, code);
+    assert.equal(apply(once), once);
+  });
 });
 
 describe('patch-kinds: postfix', () => {
@@ -105,6 +118,19 @@ describe('patch-kinds: postfix', () => {
 
   it('rewriteArrowExpressionBody returns null for block-body arrows', () => {
     assert.equal(rewriteArrowExpressionBody(`x => { return x }`, 'log()'), null);
+  });
+
+  it('re-apply is a byte-identical no-op (rule 2)', () => {
+    const code = `function foo(){let x="LIT";if(x)return 1;return 2}`;
+    const patch = {
+      kind: 'postfix',
+      target: { function: { literal: 'LIT' } },
+      code: 'if(__r===1)__r=42',
+    };
+    const apply = compileKind(patch);
+    const once = apply(code);
+    assert.notEqual(once, code);
+    assert.equal(apply(once), once);
   });
 });
 

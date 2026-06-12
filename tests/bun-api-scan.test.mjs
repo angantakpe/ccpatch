@@ -153,7 +153,7 @@ describe('parseShimKeys (polyfill payload key parser)', () => {
 
   it('parses the real committed payload and finds the known shim keys', () => {
     const keys = readShimKeys(PAYLOAD_PATH);
-    for (const expected of ['spawn', 'Terminal', 'stdin', 'stringWidth', 'hash', 'YAML', 'listen']) {
+    for (const expected of ['spawn', 'Terminal', 'stdin', 'stringWidth', 'hash', 'YAML', 'listen', 'deepEquals']) {
       assert.ok(keys.includes(expected), `expected real payload to shim ${expected}`);
     }
     // Sanity floor: the real shim object is substantial.

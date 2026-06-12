@@ -221,6 +221,9 @@ export function compileKind(patch) {
     return function apply(code /*, opts */) {
       const loc = locateTarget(code, patch.target);
       if (!loc) return code;
+      // Idempotency (rule 2): the exact snippet already sits inside the target
+      // function — re-apply on patched output is a byte-identical no-op.
+      if (code.slice(loc.start, loc.end).includes(patch.code)) return code;
       const openBrace = code.indexOf('{', loc.start);
       if (openBrace === -1 || openBrace >= loc.end) return code;
       return code.slice(0, openBrace + 1) + patch.code + code.slice(openBrace + 1);
@@ -232,6 +235,9 @@ export function compileKind(patch) {
       const loc = locateTarget(code, patch.target);
       if (!loc) return code;
       const fnText = code.slice(loc.start, loc.end);
+      // Idempotency (rule 2): returns are already wrapped with this snippet —
+      // re-applying would nest the postfix wrapper a second time.
+      if (fnText.includes(patch.code)) return code;
       const rewritten = rewriteReturns(fnText, patch.code, { code, start: loc.start, end: loc.end });
       if (rewritten === fnText) return code;
       return code.slice(0, loc.start) + rewritten + code.slice(loc.end);

@@ -13,6 +13,9 @@ export default {
   allowOverlapWith: ['custom_commands', 'slash_dispatch'],
   dependsOn: ['fetch_interceptor'],
   apply: (code) => {
+    // Idempotency (rule 2): sentinel == verify.present marker. Re-apply on an
+    // already-patched bundle is a byte-identical no-op.
+    if (code.includes("'context_budget_warn'")) return code;
     const hook = `
 // ══════════════════════════════════════════════════════════════════════════
 // [PATCH] Context Budget Warning
