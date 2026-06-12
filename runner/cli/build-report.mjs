@@ -193,14 +193,32 @@ export function renderTextSummary({ ok, durationMs, report, outputPath, drySugge
       ).concat(cachedParts);
       lines.push(`Harness breakdown: ${parts.join(' · ')}`);
       const measuredTotal = measured.reduce((sum, [, ms]) => sum + ms, 0);
-      // Remainder = overhead the measured buckets don't explain (bundle/sidecar
-      // write, apply orchestration, doctor pre-pass, GC). Don't claim it.
-      const unattributedMs = Math.max(0, overheadMs - measuredTotal);
+      // Decompose the remainder instead of lumping it into one "unattributed"
+      // bucket. The harness buckets all run INSIDE the apply loop, so:
+      //   apply-loop orchestration = phases.apply − patch transforms − harness
+      //     (string splicing of the 16MB bundle, status classification, drift
+      //     probes, logging)
+      //   build phases = every phase timer EXCEPT apply (gates, cache-key
+      //     hashing, bundle/sidecar/artifact writes, runtime coverage)
+      //   unattributed = what's left (process residue, GC) — keep it honest,
+      //     and keep it visibly near zero.
+      const applyPhaseMs = Number(phases?.apply) || 0;
+      const otherPhasesMs = phases
+        ? Object.entries(phases)
+            .filter(([k, ms]) => k !== 'apply' && Number.isFinite(Number(ms)))
+            .reduce((sum, [, ms]) => sum + Number(ms), 0)
+        : 0;
+      const applyLoopMs = applyPhaseMs > 0
+        ? Math.max(0, applyPhaseMs - patchMsTotal - measuredTotal)
+        : 0;
+      const unattributedMs = Math.max(0, overheadMs - measuredTotal - applyLoopMs - otherPhasesMs);
+      const decomp = [`measured ${(measuredTotal / 1000).toFixed(1)}s`];
+      if (applyPhaseMs > 0) decomp.push(`apply-loop orchestration ${(applyLoopMs / 1000).toFixed(1)}s`);
+      if (otherPhasesMs > 0) decomp.push(`build phases ${(otherPhasesMs / 1000).toFixed(1)}s`);
+      decomp.push(`unattributed ${(unattributedMs / 1000).toFixed(1)}s`);
       lines.push(
         `Harness overhead: ${(overheadMs / 1000).toFixed(1)}s total ` +
-        `(measured ${(measuredTotal / 1000).toFixed(1)}s, ` +
-        `unattributed ${(unattributedMs / 1000).toFixed(1)}s; ` +
-        `patches summed ${(patchMsTotal / 1000).toFixed(1)}s)`
+        `(${decomp.join(', ')}; patches summed ${(patchMsTotal / 1000).toFixed(1)}s)`
       );
     } else {
       // No measured buckets (older runner / no harness work): report the raw
@@ -220,6 +238,10 @@ export function renderTextSummary({ ok, durationMs, report, outputPath, drySugge
       apply: 'apply patches',
       bundleWrite: 'bundle write',
       sidecarWrite: 'sidecar write',
+      gates: 'pre-build gates',
+      cacheSetup: 'cache-key hashing',
+      artifacts: 'artifact emission',
+      runtimeCoverage: 'runtime coverage',
     };
     const entries = Object.entries(phases)
       .filter(([, ms]) => Number.isFinite(Number(ms)))
