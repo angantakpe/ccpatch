@@ -78,7 +78,8 @@
   },
   "optionalDependencies": {
     "ink": "^6.8.0",
-    "react": "^19.2.5"
+    "react": "^19.2.5",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

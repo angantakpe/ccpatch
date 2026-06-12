@@ -19,6 +19,7 @@
       "optionalDependencies": {
         "ink": "^6.8.0",
         "react": "^19.2.5",
+        "ws": "^8.18.0",
       },
     },
     "packages/adk": {
