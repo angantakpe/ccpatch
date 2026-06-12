@@ -76,6 +76,7 @@ export async function runBuild(ctx) {
     requested: options.requestedPatches,
     profile: options.profile,
     yamlPath,
+    noRequired: po.noRequired === true,
   });
   let patchesToApply = resolution.selected;
 

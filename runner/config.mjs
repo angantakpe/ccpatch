@@ -216,6 +216,20 @@ export function readProfiles(yamlPath) {
 }
 
 /**
+ * One-line LOUD warning emitted whenever a selection ends up WITHOUT one or
+ * more `required: true` infra patches (bare profile, --no-required). Required
+ * infra carries the hook/subscriber plumbing (contracts bus, fetch
+ * interceptor, overlay loader): patches that publish/subscribe through it
+ * still APPLY cleanly but never fire at runtime — a silent no-op that has
+ * burned hours of forensics before. Keep it to a single line so it survives
+ * log greps and CI tails.
+ */
+function loudRequiredSkipNotice(source, names) {
+  return `  ⚠⚠ [${source}] REQUIRED INFRA SKIPPED: ${names.join(', ')} — ` +
+    `subscriber/hook-based patches will silently no-op (bisect floor; see docs/BISECTING.md)`;
+}
+
+/**
  * U2: single source of truth for "which patches end up selected, and why".
  *
  * Config has several overlapping selection mechanisms whose precedence used to
@@ -235,6 +249,9 @@ export function readProfiles(yamlPath) {
  * @param {string[]} args.requested              options.requestedPatches (--patch values)
  * @param {string|null} args.profile             --profile value (null when unset)
  * @param {string} args.yamlPath                 absolute path to ccpatch.yml
+ * @param {boolean} [args.noRequired]            --no-required: skip the required-infra
+ *                                               auto-include for explicit --patch lists
+ *                                               (bisection floor; emits a LOUD notice)
  * @returns {{
  *   selected: string[],
  *   reasons: Record<string, string>,
@@ -246,7 +263,7 @@ export function readProfiles(yamlPath) {
  *   runBuild historically printed (so it can emit them verbatim). `yamlMode`
  *   indicates whether ccpatch.yml flags drove selection.
  */
-export function resolveEffectivePatches({ patches, requested, profile, yamlPath }) {
+export function resolveEffectivePatches({ patches, requested, profile, yamlPath, noRequired = false }) {
   const allNames = Object.keys(patches);
   const reasons = {};
   const notices = [];
@@ -272,6 +289,22 @@ export function resolveEffectivePatches({ patches, requested, profile, yamlPath 
         reasons[name] = enabledSet.has(name)
           ? `in: profile=${profile}`
           : `out: not in profile ${profile}`;
+      }
+      // Profile lists are EXACT — profile mode never auto-includes required
+      // infra (that only happens for explicit --patch lists below). When a
+      // profile deliberately omits `required: true` patches (the `bare`
+      // bisection floor), say so LOUDLY: the build will succeed but every
+      // patch that publishes/subscribes through the skipped infra silently
+      // no-ops at runtime. All shipped profiles (minimal/standard/native/
+      // power/…) contain the full required set, so this notice is silent for
+      // them and existing output stays byte-identical. (Checked here, BEFORE
+      // the --profile=native post-filter, so native's intentional
+      // esm_compat/bun_shim exclusion doesn't trip it.)
+      const missingRequired = allNames.filter(
+        name => patches[name]?.required === true && !enabledSet.has(name)
+      );
+      if (missingRequired.length > 0) {
+        notices.push(loudRequiredSkipNotice(`profile=${profile}`, missingRequired));
       }
       effectiveRequested = enabled;
     } else {
@@ -312,19 +345,36 @@ export function resolveEffectivePatches({ patches, requested, profile, yamlPath 
 
   // Explicit list (not yaml-mode, not "all"): auto-include `required: true`
   // patches so picking a single extension doesn't drop infra patches.
+  // --no-required suppresses the auto-include so a bisection can build an
+  // EXACT --patch list (the floor without it is ~8 patches, which makes bugs
+  // in the required infra itself unbisectable) — with a LOUD one-line notice
+  // naming every required patch being left out.
   if (!isYamlMode && !effectiveRequested.includes('all')) {
     const selectedSet = new Set(patchesToApply);
-    const autoAdded = [];
-    for (const [name, patch] of Object.entries(patches)) {
-      if (patch && patch.required === true && !selectedSet.has(name)) {
-        selectedSet.add(name);
-        autoAdded.push(name);
-        reasons[name] = 'in: required infra';
+    if (noRequired) {
+      const skipped = [];
+      for (const [name, patch] of Object.entries(patches)) {
+        if (patch && patch.required === true && !selectedSet.has(name)) {
+          skipped.push(name);
+          reasons[name] = 'out: required infra skipped (--no-required)';
+        }
       }
-    }
-    if (autoAdded.length > 0) {
-      notices.push(`  [config] auto-including ${autoAdded.length} required patch(es): ${autoAdded.join(', ')}`);
-      patchesToApply = [...selectedSet];
+      if (skipped.length > 0) {
+        notices.push(loudRequiredSkipNotice('--no-required', skipped));
+      }
+    } else {
+      const autoAdded = [];
+      for (const [name, patch] of Object.entries(patches)) {
+        if (patch && patch.required === true && !selectedSet.has(name)) {
+          selectedSet.add(name);
+          autoAdded.push(name);
+          reasons[name] = 'in: required infra';
+        }
+      }
+      if (autoAdded.length > 0) {
+        notices.push(`  [config] auto-including ${autoAdded.length} required patch(es): ${autoAdded.join(', ')}`);
+        patchesToApply = [...selectedSet];
+      }
     }
   }
 

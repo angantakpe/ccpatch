@@ -29,7 +29,11 @@ export const HELP = Object.freeze({
     '\n' +
     'Options:\n' +
     '  --patch <name[,name…]>   Apply just this patch (repeatable; comma-separated list ok). "all" = every patch.\n' +
-    '  --profile <name>         Profile from ccpatch.yml: minimal | standard | power | native\n' +
+    '                           Required infra patches are auto-included unless --no-required is set.\n' +
+    '  --profile <name>         Profile from ccpatch.yml: bare | minimal | standard | power | native\n' +
+    '  --no-required            With an explicit --patch list: do NOT auto-include required:true\n' +
+    '                           infra patches (bisection floor — prints a LOUD warning; skipped\n' +
+    '                           infra means subscriber-based patches silently no-op). See docs/BISECTING.md.\n' +
     '  --preload <path.mjs>     Emit a Node --require preload helper to this path\n' +
     '  --strict                 Fail on weak verify, anchor drift, or unacked caps\n' +
     '  --dry-run                Print the unified diff + shadow report, don\'t write\n' +
@@ -51,7 +55,9 @@ export const HELP = Object.freeze({
     '  --help                   Show this message\n' +
     '\n' +
     'Profiles: --profile=native auto-excludes esm_compat + bun_shim so the\n' +
-    'output can be repacked into a Bun single-executable.',
+    'output can be repacked into a Bun single-executable. --profile=bare is the\n' +
+    'bisection floor (react_singleton + esm_compat + bun_shim only — boots under\n' +
+    'Node but skips ALL required infra; see docs/BISECTING.md).',
 
   capabilities:
     'Usage: ccpatch capabilities [--profile <name>] [--json]\n' +
@@ -101,7 +107,7 @@ export const HELP = Object.freeze({
     '                    plus a copy-pasteable patch stub for each drifted patch',
 
   explain:
-    'Usage: ccpatch explain [--profile <name>] [--patch <name>] [--json]\n' +
+    'Usage: ccpatch explain [--profile <name>] [--patch <name>] [--no-required] [--json]\n' +
     '\n' +
     'Print the FINAL resolved patch set and, for every known patch, WHY it is\n' +
     'in or out (e.g. "in: profile=standard", "in: required infra",\n' +
@@ -112,6 +118,8 @@ export const HELP = Object.freeze({
     'Options:\n' +
     '  --profile <name>  Resolve as if building with this profile from ccpatch.yml\n' +
     '  --patch <name>    Resolve an explicit --patch list (repeatable, bypasses YAML)\n' +
+    '  --no-required     With --patch: skip the required-infra auto-include (mirrors\n' +
+    '                    the build flag; see docs/BISECTING.md)\n' +
     '  --json            Emit the resolution as JSON instead of a table',
 
   'fallback-capture':
@@ -190,7 +198,7 @@ export const HELP = Object.freeze({
  */
 export const USAGE =
   'Usage:\n' +
-  '  node patch-cli.mjs <input.js> <output.js> [--patch <name>] [--profile <name>] [--preload <preload.mjs>] [--strict] [--paranoid] [--allow-unverified] [--dry-run] [--write-on-clean] [--allow-capabilities <list>] [--allow-unacked] [--dev]\n' +
+  '  node patch-cli.mjs <input.js> <output.js> [--patch <name>] [--no-required] [--profile <name>] [--preload <preload.mjs>] [--strict] [--paranoid] [--allow-unverified] [--dry-run] [--write-on-clean] [--allow-capabilities <list>] [--allow-unacked] [--dev]\n' +
   '  node patch-cli.mjs watch <input.js> <output.js> [--patch <name>] [--profile <name>] [--debounce <ms>]\n' +
   '  node patch-cli.mjs doctor <input.js> [--profile <name>] [--strict] [--suggest]\n' +
   '  node patch-cli.mjs heal [--write] [--drift <path>] [--anchors <path>]\n' +
@@ -199,7 +207,7 @@ export const USAGE =
   '  node patch-cli.mjs repl <patched.js>\n' +
   '  node patch-cli.mjs versions [--target-version <x.y.z>]\n' +
   '  node patch-cli.mjs capabilities [--profile <name>] [--json]\n' +
-  '  node patch-cli.mjs explain [--profile <name>] [--patch <name>] [--json]\n' +
+  '  node patch-cli.mjs explain [--profile <name>] [--patch <name>] [--no-required] [--json]\n' +
   '  node patch-cli.mjs dissect <cli.js> [--against <other.js>] [--native] [--ownership] [--context <N>] [--json]\n' +
   '  node patch-cli.mjs ack <patch> [--all-caps] [--dry-run]\n' +
   '  node patch-cli.mjs refmap <bundle.js> [--out <path>] [--cc-version X.Y.Z] [--check]\n' +

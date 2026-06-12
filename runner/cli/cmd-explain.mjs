@@ -11,10 +11,10 @@ import path from 'node:path';
 import { resolveEffectivePatches } from '../config.mjs';
 
 /**
- * `ccpatch explain [--profile <name>] [--patch <name>...] [--json]`.
+ * `ccpatch explain [--profile <name>] [--patch <name>...] [--no-required] [--json]`.
  *
  * ctx = { options, patches, logger }. `options` carries `requestedPatches`,
- * `profile`, and `json` from the parser in cli/commands.mjs.
+ * `profile`, `noRequired`, and `json` from the parser in cli/commands.mjs.
  */
 export async function runExplain(ctx) {
   const { options, patches, logger } = ctx;
@@ -25,6 +25,7 @@ export async function runExplain(ctx) {
     requested: options.requestedPatches || [],
     profile: options.profile || null,
     yamlPath,
+    noRequired: options.noRequired === true,
   });
 
   const selectedSet = new Set(selected);
