@@ -92,7 +92,7 @@ These don't change CLI behavior; they expose `__ccp*` globals so other tools can
 
 | Patch | Touches | Reads | Writes / Sends | Default |
 | --- | --- | --- | --- | --- |
-| `expose_tool_dispatch` | tool-format pipeline | live tool registry, MCP clients | exposes `__ccpInvokeTool` etc.; no I/O of its own | off |
+| `expose_tool_dispatch` | tool-format pipeline | live tool registry, MCP clients (socket-adjacent) | exposes `__ccpInvokeTool` etc.; dispatch routes through MCP/fetch-backed tools and can run subprocess-executing tools outside the interactive permission loop (declares `tools, network, exec`) | off |
 | `expose_api_client` | Anthropic SDK client constructor | SDK client | exposes `__ccpApiClient` | off |
 | `expose_submit_input` | React submit callback | prompt input | exposes `__ccpSubmitInput` | off |
 | `expose_agent_tool` | AgentTool definition | live AgentTool | exposes `__ccpAgentTool` | off |
@@ -203,14 +203,37 @@ introspection. But `headless_bridge` accepts *external* requests (gated by the
 radius:
 
 - `expose_tool_dispatch` + bridge → a remote caller who holds the bridge token
-  can invoke **any tool the CLI has** (Bash, Write, Edit, file reads, MCP tools).
-  That is arbitrary command and filesystem execution on the host, as the user
-  running the CLI.
+  can invoke **any tool on the bridge's tool allowlist** (see below). With
+  `CC_BRIDGE_TOOL_ALLOWLIST='*'` that is every tool the CLI has (Bash, Write,
+  Edit, file reads, MCP tools) — arbitrary command and filesystem execution on
+  the host, as the user running the CLI.
 - `expose_api_client` + bridge → a remote caller can drive the Anthropic SDK
   client directly, spending your credits and exfiltrating whatever the client
   can read.
 - `expose_agent_tool` + bridge → a remote caller can spawn sub-agents, which in
   turn have the full tool surface above — recursively.
+
+**Bridge tool dispatch is default-deny (`CC_BRIDGE_TOOL_ALLOWLIST`).** The
+bridge's `dispatch` op is gated by a server-side allowlist, and the default is
+**deny-all**:
+
+- **unset / empty** → every `dispatch` op is rejected. When the variable is
+  unset the bridge prints a one-time loud warning at startup, and each denied
+  dispatch returns an error telling the operator exactly what to set.
+- **`CC_BRIDGE_TOOL_ALLOWLIST='*'`** → allow every exposed tool. This was the
+  old implicit default; it must now be opted into explicitly.
+- **`CC_BRIDGE_TOOL_ALLOWLIST=Read,Grep`** → only the named tools (a `*` entry
+  anywhere in the list means allow-all).
+
+Only `dispatch` is gated. `submit`, `subscribe`, `cancel`, `hello`, and `bye`
+work regardless of the allowlist — so prompt submission and event observation
+keep working on a deny-all bridge, but no remote tool execution is possible
+until the operator names the tools (or `*`). **Breaking change for existing
+bridge deployments:** a bridge that previously dispatched tools with the
+variable unset must now set `CC_BRIDGE_TOOL_ALLOWLIST` (per-tool list
+preferred; `'*'` restores the old behavior). The allowlist narrows the blast
+radius of a leaked token but does NOT change the token's status: with `'*'` or
+a list containing Bash-equivalent tools it remains root-equivalent.
 
 **Permission gate disabled for invoked subagents.** Subagents dispatched via
 `__ccpAgentTool.invoke()` run with the `canUseTool` permission callback hard-set

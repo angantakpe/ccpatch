@@ -96,11 +96,49 @@ jobs:
       # anchor-resilience gate: it fails the build on any inline regex that pins
       # a minified shape without a stable literal and is not in the shrinking-only
       # ALLOWED_REGEX_ANCHORS allowlist. See docs/anchors.md §3.
+      #
+      # It also includes the two registry-consistency gates:
+      #   lint:registry     — ccpatch.yml entries/acks/dependsOn vs the patch
+      #                       corpus (scripts/lint-registry.mjs; reuses
+      #                       loadPatches + validateManifest)
+      #   lint:capabilities — declared `capabilities` vs syscall-shaped source
+      #                       patterns (scripts/lint-capabilities.mjs)
+      # Known pre-existing inconsistencies are warn-only via in-script
+      # allowlists; new violations fail.
       - name: Lint
         run: bun run lint
 
       - name: Run full test suite
         run: bun run test:all
+
+      # tests/boot-tty.test.mjs — the Tier-4 interactive pty boot canary — is
+      # part of test:all but needs a patched bundle in releases/ AND python3
+      # with the pty module. This job builds no bundle, so the canary skips
+      # here; that skip used to be silent (a Tier-4 coverage hole hiding in a
+      # green run). Re-derive the test's own skip preconditions and surface
+      # any skip in the step summary + a workflow warning. drift-canary.yml is
+      # the workflow that actually exercises this tier against a real build.
+      - name: Surface Tier-4 boot-tty skip
+        if: always()
+        run: |
+          HAVE_BUNDLE=false
+          ls releases/*/cli.v*.patched.*js >/dev/null 2>&1 && HAVE_BUNDLE=true
+          HAVE_PY=false
+          python3 -c 'import pty, select, termios' >/dev/null 2>&1 && HAVE_PY=true
+          if [ "$HAVE_BUNDLE" = false ] || [ "$HAVE_PY" = false ]; then
+            {
+              echo "### ⚠️ Tier-4 pty boot canary SKIPPED (tests/boot-tty.test.mjs)"
+              echo ""
+              echo "- patched bundle in \`releases/\`: \`${HAVE_BUNDLE}\`"
+              echo "- python3 with pty module: \`${HAVE_PY}\`"
+              echo ""
+              echo "The interactive boot-deadlock class (v2.1.175) is only caught by this tier."
+              echo "Coverage relies on \`drift-canary.yml\` / a local \`make canary\` instead."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning title=Tier-4 boot-tty canary skipped::boot-tty pty smoke did not run (bundle=${HAVE_BUNDLE} python3=${HAVE_PY}); see step summary."
+          else
+            echo "Tier-4 boot-tty preconditions met — canary ran in the suite above."
+          fi
 
   native-pipeline:
     runs-on: ubuntu-latest

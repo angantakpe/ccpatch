@@ -130,3 +130,106 @@ describe('runner — reverse-diff & coverage capture after onAfterApply', () => 
     // mutation, not the marker presence).
   });
 });
+
+describe('runner — patch combination correctness', () => {
+  it('two patches sharing a global: second patch sees the global set by the first', async () => {
+    // Simulates expose_tool_dispatch (sets __ccpGlobal) followed by a consumer
+    // patch that reads it from the bundle string (sentinel check). The consumer's
+    // apply() must see the ACCUMULATED code from the first patch's injection.
+    const patches = {
+      producer: {
+        description: 'injects __ccpGlobal',
+        apply: (c) => c + ';var __ccpGlobal=1;',
+        verify: { present: '__ccpGlobal', count: { present: 1 } },
+      },
+      consumer: {
+        description: 'reads __ccpGlobal sentinel',
+        apply: (c) => {
+          // Anchor on the sentinel injected by the producer.
+          if (!c.includes('__ccpGlobal')) return c;
+          return c + ';var __ccpConsumer=typeof __ccpGlobal!=="undefined";';
+        },
+        verify: { present: '__ccpConsumer', count: { present: 1 } },
+      },
+    };
+    const { code } = await applyNamedPatches('seed', patches, ['producer', 'consumer'], silent);
+    assert.ok(code.includes('__ccpGlobal'), 'producer sentinel must survive into final code');
+    assert.ok(code.includes('__ccpConsumer'), 'consumer must have found and acted on the producer sentinel');
+  });
+
+  it('apply-order sensitivity: reversed order skips consumer injection', async () => {
+    // Confirms that the consumer CANNOT see the producer sentinel when it runs first.
+    // This is the expected outcome that verifies ordering matters.
+    const patches = {
+      producer: {
+        description: 'injects __ccpOrderSentinel',
+        apply: (c) => c + ';var __ccpOrderSentinel=1;',
+        verify: { present: '__ccpOrderSentinel', count: { present: 1 } },
+      },
+      consumer: {
+        description: 'conditional on __ccpOrderSentinel',
+        apply: (c) => {
+          if (!c.includes('__ccpOrderSentinel')) return c; // no-op when producer not yet applied
+          return c + ';var __ccpOrderDep=1;';
+        },
+        verify: { present: '__ccpOrderSentinel', weak: true },
+      },
+    };
+    // consumer runs before producer — it returns the same string (no-op).
+    // Use bestEffort so the no-op doesn't hard-fail the build; the assertion
+    // is on what the PRODUCER produced, not a successful consumer injection.
+    const { code } = await applyNamedPatches('seed', patches, ['consumer', 'producer'], silent, { bestEffort: true });
+    assert.ok(code.includes('__ccpOrderSentinel'), 'producer must still run');
+    assert.ok(!code.includes('__ccpOrderDep'), 'consumer ran before producer so __ccpOrderDep must be absent');
+  });
+
+  it('three sequential patches produce additive output with no interference', async () => {
+    // Regression guard: N patches in sequence each append a unique token.
+    // Final output must contain all tokens in order.
+    const patches = {
+      alpha: {
+        description: 'alpha',
+        apply: (c) => c + 'ALPHA',
+        verify: { present: 'ALPHA', count: { present: 1 } },
+      },
+      beta: {
+        description: 'beta',
+        apply: (c) => c + 'BETA',
+        verify: { present: 'BETA', count: { present: 1 } },
+      },
+      gamma: {
+        description: 'gamma',
+        apply: (c) => c + 'GAMMA',
+        verify: { present: 'GAMMA', count: { present: 1 } },
+      },
+    };
+    const { code } = await applyNamedPatches('seed', patches, ['alpha', 'beta', 'gamma'], silent);
+    assert.ok(code.includes('ALPHA'), 'alpha must be present');
+    assert.ok(code.includes('BETA'), 'beta must be present');
+    assert.ok(code.includes('GAMMA'), 'gamma must be present');
+    // Verify ordering is preserved in the output string.
+    assert.ok(code.indexOf('ALPHA') < code.indexOf('BETA'), 'alpha before beta');
+    assert.ok(code.indexOf('BETA') < code.indexOf('GAMMA'), 'beta before gamma');
+  });
+
+  it('idempotent patch applied twice in two separate runs produces same output as once', async () => {
+    // Validates the sentinel-guard contract: calling apply() on already-patched
+    // code must be a no-op. The second run uses bestEffort so the runner
+    // doesn't hard-fail on the intentional no-change, and we assert the code
+    // is byte-identical (count stays 1, sentinel not duplicated).
+    const patch = {
+      description: 'idempotent sentinel patch',
+      apply: (c) => {
+        if (c.includes('__ccpIdempotent')) return c; // guard
+        return c + ';var __ccpIdempotent=1;';
+      },
+      verify: { present: '__ccpIdempotent', count: { present: 1 } },
+    };
+    const { code: once } = await applyNamedPatches('seed', { p: patch }, ['p'], silent);
+    // Second run: sentinel already present → apply() is a no-op. bestEffort lets it pass.
+    const { code: twice } = await applyNamedPatches(once, { p: patch }, ['p'], silent, { bestEffort: true });
+    assert.equal(once, twice, 'applying an idempotent patch twice must be byte-identical to once');
+    const occurrences = (twice.match(/__ccpIdempotent/g) || []).length;
+    assert.equal(occurrences, 1, 'sentinel must appear exactly once after two runs');
+  });
+});

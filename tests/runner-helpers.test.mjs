@@ -9,9 +9,11 @@ import {
   detectDrift,
 } from '../runner/apply-pipeline.mjs';
 import {
+  makeStorageWarnOnce,
   writeConflictsArtifact,
   writeApplyArtifacts,
 } from '../runner/apply-artifacts.mjs';
+import { buildJsonReport, renderTextSummary } from '../runner/cli/build-report.mjs';
 
 function mkLogger() {
   const entries = { log: [], warn: [], error: [] };
@@ -167,5 +169,100 @@ describe('ARCH1 helper — writeConflictsArtifact / writeApplyArtifacts', () => 
       const files = fs.readdirSync(path.join(dir, 'storage/outputs'));
       assert.ok(!files.some(f => f.startsWith('patch-results-')));
     });
+  });
+});
+
+describe('Task 4 — artifact-write failure surfacing', () => {
+  // A storageRoot whose `storage` entry is a FILE makes mkdirSync throw
+  // ENOTDIR for every sidecar write — a deterministic failure injection.
+  function withBrokenStorage(fn) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ccp-broken-'));
+    fs.writeFileSync(path.join(dir, 'storage'), 'not a directory', 'utf8');
+    return fn(dir);
+  }
+
+  it('makeStorageWarnOnce warns once but collects every distinct artifact label', () => {
+    const logger = mkLogger();
+    const warnOnce = makeStorageWarnOnce(logger);
+    warnOnce('first.jsonl', new Error('boom1'));
+    warnOnce('first.jsonl', new Error('boom1-again')); // deduped by label
+    warnOnce('second.json', new Error('boom2'));
+    assert.equal(logger.entries.warn.length, 1, 'only the first failure logs');
+    assert.deepEqual(warnOnce.failures, [
+      { artifact: 'first.jsonl', error: 'boom1' },
+      { artifact: 'second.json', error: 'boom2' },
+    ]);
+  });
+
+  it('writeConflictsArtifact returns true on success/no-op, false on failure', () => {
+    const okDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ccp-ok-'));
+    assert.equal(writeConflictsArtifact([], undefined, okDir), true);
+    assert.equal(writeConflictsArtifact([{ a: 'x', b: 'y' }], undefined, okDir), true);
+    withBrokenStorage((dir) => {
+      const warnOnce = makeStorageWarnOnce(mkLogger());
+      assert.equal(writeConflictsArtifact([{ a: 'x', b: 'y' }], warnOnce, dir), false);
+      assert.equal(warnOnce.failures[0].artifact, 'patch-conflicts.jsonl');
+    });
+  });
+
+  it('writeApplyArtifacts returns the failed artifact labels', () => {
+    withBrokenStorage((dir) => {
+      const warnOnce = makeStorageWarnOnce(mkLogger());
+      const { failed } = writeApplyArtifacts({
+        results: { p1: 'applied' },
+        patches: { p1: {} },
+        phaseTraces: { pre: [], main: [], post: [] },
+        patchOptions: { version: '9.9.9' },
+        phaseOf: () => 'main',
+        logger: mkLogger(),
+        warnStorageOnce: warnOnce,
+        storageRoot: dir,
+      });
+      assert.deepEqual(failed, ['coverage-apply manifest', 'patch-results catalog']);
+      assert.deepEqual(warnOnce.failures.map(f => f.artifact), failed);
+    });
+    // Happy path: nothing failed.
+    const okDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ccp-ok2-'));
+    const { failed } = writeApplyArtifacts({
+      results: { p1: 'applied' },
+      patches: { p1: {} },
+      phaseTraces: { pre: [], main: [], post: [] },
+      patchOptions: {},
+      phaseOf: () => 'main',
+      logger: mkLogger(),
+      storageRoot: okDir,
+    });
+    assert.deepEqual(failed, []);
+  });
+
+  it('buildJsonReport surfaces artifactsDegraded only when present', () => {
+    const base = { ok: true, durationMs: 10, patchNames: ['p1'] };
+    const clean = buildJsonReport({ ...base, report: {} });
+    assert.ok(!('artifactsDegraded' in clean), 'happy path: field absent');
+    const degraded = buildJsonReport({
+      ...base,
+      report: { artifactsDegraded: [{ artifact: 'anchor-drift.jsonl', error: 'ENOTDIR' }] },
+    });
+    assert.deepEqual(degraded.artifactsDegraded, [
+      { artifact: 'anchor-drift.jsonl', error: 'ENOTDIR' },
+    ]);
+  });
+
+  it('renderTextSummary lists failed artifacts; happy path output unchanged', () => {
+    const base = { ok: true, durationMs: 10, outputPath: null, drySuggest: false };
+    const clean = renderTextSummary({ ...base, report: {} });
+    assert.ok(!clean.includes('Artifacts degraded'));
+    const degraded = renderTextSummary({
+      ...base,
+      report: {
+        artifactsDegraded: [
+          { artifact: 'patch-conflicts.jsonl', error: 'ENOTDIR' },
+          { artifact: 'coverage-apply manifest', error: 'ENOTDIR' },
+        ],
+      },
+    });
+    assert.ok(degraded.includes('Artifacts degraded'));
+    assert.ok(degraded.includes('patch-conflicts.jsonl'));
+    assert.ok(degraded.includes('coverage-apply manifest'));
   });
 });

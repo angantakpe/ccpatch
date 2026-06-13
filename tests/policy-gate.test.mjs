@@ -29,7 +29,7 @@ function applied() {
 }
 
 /** Fresh bus stubs + a synchronous setTimeout so the deferred register() runs. */
-function makeEnv(envVars) {
+function makeEnv(envVars, consoleOverride) {
   const calls = { steer: [], before: null, stream: null };
   const g = {
     __ccpGetSystemPromptNonce: () => 'NONCE',
@@ -41,8 +41,16 @@ function makeEnv(envVars) {
   const syncTimeout = (fn) => { fn(); return 0; };
   // Run the injected source with our stubs in scope.
   const fn = new Function('require', 'process', 'globalThis', 'setTimeout', 'Response', 'console', applied());
-  fn(require, proc, g, syncTimeout, Response, console);
+  fn(require, proc, g, syncTimeout, Response, consoleOverride || console);
   return calls;
+}
+
+/** Capture console.warn lines emitted during boot. */
+function captureWarn(envVars) {
+  const warnings = [];
+  const c = { warn: (...a) => warnings.push(a.join(' ')), error: () => {}, log: () => {} };
+  const calls = makeEnv(envVars, c);
+  return { calls, warnings };
 }
 
 /** Write a temp host policy module and return its absolute path. */
@@ -54,9 +62,11 @@ function writePolicy(src) {
 }
 
 test('inert and non-throwing when no host module is configured', () => {
-  const calls = makeEnv({}); // no CCP_POLICY_GATE_MODULE
+  const { calls, warnings } = captureWarn({}); // no CCP_POLICY_GATE_MODULE
   assert.equal(calls.steer.length, 0);
   assert.equal(calls.before, null);
+  // No module configured ⇒ inert, NOT degraded — must not print the boot warn.
+  assert.ok(!warnings.some((w) => /DEGRADED/i.test(w)), `unexpected degrade warn: ${warnings.join('\n')}`);
 });
 
 test('SOFT: installs the host steer via the nonce-gated setter', () => {
@@ -115,4 +125,44 @@ test('fail-open: a throwing policy never throws out of the gate', async () => {
   const ctx = { url: 'https://api.anthropic.com/v1/messages', isApi: true, options: { body: '{}' } };
   await assert.doesNotReject(async () => calls.before.handler(ctx));
   assert.equal(ctx._intercept, undefined); // threw -> treated as allow
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Boot probe — loud, one-time, fail-open degradation warning (review fix).
+// ─────────────────────────────────────────────────────────────────────────────
+test('boot probe: missing module ⇒ loud degrade warn, gate stays fail-open', () => {
+  const { calls, warnings } = captureWarn({ CCP_POLICY_GATE_MODULE: '/no/such/policy.cjs' });
+  const w = warnings.find((x) => /DEGRADED/i.test(x));
+  assert.ok(w, `expected a loud degrade warning; got: ${warnings.join('\n')}`);
+  assert.match(w, /NO-GATING|fail-open/i);
+  assert.match(w, /\/no\/such\/policy\.cjs/);
+  // Fail-open: no gate registered, but boot did not throw.
+  assert.equal(calls.before, null);
+});
+
+test('boot probe: wrong export shape ⇒ loud degrade warn', () => {
+  // Object with none of steer/inspectRequest/onStreamEvent gates nothing.
+  const mod = writePolicy(`module.exports = { unrelated: 1 };`);
+  const { warnings } = captureWarn({ CCP_POLICY_GATE_MODULE: mod });
+  const w = warnings.find((x) => /DEGRADED/i.test(x));
+  assert.ok(w, `expected a degrade warning for wrong shape; got: ${warnings.join('\n')}`);
+  assert.match(w, /shape/i);
+});
+
+test('boot probe: a throwing steer() is announced once at boot', () => {
+  const mod = writePolicy(`module.exports = { steer: () => { throw new Error('kaboom'); }, inspectRequest: () => ({ action: 'allow' }) };`);
+  const { calls, warnings } = captureWarn({ CCP_POLICY_GATE_MODULE: mod });
+  const degrade = warnings.filter((x) => /DEGRADED/i.test(x));
+  assert.equal(degrade.length, 1, `expected exactly one boot degrade warn; got: ${warnings.join('\n')}`);
+  assert.match(degrade[0], /steer\(\)/);
+  // Despite the broken steer, the hard gate still registers (fail-open).
+  assert.ok(calls.before, 'inspectRequest gate should still register');
+});
+
+test('boot probe: a healthy module does NOT print the degrade warn', () => {
+  const mod = writePolicy(`module.exports = { steer: () => "## ok", inspectRequest: () => ({ action: 'allow' }) };`);
+  const { calls, warnings } = captureWarn({ CCP_POLICY_GATE_MODULE: mod });
+  assert.ok(!warnings.some((w) => /DEGRADED/i.test(w)), `healthy module must not warn; got: ${warnings.join('\n')}`);
+  assert.ok(calls.before, 'gate should register for a healthy module');
+  assert.ok(calls.steer.length >= 1, 'steer should be installed for a healthy module');
 });

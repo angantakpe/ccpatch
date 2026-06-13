@@ -75,7 +75,10 @@ ack:
   # surface), adk_hello_agent injects a tool through the ADK, expose_system_prompt
   # writes the persona overlay. Acked here so the default build proceeds; see
   # THREAT_MODEL.md for the tool-dispatch trust boundary (nonce-gated registrar).
-  expose_tool_dispatch: [tools]
+  # expose_tool_dispatch's ack covers its full honest set: tools (dispatch),
+  # network (MCP-socket-adjacent ops), exec (__ccpInvokeTool runs subprocess-
+  # executing tools outside the interactive permission loop).
+  expose_tool_dispatch: [tools, network, exec]
   expose_system_prompt: [prompt]
   adk_hello_agent: [tools]
 

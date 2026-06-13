@@ -162,19 +162,23 @@ function runDoctor({ bundle, version }, strict) {
   const out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
   process.stdout.write(out);
 
-  // Summary line looks like: "12 ok, 1 drifted, 0 unverified, 2 missing".
-  let drift = 0, missing = 0;
+  // Summary line looks like: "12 ok, 1 drifted, 0 unverified, 2 missing" or
+  // "12 ok, 1 drifted, 0 unverified, 2 missing, 1 extinct".
+  let drift = 0, missing = 0, extinct = 0;
   const m = out.match(/(\d+)\s+ok,\s*(\d+)\s+drifted,\s*(\d+)\s+unverified,\s*(\d+)\s+missing/);
   if (m) {
     drift = Number(m[2]);
     missing = Number(m[4]);
+    const extm = out.match(/(\d+)\s+extinct/);
+    if (extm) extinct = Number(extm[1]);
   } else {
     // Fall back to counting rows if the summary format ever changes.
     drift = (out.match(/^\s*DRIFT\b/gm) || []).length;
     missing = (out.match(/^\s*MISSING\b/gm) || []).length;
+    extinct = (out.match(/^\s*EXTINCT\b/gm) || []).length;
   }
   const exit = r.status ?? 1;
-  return { drift, missing, exit, version, bundle };
+  return { drift, missing, extinct, exit, version, bundle };
 }
 
 function main() {
@@ -223,16 +227,25 @@ function main() {
     return 1;
   }
 
-  // Aggregate verdict. DRIFT or MISSING on ANY target fails the sweep.
+  // Aggregate verdict. DRIFT, MISSING, or EXTINCT on ANY target fails the sweep.
   let failed = false;
   console.error('\n[drift-sweep] summary:');
   for (const r of results) {
     const tag = r.version ? `v${r.version}` : path.basename(r.bundle);
-    const bad = r.drift > 0 || r.missing > 0;
+    const bad = r.drift > 0 || r.missing > 0 || r.extinct > 0;
     if (bad) failed = true;
     const label = (bad ? 'DRIFT/MISSING' : 'clean').padEnd(13);
+    const extNote = r.extinct > 0 ? `, ${r.extinct} extinct` : '';
     console.error(`  ${label} ${tag} — ` +
-      `${r.drift} drifted, ${r.missing} missing (doctor exit ${r.exit})`);
+      `${r.drift} drifted, ${r.missing} missing${extNote} (doctor exit ${r.exit})`);
+  }
+  const totalExtinct = results.reduce((s, r) => s + (r.extinct || 0), 0);
+  if (totalExtinct > 0) {
+    console.error(
+      `[drift-sweep] FAIL — ${totalExtinct} extinct anchor(s) detected. ` +
+      'ccpatch heal cannot fix these — re-anchor from scratch (see docs/finding-anchors.md) ' +
+      'or retire the affected patches.'
+    );
   }
   if (failed) {
     console.error('[drift-sweep] FAIL — anchor drift or missing anchors detected. ' +

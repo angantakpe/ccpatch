@@ -41,8 +41,15 @@
  *   }
  *
  * FAIL-OPEN: a missing module, a throwing member, or an absent host contract all
- * degrade to "no gating" — this patch must never wedge a turn. Errors surface
- * only under CLAUDE_DEBUG=1 (or paranoid mode via fetch_interceptor's bus).
+ * degrade to "no gating" — this patch must never wedge a turn. BOOT VISIBILITY:
+ * when CCP_POLICY_GATE_MODULE is set but the gate degrades (module missing/
+ * throwing, wrong export shape, or steer() throwing during a one-shot boot
+ * probe), ONE loud console.warn is printed at boot — always, not just under
+ * CLAUDE_DEBUG — so operators can't silently lose enforcement. After the warn
+ * the gate continues fail-open exactly as before; the runtime request path is
+ * unchanged. Per-request errors still surface only under CLAUDE_DEBUG=1 (or
+ * paranoid mode via fetch_interceptor's bus; CCPATCH_PARANOID=1 behavior is
+ * unchanged).
  *
  * DEPENDENCIES: fetch_interceptor (hard layer) and expose_system_prompt (soft
  * layer). Both are also feature-detected at runtime, so the gate degrades
@@ -64,19 +71,58 @@ const BOOT = `
   try { DEBUG = (process.env.CLAUDE_DEBUG === '1' || process.env.CC_DEBUG === '1'); } catch (_e) {}
   function dbg(msg) { if (DEBUG) { try { process.stderr.write('[ccp:policy_gate] ' + msg + '\\n'); } catch (_e) {} } }
 
-  // Load the host-supplied policy module (env-pointed). Inert when unset/unloadable.
+  // Load the host-supplied policy module (env-pointed). Inert when unset.
   var policy = null;
-  try {
-    var modPath = (typeof process !== 'undefined' && process.env) ? process.env.CCP_POLICY_GATE_MODULE : '';
-    if (modPath) {
+  var modPath = '';
+  var loadErr = null;
+  try { modPath = (typeof process !== 'undefined' && process.env) ? (process.env.CCP_POLICY_GATE_MODULE || '') : ''; } catch (_e) {}
+  if (modPath) {
+    try {
       var req = (typeof __ccp_nativeRequire === 'function') ? __ccp_nativeRequire
               : (typeof require === 'function') ? require : null;
-      if (!req) { dbg('require unavailable; gate inert'); return; }
-      policy = req(modPath);
-      policy = (policy && policy.default) ? policy.default : policy;
-    }
-  } catch (e) { dbg('policy load failed: ' + ((e && e.message) || e)); }
-  if (!policy || typeof policy !== 'object') { dbg('no policy module; gate inert'); return; }
+      if (!req) { loadErr = 'no require available in this bundle'; }
+      else {
+        policy = req(modPath);
+        policy = (policy && policy.default) ? policy.default : policy;
+      }
+    } catch (e) { loadErr = 'module failed to load: ' + ((e && e.message) || e); }
+  }
+
+  // ── Boot probe (visibility fix) ──────────────────────────────────────────
+  // When a policy module IS configured but the gate cannot enforce it — module
+  // missing/throwing, wrong export shape, or a steer() that throws — print ONE
+  // loud console.warn at boot (always, not just under CLAUDE_DEBUG) and then
+  // continue fail-open exactly as before. A silently-degraded gate defeats the
+  // operator's intent; the runtime request path is unchanged.
+  var __bootWarned = false;
+  function bootDegraded(reason) {
+    if (__bootWarned) return;
+    __bootWarned = true;
+    try {
+      console.warn('[ccpatch] policy_gate: CCP_POLICY_GATE_MODULE is set (' + modPath + ') but the policy gate is DEGRADED to NO-GATING: ' + reason + '. The CLI continues WITHOUT policy enforcement (fail-open).');
+    } catch (_e) {}
+  }
+
+  if (!modPath) { dbg('no policy module; gate inert'); return; }
+  if (loadErr) { bootDegraded(loadErr); return; }
+  if (!policy || typeof policy !== 'object') {
+    bootDegraded('module did not export an object (got ' + (policy === null ? 'null' : typeof policy) + ')');
+    return;
+  }
+  var __hasContract = (typeof policy.steer === 'function')
+    || (typeof policy.inspectRequest === 'function')
+    || (typeof policy.onStreamEvent === 'function');
+  if (!__hasContract) {
+    // Wrong shape: an object with none of the contract members gates nothing.
+    bootDegraded('module exports none of steer()/inspectRequest()/onStreamEvent() — wrong contract shape');
+  } else if (typeof policy.steer === 'function') {
+    // Cheap probe: call the soft-layer member once in a try/catch so a broken
+    // steer() is announced at boot instead of silently swallowed per-turn.
+    // (inspectRequest is NOT probed — invoking it with a sentinel request
+    // could trigger host-side side effects; presence-typeof is enough there.)
+    try { policy.steer(); }
+    catch (e) { bootDegraded('steer() threw during the boot probe: ' + ((e && e.message) || e)); }
+  }
 
   // ── SOFT: refresh the main-loop system-prompt steer from policy.steer() ──
   function refreshSteer() {
@@ -166,7 +212,11 @@ export default {
   category: 'feature',
   description:
     'Host-driven behavior gate: soft system-prompt steer + outbound request gate (allow/scrub/block) wired to a policy module at CCP_POLICY_GATE_MODULE.',
-  capabilities: ['network', 'prompt', 'fs', 'env'],
+  // Honest capability set (review fix): the gate require()s an ARBITRARY
+  // module path taken from CCP_POLICY_GATE_MODULE — loading host-supplied code
+  // into the CLI process is exec-shaped, on top of the network (request gate),
+  // prompt (steer), fs (module read), and env powers it already declared.
+  capabilities: ['network', 'prompt', 'fs', 'env', 'exec'],
   phase: 'post',
   dependsOn: ['fetch_interceptor', 'expose_system_prompt'],
   env: ['CCP_POLICY_GATE_MODULE', 'CCP_POLICY_GATE_PRIORITY', 'CLAUDE_DEBUG'],

@@ -126,6 +126,13 @@ const UNINSTRUMENTED_HOT_CAP_DEBT = new Set([
   'debug',
   'dotenv_loader',
   'expose_api_client',
+  // Justification (security review — honest capabilities): expose_tool_dispatch
+  // now declares network+exec (its __ccpInvokeTool routes through MCP/fetch-
+  // backed tools and runs subprocess-executing tools outside the permission
+  // loop). It is not yet runtime-instrumented, so it joins its sibling RCE-stack
+  // patches (headless_bridge, policy_gate) on the debt list. Remove this entry
+  // when a coverageMarker is wired.
+  'expose_tool_dispatch',
   'extended_thinking',
   'fetch_interceptor',
   'force_thinking',

@@ -86,6 +86,17 @@ export function buildJsonReport({ ok, durationMs, report, patchNames, paranoid, 
       reverseDiff: !!r.cache.reverseDiff,
     };
   }
+  // Task 4: degraded sidecar artifacts — best-effort writes (conflicts JSONL,
+  // anchor-drift JSONL, coverage manifest, patch-results catalog) that failed
+  // this run. The build itself still succeeded; the forensics under storage/
+  // are incomplete. Absent on the happy path so the schema is unchanged when
+  // nothing failed.
+  if (Array.isArray(r.artifactsDegraded) && r.artifactsDegraded.length > 0) {
+    out.artifactsDegraded = r.artifactsDegraded.map(f => ({
+      artifact: f?.artifact ?? null,
+      error: f?.error ?? null,
+    }));
+  }
   // WS6: surface paranoid/strict mode and any native grow-path platform
   // degradation in the machine-readable report. Both are optional — older
   // callers that don't pass them leave the report shape unchanged.
@@ -271,6 +282,19 @@ export function renderTextSummary({ ok, durationMs, report, outputPath, drySugge
   }
   if (noChange > 0) {
     lines.push(`No-op: ${noChange} patch(es) produced no changes (anchors likely drifted).`);
+  }
+
+  // Task 4: a degraded run wrote the bundle fine but lost one or more
+  // best-effort sidecar artifacts (storage/ forensics incomplete). List which,
+  // so "build OK" doesn't read as "everything written".
+  const degraded = Array.isArray(r.artifactsDegraded) ? r.artifactsDegraded : [];
+  if (degraded.length > 0) {
+    const labels = degraded.map(d => d?.artifact).filter(Boolean).join(', ');
+    lines.push(
+      `${style.yellow(`${icon.warn} Artifacts degraded:`)} ${degraded.length} sidecar write(s) failed` +
+      (labels ? ` (${labels})` : '') +
+      ` — outputs under storage/ are incomplete.`
+    );
   }
 
   if (!ok) {

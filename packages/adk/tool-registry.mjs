@@ -17,6 +17,8 @@
  * forever.
  */
 
+import { checkContract } from './contracts.mjs';
+
 /**
  * Poll cadence and ceiling. Two cadences, both bounded to ≈5s:
  *   - NO bus: aggressive 50ms primary poll × 100 attempts ≈ 5s.
@@ -56,9 +58,11 @@ function debug(msg) {
 /**
  * Load-bearing drift guard for the gated injection path (call-site half). When
  * the typed contract registry is present AND advertises a 'toolDispatch'
- * contract, we positively re-validate its shape through __ccpRequire BEFORE
- * routing an injection through the (possibly drifted) __ccpRegisterTool global.
- * If __ccpRequire THROWS, that is proven drift — tryInject() fails closed.
+ * contract, we positively re-validate it via checkContract('toolDispatch')
+ * (contracts.mjs — the ADK's centralized pin table; v>=2, shape
+ * ['registerTool'], routed through __ccpRequire when the helper is live)
+ * BEFORE routing an injection through the (possibly drifted) __ccpRegisterTool
+ * global. Proven drift → tryInject() fails closed.
  *
  * Memoization is ASYMMETRIC ON PURPOSE (mirrors handoff.mjs's
  * assertSystemPromptContract): we latch `_driftChecked = true` ONLY once a
@@ -78,32 +82,27 @@ let _driftChecked = false; // latched true ONLY after a registered contract vali
 function gatedPathTrusted() {
   if (_driftChecked) return true;
 
-  const require_ = globalThis.__ccpRequire;
-  const inspect = globalThis.__ccpInspectContracts;
+  // Centralized pin: contracts.mjs requires 'toolDispatch' v>=2 with shape
+  // ['registerTool'] through __ccpRequire when the helper is live, falling back
+  // to the registry's advertised metadata otherwise.
+  const res = checkContract('toolDispatch');
+
   // Nothing to prove → fail open, NOT latched (a late contract registry must
   // still be honored on a later injection). Preserves bare-array / stub paths.
-  if (typeof require_ !== 'function' || typeof inspect !== 'function') return true;
+  if (res.status === 'unchecked') return true;
 
-  let registered = false;
-  try {
-    registered = inspect().some((e) => e && e.name === 'toolDispatch');
-  } catch (_) {
-    // Inspect itself is advisory; if it blows up we cannot prove drift. Fail
-    // open without latching so a recovered inspector is honored later.
-    return true;
-  }
-  if (!registered) return true; // unguarded boundary → fail open, re-check next time.
-
-  try {
-    require_('toolDispatch', { consumer: 'adk:tools', shape: ['registerTool'] });
-  } catch (err) {
-    // Proven drift: the registered global does NOT match the contract shape.
+  if (res.status === 'drift') {
+    // Proven drift: the registered contract does NOT satisfy the ADK's pin.
     // Refuse, but do NOT latch — a recovered host re-checks on the next inject.
-    debug(`[adk:tools] refusing injection — toolDispatch contract drift: ${err?.message ?? err}`);
+    debug(`[adk:tools] refusing injection — toolDispatch contract drift: ${res.reason}`);
     return false;
   }
-  // Positively validated a registered contract → safe to memoize from here on.
-  _driftChecked = true;
+
+  // Positively validated a registered contract. Memoize ONLY when the actual
+  // value paths were probed through __ccpRequire — an advertised-metadata-only
+  // 'ok' (no __ccpRequire on the host) stays unlatched so a later-appearing
+  // require helper is still consulted.
+  if (res.via === 'require') _driftChecked = true;
   return true;
 }
 

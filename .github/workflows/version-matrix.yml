@@ -52,8 +52,13 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.resolve-versions.outputs.versions) }}
     steps:
+      # fetch-depth: 2 — on pull_request the checked-out ref is the PR merge
+      # commit, so HEAD^1 is the base-branch tip; the refmap-freshness step
+      # below uses `git diff HEAD^1 HEAD` to detect anchor-bearing changes.
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       # bun.lock is the single source of truth (see ci.yml); npm lockfile was
       # removed, so install via bun — `cache: npm` / `npm ci` cannot work here.
@@ -123,6 +128,61 @@ jobs:
           else
             echo "refmap present for v${{ matrix.version }}"
           fi
+
+      # Per-PR refmap freshness gate. Refmap REGENERATION is nightly only
+      # (drift-check.yml refmap-pr, and only for @latest), so a PR that changes
+      # anchor literals (runner/anchors.mjs) or patch anchors (core/,
+      # extensions/) could pass CI while silently invalidating the committed
+      # refmaps for supported versions. This step re-resolves the committed
+      # refmap for THIS matrix version against the freshly downloaded bundle in
+      # --check mode (tools/build-refmap.mjs compares everything except
+      # generatedAt) and fails with regeneration instructions.
+      #
+      # This lives HERE (not ci.yml) because this workflow already resolves the
+      # last 3 supported versions and downloads/caches their bundles — ci.yml
+      # has no bundle to check against.
+      #
+      # Skips cleanly when:
+      #   - the PR does not touch anchor-bearing paths (diff vs HEAD^1, the
+      #     base tip of the merge commit checked out for pull_request events);
+      #   - no refmap is committed for this version (the coverage warning in
+      #     the previous step already flags that); or
+      #   - the bundle is unavailable (defensive; earlier steps normally fail
+      #     first). Versions OUTSIDE the last-3 matrix are not re-checked here
+      #     at all — the nightly drift-check sweep probes every refmap'd
+      #     version on disk and the refmap-pr job regenerates @latest, so a
+      #     stale older refmap surfaces there within a day.
+      - name: Refmap freshness for v${{ matrix.version }} (anchor-touching PRs)
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          # HEAD is the PR merge commit; HEAD^1 is the base tip. If the parent
+          # is unavailable (unexpected), fail OPEN into running the check.
+          if git rev-parse -q --verify 'HEAD^1' >/dev/null 2>&1; then
+            CHANGED=$(git diff --name-only HEAD^1 HEAD -- runner/anchors.mjs core/ extensions/)
+          else
+            echo "::notice::cannot resolve HEAD^1 — running the refmap check unconditionally."
+            CHANGED="(unknown — assuming anchor-bearing changes)"
+          fi
+          if [ -z "$CHANGED" ]; then
+            echo "No anchor-bearing paths touched (runner/anchors.mjs, core/, extensions/) — skipping refmap freshness check."
+            exit 0
+          fi
+          if [ ! -f "refmaps/${{ matrix.version }}.json" ]; then
+            echo "::notice::no committed refmap for v${{ matrix.version }} — freshness check skipped (missing-refmap warning emitted above; the nightly drift-check refmap-pr job generates @latest refmaps)."
+            exit 0
+          fi
+          if [ -z "${BUNDLE:-}" ] || [ ! -f "$BUNDLE" ]; then
+            echo "::notice::bundle for v${{ matrix.version }} unavailable in CI — refmap freshness skipped; the nightly drift-check sweep covers this version once the bundle is obtainable."
+            exit 0
+          fi
+          echo "Anchor-bearing changes in this PR:"
+          echo "$CHANGED"
+          if ! node tools/build-refmap.mjs "$BUNDLE" --cc-version "${{ matrix.version }}" --out "refmaps/${{ matrix.version }}.json" --check; then
+            echo "::error title=Stale refmap for v${{ matrix.version }}::This PR changes anchor-bearing files but refmaps/${{ matrix.version }}.json no longer matches what build-refmap resolves. Regenerate and commit it: make download VERSION=${{ matrix.version }} && node tools/build-refmap.mjs <bundle> --cc-version ${{ matrix.version }} --out refmaps/${{ matrix.version }}.json (see SUPPORTED_VERSIONS.md)."
+            exit 1
+          fi
+          echo "refmaps/${{ matrix.version }}.json is fresh against this PR's anchors."
 
       - name: Upload anchor-drift log
         if: always()

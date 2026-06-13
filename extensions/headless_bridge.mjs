@@ -24,11 +24,26 @@
  *   tcp://127.0.0.1:7878        (loopback only — not bound publicly)
  *
  * Auth: globalThis.__ccpAuth.verify(token) — constant-time compare.
+ *
+ * Tool dispatch is DEFAULT-DENY (CC_BRIDGE_TOOL_ALLOWLIST):
+ *   unset / empty   ⇒ every `dispatch` op is rejected (deny-all). A one-time
+ *                     loud warning is printed at bridge startup when unset.
+ *   '*'             ⇒ allow every exposed tool (the pre-default-deny behavior;
+ *                     must now be opted into explicitly).
+ *   'Read,Grep,...' ⇒ only the named tools may be dispatched ('*' anywhere in
+ *                     the list also means allow-all).
+ * Non-dispatch ops (hello/submit/subscribe/cancel/bye) are NOT gated by the
+ * allowlist — only `dispatch` is.
  */
 export default {
   category: 'feature',
   description: 'NDJSON bridge into the running CLI (submit/dispatch/subscribe/cancel).',
-  capabilities: ['network', 'prompt', 'tools'],
+  // Honest capability set (review fix): besides the obvious network/prompt/
+  // tools surface, the injected hook require()s modules at runtime (exec-
+  // shaped), reads env vars beyond the documented `env` field (CCPATCH_PROFILE,
+  // CC_BRIDGE_ALLOW_PUBLIC, CC_BRIDGE_TOOL_ALLOWLIST), and unlinks/chmods the
+  // unix socket path on disk (fs).
+  capabilities: ['network', 'prompt', 'tools', 'exec', 'env', 'fs'],
   dependsOn: ['event_bus', 'auth_token', 'expose_submit_input', 'expose_tool_dispatch'], // require auth_token -- without it the socket is unauthenticated
   // Injected hook references the sentinel twice (idempotency guard + assignment),
   // so a single clean apply yields exactly 2 occurrences. count>2 ⇒ double-applied.
@@ -51,15 +66,18 @@ export default {
   const ADDR = process.env.CC_BRIDGE_ADDR;
   const MAX_LINE = Number(process.env.CC_BRIDGE_MAX_LINE || 1048576);
   const TOPICS = ['turn.start','turn.end','tool.call','tool.result','tool.use','agent.spawn','agent.exit','cost.delta','assistant.text','assistant.thinking'];
-  // OPTIONAL server-side tool allowlist. When CC_BRIDGE_TOOL_ALLOWLIST is set
-  // (comma-separated tool names), the dispatch op rejects any tool not listed.
-  // Unset ⇒ null ⇒ behavior unchanged (no allowlist enforcement).
-  const TOOL_ALLOWLIST = (() => {
-    const raw = process.env.CC_BRIDGE_TOOL_ALLOWLIST;
-    if (!raw) return null;
-    const set = new Set(raw.split(',').map((s) => s.trim()).filter(Boolean));
-    return set.size ? set : null;
-  })();
+  // Server-side tool allowlist — DEFAULT-DENY. CC_BRIDGE_TOOL_ALLOWLIST:
+  //   unset/empty ⇒ deny ALL dispatch ops (loud one-time warning when unset);
+  //   '*'         ⇒ allow every exposed tool (explicit opt-in to the old default);
+  //   'A,B,C'     ⇒ only the named tools ('*' anywhere in the list ⇒ allow-all).
+  // Only the dispatch op is gated; submit/subscribe/cancel/bye are unaffected.
+  const ALLOWLIST_RAW = process.env.CC_BRIDGE_TOOL_ALLOWLIST;
+  const ALLOWLIST_ENTRIES = (ALLOWLIST_RAW || '').split(',').map((s) => s.trim()).filter(Boolean);
+  const TOOL_ALLOW_ALL = ALLOWLIST_ENTRIES.indexOf('*') !== -1;
+  const TOOL_ALLOWLIST = new Set(ALLOWLIST_ENTRIES.filter((s) => s !== '*'));
+  if (ALLOWLIST_RAW == null) {
+    console.warn('[ccpatch] headless_bridge: CC_BRIDGE_TOOL_ALLOWLIST is unset — tool dispatch over the bridge is DENY-ALL by default. Set CC_BRIDGE_TOOL_ALLOWLIST=ToolA,ToolB to allow specific tools, or CC_BRIDGE_TOOL_ALLOWLIST="*" to allow every exposed tool. submit/subscribe/cancel are unaffected.');
+  }
 
   const server = net.createServer((sock) => {
     let buf = '';
@@ -83,7 +101,10 @@ export default {
     };
 
     const unsubAll = () => {
-      for (const off of subs.values()) { try { off(); } catch (_) {} }
+      for (const off of subs.values()) {
+        try { off(); }
+        catch (e) { if (process.env.CCPATCH_DEBUG) console.error('[ccpatch] headless_bridge: unsubAll off() threw:', e && e.message); }
+      }
       subs.clear();
     };
 
@@ -144,11 +165,15 @@ export default {
           if (!__isPlainObject(msg.input)) {
             return send({ id, ok: false, kind: 'error', error: 'dispatch: input must be a plain object' });
           }
-          // OPTIONAL server-side tool allowlist (CC_BRIDGE_TOOL_ALLOWLIST,
-          // comma-separated). When set, only listed tools may be dispatched;
-          // when unset, behavior is unchanged (any exposed tool dispatchable).
-          if (TOOL_ALLOWLIST && !TOOL_ALLOWLIST.has(msg.name)) {
-            return send({ id, ok: false, kind: 'error', error: 'dispatch: tool not in CC_BRIDGE_TOOL_ALLOWLIST: ' + msg.name });
+          // Server-side tool allowlist (CC_BRIDGE_TOOL_ALLOWLIST) — DEFAULT-
+          // DENY. Unset/empty denies every dispatch; '*' allows all; a named
+          // list allows only those tools. The denial message tells the
+          // operator exactly what to set.
+          if (!TOOL_ALLOW_ALL && !TOOL_ALLOWLIST.has(msg.name)) {
+            const why = TOOL_ALLOWLIST.size
+              ? 'tool not in CC_BRIDGE_TOOL_ALLOWLIST: ' + msg.name + '. Add it (comma-separated, e.g. CC_BRIDGE_TOOL_ALLOWLIST=' + Array.from(TOOL_ALLOWLIST).concat([msg.name]).join(',') + ') or set CC_BRIDGE_TOOL_ALLOWLIST="*" to allow all tools, then restart the CLI.'
+              : 'denied — CC_BRIDGE_TOOL_ALLOWLIST is ' + (ALLOWLIST_RAW == null ? 'unset' : 'empty') + ' (tool dispatch is deny-all by default). Set CC_BRIDGE_TOOL_ALLOWLIST=' + msg.name + ' (comma-separate to allow more tools) or CC_BRIDGE_TOOL_ALLOWLIST="*" to allow all tools, then restart the CLI.';
+            return send({ id, ok: false, kind: 'error', error: 'dispatch: ' + why });
           }
           try {
             const result = await globalThis.__ccpInvokeTool(msg.name, msg.input);
@@ -198,7 +223,10 @@ export default {
 
     sock.on('close', () => {
       unsubAll();
-      for (const { cancel } of inflight.values()) { try { cancel(); } catch (_) {} }
+      for (const { cancel } of inflight.values()) {
+        try { cancel(); }
+        catch (e) { if (process.env.CCPATCH_DEBUG) console.error('[ccpatch] headless_bridge: inflight cancel threw:', e && e.message); }
+      }
       inflight.clear();
     });
     sock.on('error', () => { /* swallow client noise */ });

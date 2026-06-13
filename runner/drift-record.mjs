@@ -17,6 +17,30 @@ import { toList } from './verify-core.mjs';
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /**
+ * Anchor-extinction status (THREAT_MODEL.md "Systemic risk: upstream toolchain
+ * change"). When EVERY probe (anchor.literal + verify.present + verify.absent)
+ * yields ZERO fuzzy candidates above threshold, the anchor literal has vanished
+ * from the bundle entirely. That is not ordinary drift — `heal` has nothing to
+ * propose, and chasing per-patch fixes is wasted work. Records carry an
+ * additive `extinct: true` field (old JSONL consumers ignore it) and, when a
+ * doctor status was supplied, `status` is promoted to this value so downstream
+ * reporters (doctor --suggest, version-matrix PR comments) surface it loudly.
+ */
+export const EXTINCT_STATUS = 'extinct';
+
+/**
+ * True when a drift entry (as parsed back from anchor-drift.jsonl) records an
+ * extinct anchor. Checks both the promoted status and the additive boolean so
+ * runner-written records (which carry no `status` field) are covered too.
+ *
+ * @param {object} entry  parsed anchor-drift JSONL record
+ * @returns {boolean}
+ */
+export function isExtinctEntry(entry) {
+  return !!entry && (entry.extinct === true || entry.status === EXTINCT_STATUS);
+}
+
+/**
  * Build the shared anchor-drift forensics for one patch whose anchor did not
  * resolve cleanly against `code`.
  *
@@ -33,7 +57,7 @@ const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
  *                                `status`/`detail` (if provided) are included.
  * @param {string} [meta.status]  doctor status ('drift'|'missing'); omitted when absent
  * @param {string|null} [meta.detail]  doctor detail string; omitted when absent
- * @returns {{candidates: object[], verifyFailed: string[], probesCount: number, record: object}}
+ * @returns {{candidates: object[], verifyFailed: string[], probesCount: number, record: object, extinct: boolean}}
  */
 export function buildDriftRecord(code, probesIn = {}, meta = {}) {
   const declaredLiteral = probesIn.literal ?? null;
@@ -77,9 +101,17 @@ export function buildDriftRecord(code, probesIn = {}, meta = {}) {
     if (code.includes(a)) verifyFailed.push(`verify.absent still present: ${a.slice(0, 80)}`);
   }
 
+  // Extinction: at least one usable probe existed, yet fuzzy ranking produced
+  // ZERO candidates. (With zero probes we cannot distinguish "vanished" from
+  // "unprobeable", so extinct is not claimed.)
+  const extinct = probes.length > 0 && candidates.length === 0;
+
   // Emit the record in field order matching the legacy writers, so the JSONL
   // stream stays byte-compatible for both sites. `source`/`status`/`detail` are
-  // doctor-only fields, inserted only when supplied.
+  // doctor-only fields, inserted only when supplied. The `extinct` field is
+  // ADDITIVE (appended last) so non-extinct records are byte-identical to the
+  // pre-extinction schema; when a doctor status was supplied for an extinct
+  // anchor it is promoted to 'extinct' so status-keyed consumers see it.
   const record = {
     ts: new Date().toISOString(),
     type: 'anchor-drift',
@@ -87,7 +119,7 @@ export function buildDriftRecord(code, probesIn = {}, meta = {}) {
   if (meta.source !== undefined) record.source = meta.source;
   record.patch = meta.patchName;
   record.version = meta.version ?? null;
-  if (meta.status !== undefined) record.status = meta.status;
+  if (meta.status !== undefined) record.status = extinct ? EXTINCT_STATUS : meta.status;
   if (meta.detail !== undefined) record.detail = meta.detail ?? null;
   record.anchor = {
     id: meta.patchName,
@@ -97,6 +129,7 @@ export function buildDriftRecord(code, probesIn = {}, meta = {}) {
   };
   record.candidates = candidates;
   record.verify_failed = verifyFailed;
+  if (extinct) record.extinct = true;
 
-  return { candidates, verifyFailed, probesCount: probes.length, record };
+  return { candidates, verifyFailed, probesCount: probes.length, record, extinct };
 }

@@ -1,5 +1,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { createPatch } from 'diff';
 import { applyNamedPatches, topoSort } from '../runner/runner.mjs';
 
@@ -377,5 +380,65 @@ describe('applyNamedPatches — revisit markers', () => {
       !logger.warnings.some(w => w.includes('[revisit]')),
       `unexpected revisit warning: ${JSON.stringify(logger.warnings)}`,
     );
+  });
+});
+
+describe('apply-state — artifactsDegraded + string-identity dev guard', () => {
+  // A storageRoot whose `storage` entry is a FILE makes every sidecar
+  // mkdirSync throw ENOTDIR — deterministic artifact-write failure injection.
+  function brokenStorageRoot() {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ccp-runner-broken-'));
+    fs.writeFileSync(path.join(dir, 'storage'), 'not a directory', 'utf8');
+    return dir;
+  }
+
+  it('report.artifactsDegraded lists failed sidecar writes (run still succeeds)', async () => {
+    const dir = brokenStorageRoot();
+    const patches = {
+      // No-op with a real verify.present → triggers the anchor-drift.jsonl
+      // write; bestEffort downgrades the no-op from fatal so the run returns.
+      noop: { description: 't', apply: (c) => c, verify: { present: 'WANTED', weak: true } },
+    };
+    const { report } = await applyNamedPatches('x', patches, ['noop'], silent, {
+      bestEffort: true, storageRoot: dir,
+    });
+    assert.ok(Array.isArray(report.artifactsDegraded), 'artifactsDegraded present');
+    const labels = report.artifactsDegraded.map(f => f.artifact);
+    assert.ok(labels.includes('anchor-drift.jsonl'), `got: ${labels.join(', ')}`);
+    assert.ok(labels.includes('coverage-apply manifest'), `got: ${labels.join(', ')}`);
+    for (const f of report.artifactsDegraded) assert.equal(typeof f.error, 'string');
+  });
+
+  it('happy path: report.artifactsDegraded is absent', async () => {
+    const okDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ccp-runner-ok-'));
+    const patches = { a: mkPatch({ apply: (c) => c + 'A', verify: { present: 'A', weak: true } }) };
+    const { report } = await applyNamedPatches('x', patches, ['a'], silent, { storageRoot: okDir });
+    assert.ok(!('artifactsDegraded' in report), 'field must be absent when nothing failed');
+  });
+
+  it('CCPATCH_DEBUG string-identity guard stays quiet on a normal run (incl. onBeforeApply rewrites)', async () => {
+    const prev = process.env.CCPATCH_DEBUG;
+    process.env.CCPATCH_DEBUG = '1';
+    try {
+      const patches = {
+        a: mkPatch({ apply: (c) => c + 'A', verify: { present: 'A', weak: true } }),
+        // Length-preserving ctx.code rewrite: a FRESH string reference, which
+        // the guard must tolerate because an onBeforeApply hook explains it.
+        hooky: {
+          description: 't',
+          apply: (c) => c + 'B',
+          verify: { present: 'B', weak: true },
+          onBeforeApply(ctx) { ctx.code = ctx.code.split('').join(''); },
+        },
+        // Next patch threads run.nextCode by reference again — guard holds.
+        b: mkPatch({ apply: (c) => c + 'C', verify: { present: 'C', weak: true } }),
+      };
+      const { code, results } = await applyNamedPatches('x', patches, ['a', 'hooky', 'b'], silent);
+      assert.equal(code, 'xABC');
+      assert.deepEqual(results, { a: 'applied', hooky: 'applied', b: 'applied' });
+    } finally {
+      if (prev === undefined) delete process.env.CCPATCH_DEBUG;
+      else process.env.CCPATCH_DEBUG = prev;
+    }
   });
 });

@@ -18,6 +18,12 @@ import { join } from 'node:path';
  * surrounding step's failure (apply throw / verify fail). Not swallowed.
  * Each hook fire writes one JSONL entry to storage/diagnostics/patch-lifecycle.jsonl.
  */
+// Default 30 s; override per-hook via CCPATCH_HOOK_TIMEOUT_MS (0 = disabled).
+const HOOK_TIMEOUT_MS = (() => {
+  const v = Number(process.env.CCPATCH_HOOK_TIMEOUT_MS ?? 30_000);
+  return Number.isFinite(v) && v >= 0 ? v : 30_000;
+})();
+
 export async function fireHook(patch, hookName, ctx, logger) {
   const fn = patch[hookName];
   if (typeof fn !== 'function') return { ok: true, result: undefined };
@@ -41,7 +47,22 @@ export async function fireHook(patch, hookName, ctx, logger) {
     phase: ctx.phase,
   };
   try {
-    const result = await fn(ctx);
+    let hookPromise = fn(ctx);
+    if (HOOK_TIMEOUT_MS > 0) {
+      let timeoutId;
+      const timeoutPromise = new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          reject(new Error(
+            `${ctx.name}.${hookName} timed out after ${HOOK_TIMEOUT_MS} ms ` +
+            `(set CCPATCH_HOOK_TIMEOUT_MS=0 to disable)`
+          ));
+        }, HOOK_TIMEOUT_MS);
+      });
+      hookPromise = Promise.race([hookPromise, timeoutPromise]).finally(() => {
+        clearTimeout(timeoutId);
+      });
+    }
+    const result = await hookPromise;
     const afterLen = (typeof ctx.appliedCode === 'string') ? ctx.appliedCode.length
                    : (typeof ctx.code === 'string') ? ctx.code.length : 0;
     entry.byteDelta = afterLen - beforeLen;

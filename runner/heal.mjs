@@ -16,6 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { PROJECT_ROOT } from './paths.mjs';
+import { isExtinctEntry } from './drift-record.mjs';
 import { style } from './cli/style.mjs';
 
 /**
@@ -25,17 +26,25 @@ import { style } from './cli/style.mjs';
  *
  *   - wrote     : edits were applied → confirm with doctor.
  *   - proposed  : a diff is on stdout → apply with `--write`.
+ *   - extinct   : NOTHING healable AND extinct anchors recorded → heal is the
+ *                 wrong tool; point at from-scratch re-anchoring / retirement.
  *   - nothing   : no healable drift → run doctor to (re)detect drift.
  *
- * @param {{ wrote:boolean, changeCount:number, empty:boolean }} state
+ * @param {{ wrote:boolean, changeCount:number, empty:boolean, extinctCount:number }} state
  * @returns {string}
  */
-export function healNextLine({ wrote = false, changeCount = 0, empty = false } = {}) {
+export function healNextLine({ wrote = false, changeCount = 0, empty = false, extinctCount = 0 } = {}) {
   if (wrote && changeCount > 0) {
     return `${style.cyan('→ Next:')} re-run \`ccpatch doctor <input.js>\` to confirm the anchors now resolve.`;
   }
   if (!empty && changeCount > 0) {
     return `${style.cyan('→ Next:')} re-run with \`ccpatch heal --write\` to apply the proposed registry edit(s).`;
+  }
+  if (extinctCount > 0) {
+    // Extinction beats the re-run-doctor nudge: the fuzzy ranking already came
+    // back empty, so another doctor pass gathers nothing. See THREAT_MODEL.md
+    // "anchor extinction" — re-anchor from scratch or retire the patch.
+    return `${style.cyan('→ Next:')} ${extinctCount} anchor(s) are EXTINCT (zero fuzzy candidates) — heal cannot help. Re-anchor from scratch (docs/finding-anchors.md), check the escape-hatch registry in THREAT_MODEL.md, or retire the patch.`;
   }
   return `${style.cyan('→ Next:')} run \`ccpatch doctor <input.js> --suggest\` to (re)detect drift and gather candidates.`;
 }
@@ -77,13 +86,7 @@ export function readDrift(driftPath = DEFAULT_DRIFT_PATH) {
  * @returns {Map<string, { entry: object, candidate: object }>} keyed by patch
  */
 export function pickTopCandidates(entries) {
-  // Latest entry per patch.
-  const latest = new Map();
-  for (const e of entries) {
-    if (!e || !e.patch) continue;
-    const prev = latest.get(e.patch);
-    if (!prev || (prev.ts || '') < (e.ts || '')) latest.set(e.patch, e);
-  }
+  const latest = latestEntryByPatch(entries);
 
   const result = new Map();
   for (const [name, entry] of latest) {
@@ -93,6 +96,45 @@ export function pickTopCandidates(entries) {
     result.set(name, { entry, candidate });
   }
   return result;
+}
+
+/**
+ * Latest entry per patch (anchor-drift.jsonl is append-only; the most recent
+ * `ts` — lexicographic on ISO timestamps — is today's signal). Shared by
+ * pickTopCandidates (healable drift) and findExtinct (extinct anchors).
+ *
+ * @param {Array<object>} entries
+ * @returns {Map<string, object>} keyed by patch name
+ */
+function latestEntryByPatch(entries) {
+  const latest = new Map();
+  for (const e of entries) {
+    if (!e || !e.patch) continue;
+    const prev = latest.get(e.patch);
+    if (!prev || (prev.ts || '') < (e.ts || '')) latest.set(e.patch, e);
+  }
+  return latest;
+}
+
+/**
+ * Collect the patches whose LATEST drift entry records an extinct anchor —
+ * zero fuzzy candidates above threshold across every probe (see
+ * runner/drift-record.mjs). These are deliberately NOT healable: there is no
+ * candidate literal to propose, and a heal run that silently dropped them
+ * would make total extinction look like "nothing to do". Callers surface them
+ * loudly instead.
+ *
+ * @param {Array<object>} entries
+ * @returns {Array<{ patch:string, id:string|null, detail:string|null }>}
+ */
+export function findExtinct(entries) {
+  const out = [];
+  for (const [name, entry] of latestEntryByPatch(entries)) {
+    if (!entry.status || entry.status === 'ok') continue;
+    if (!isExtinctEntry(entry)) continue;
+    out.push({ patch: name, id: anchorIdFor(entry), detail: entry.detail ?? null });
+  }
+  return out.sort((a, b) => a.patch.localeCompare(b.patch));
 }
 
 /**
@@ -201,15 +243,31 @@ export function rewriteAnchorLiteral(src, id, literal) {
  * @param {string}        anchorsSrc  current runner/anchors.mjs source text
  * @param {object}        [opts]
  * @param {string}        [opts.fileLabel='runner/anchors.mjs'] label for the diff header
- * @returns {{ diff: string, newSrc: string, changes: Array<{patch,id,literal}>, skipped: Array<{patch,id,reason}> }}
+ * @returns {{ diff: string, newSrc: string, changes: Array<{patch,id,literal}>, skipped: Array<{patch,id,reason}>, extinct: Array<{patch,id,detail}> }}
  */
 export function proposeHeal(entries, anchorsSrc, opts = {}) {
   const fileLabel = opts.fileLabel || 'runner/anchors.mjs';
   const picks = pickTopCandidates(entries);
 
+  // Extinct anchors (zero fuzzy candidates) never reach `picks` — they have no
+  // candidate to promote. Surface them DISTINCTLY instead of letting them
+  // vanish: each lands in `skipped` with a loud reason (so the existing CLI
+  // skip-rendering shows it) AND in the dedicated `extinct` list for
+  // programmatic consumers.
+  const extinct = findExtinct(entries);
+
   let newSrc = anchorsSrc;
   const changes = [];
   const skipped = [];
+  for (const e of extinct) {
+    skipped.push({
+      patch: e.patch,
+      id: e.id,
+      reason: 'ANCHOR EXTINCT — zero fuzzy candidates above threshold; heal cannot help. ' +
+        'Re-anchor from scratch (docs/finding-anchors.md), check the escape-hatch registry ' +
+        '(THREAT_MODEL.md), or retire the patch.',
+    });
+  }
 
   // Deterministic order: by patch name.
   for (const name of [...picks.keys()].sort()) {
@@ -235,7 +293,7 @@ export function proposeHeal(entries, anchorsSrc, opts = {}) {
     ? ''
     : makeUnifiedDiff(fileLabel, anchorsSrc, newSrc);
 
-  return { diff, newSrc, changes, skipped };
+  return { diff, newSrc, changes, skipped, extinct };
 }
 
 /**
@@ -286,19 +344,19 @@ function makeUnifiedDiff(label, oldStr, newStr, context = 3) {
  * @param {{log:Function}}[opts.logger] when provided, the `→ Next:` capstone is
  *        emitted through it so heal ends with the same actionable line the build
  *        report uses. The line is always returned as `nextLine` regardless.
- * @returns {{ ok: boolean, error?: string, diff: string, changes, skipped, wrote: boolean, nextLine?: string }}
+ * @returns {{ ok: boolean, error?: string, diff: string, changes, skipped, extinct, wrote: boolean, nextLine?: string }}
  */
 export function runHeal(opts = {}) {
   const driftPath = opts.driftPath || DEFAULT_DRIFT_PATH;
   const anchorsPath = opts.anchorsPath || DEFAULT_ANCHORS_PATH;
 
   if (!fs.existsSync(anchorsPath)) {
-    return { ok: false, error: `anchors registry not found: ${anchorsPath}`, diff: '', changes: [], skipped: [], wrote: false };
+    return { ok: false, error: `anchors registry not found: ${anchorsPath}`, diff: '', changes: [], skipped: [], extinct: [], wrote: false };
   }
   const entries = readDrift(driftPath);
   const anchorsSrc = fs.readFileSync(anchorsPath, 'utf8');
   const fileLabel = path.relative(PROJECT_ROOT, anchorsPath) || path.basename(anchorsPath);
-  const { diff, newSrc, changes, skipped } = proposeHeal(entries, anchorsSrc, { fileLabel });
+  const { diff, newSrc, changes, skipped, extinct } = proposeHeal(entries, anchorsSrc, { fileLabel });
 
   let wrote = false;
   if (opts.write && diff) {
@@ -307,11 +365,12 @@ export function runHeal(opts = {}) {
   }
   const empty = diff === '';
   // Build-style capstone: after a --write apply, point at doctor to confirm;
-  // after a proposal, point at `heal --write` to apply; with nothing to do,
-  // point back at doctor --suggest to (re)detect drift.
-  const nextLine = healNextLine({ wrote, changeCount: changes.length, empty });
+  // after a proposal, point at `heal --write` to apply; with extinct anchors
+  // and nothing healable, point at the from-scratch re-anchoring loop; with
+  // nothing at all, point back at doctor --suggest to (re)detect drift.
+  const nextLine = healNextLine({ wrote, changeCount: changes.length, empty, extinctCount: extinct.length });
   if (opts.logger && typeof opts.logger.log === 'function') {
     opts.logger.log(nextLine);
   }
-  return { ok: true, diff, changes, skipped, wrote, empty, driftCount: entries.length, nextLine };
+  return { ok: true, diff, changes, skipped, extinct, wrote, empty, driftCount: entries.length, nextLine };
 }

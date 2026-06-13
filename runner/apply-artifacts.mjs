@@ -20,16 +20,30 @@ import { PROJECT_ROOT } from './paths.mjs';
  * returned closure (run-scoped), NOT a module global — concurrent runs each get
  * their own latch.
  *
+ * Task 4: the latch only suppresses LOGGING — every reported failure is still
+ * COLLECTED (deduped by artifact label, first error message wins) on the
+ * returned function's `.failures` array so the runner can surface an
+ * `artifactsDegraded` section in the build report. Callers that ignore the
+ * property see the exact historical warn-once behavior.
+ *
  * @param {object} logger
- * @returns {(label: string, err: Error) => void}
+ * @returns {((label: string, err: Error) => void) & {failures: Array<{artifact: string, error: string}>}}
  */
 export function makeStorageWarnOnce(logger) {
   let warned = false;
-  return (label, err) => {
+  const seen = new Set();
+  const failures = [];
+  const warn = (label, err) => {
+    if (!seen.has(label)) {
+      seen.add(label);
+      failures.push({ artifact: label, error: err?.message ?? String(err) });
+    }
     if (warned) return;
     warned = true;
     logger.warn?.(`  [!] Storage write failed (${label}): ${err.message}. Further storage-write failures this run will be silent.`);
   };
+  warn.failures = failures;
+  return warn;
 }
 
 /**
@@ -38,20 +52,31 @@ export function makeStorageWarnOnce(logger) {
  * Kept separate from the coverage/results writes because it must run BEFORE the
  * strict-mode failure throw (the original code wrote conflicts pre-throw and
  * coverage/results post-throw).
+ *
+ * @returns {boolean} true when written (or nothing to write), false on a
+ *   failed write — so callers can tell a degraded run from a healthy one
+ *   (Task 4). The failure is additionally collected on warnStorageOnce.failures.
  */
 export function writeConflictsArtifact(allConflicts, warnStorageOnce, storageRoot = PROJECT_ROOT) {
-  if (allConflicts.length === 0) return;
+  if (allConflicts.length === 0) return true;
   try {
     mkdirSync(join(storageRoot, 'storage', 'outputs'), { recursive: true });
     const out = allConflicts.map(c => JSON.stringify(c)).join('\n') + '\n';
     appendFileSync(join(storageRoot, 'storage', 'outputs', 'patch-conflicts.jsonl'), out, 'utf8');
-  } catch (err) { warnStorageOnce?.('patch-conflicts.jsonl', err); }
+    return true;
+  } catch (err) {
+    warnStorageOnce?.('patch-conflicts.jsonl', err);
+    return false;
+  }
 }
 
 /**
  * Consolidate the two post-success apply-time sidecar writes (coverage manifest,
- * patch-results catalog) into one fs-isolated helper. Returns nothing; each
- * write is best-effort and failures are logged but non-fatal.
+ * patch-results catalog) into one fs-isolated helper. Each write is best-effort
+ * and failures are logged but non-fatal; the labels of failed writes are
+ * returned (`{ failed: string[] }`, empty on the happy path) AND collected on
+ * warnStorageOnce.failures so the build report can surface a degraded run
+ * (Task 4).
  *
  * ARCH5: reads the resolved variant via getResolvedVariant(patch) instead of
  * patch.__resolvedVariant.
@@ -63,8 +88,10 @@ export function writeConflictsArtifact(allConflicts, warnStorageOnce, storageRoo
  * @param {object} args.patchOptions  carries .version
  * @param {(p:object)=>string} args.phaseOf  phase resolver
  * @param {object} args.logger
+ * @returns {{ failed: string[] }} labels of artifacts whose write failed
  */
 export function writeApplyArtifacts({ results, patches, phaseTraces, patchOptions, phaseOf, logger, warnStorageOnce, storageRoot = PROJECT_ROOT }) {
+  const failed = [];
   // 1) Apply-time coverage manifest. Always emitted; versioned filename when
   // version is known so multiple builds don't clobber each other.
   // Cross-referenced by `ccpatch coverage` against runtime hits.
@@ -103,6 +130,7 @@ export function writeApplyArtifacts({ results, patches, phaseTraces, patchOption
   } catch (err) {
     // S5: route through the run-scoped warn-once latch.
     warnStorageOnce?.('coverage-apply manifest', err);
+    failed.push('coverage-apply manifest');
   }
 
   // 2) Patch-results catalog (only when version is known). Decorated with the
@@ -126,6 +154,8 @@ export function writeApplyArtifacts({ results, patches, phaseTraces, patchOption
     } catch (err) {
       // S5: route through the run-scoped warn-once latch.
       warnStorageOnce?.('patch-results catalog', err);
+      failed.push('patch-results catalog');
     }
   }
+  return { failed };
 }

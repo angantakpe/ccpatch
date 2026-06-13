@@ -288,8 +288,14 @@ export interface CapabilityDetail {
   /** The patch name that provides this capability. */
   patch: string;
   /**
+   * The typed __ccp* contract this capability is pinned to (a key of
+   * ADK_CONTRACT_REQUIREMENTS in contracts.mjs), when one exists.
+   */
+  contract?: string;
+  /**
    * Set only when the version/shape contract handshake DOWNGRADED `live` to false
-   * (e.g. "contract systemPrompt v1 < required v2" or "shape missing getNonce").
+   * (e.g. "contract systemPrompt v1 < required v2" or "... shape missing getNonce ...").
+   * Names WHICH contract failed and the producer-vs-required version mismatch.
    */
   reason?: string;
 }
@@ -339,6 +345,48 @@ export interface AgentBus {
 
 /** Return the live __ccpBus or throw if the event bus patch is off. */
 export function useAgentBus(): AgentBus;
+
+// ── Contract pins (contracts.mjs) ─────────────────────────────────────────────
+
+/** One pinned __ccp* contract dependency (see packages/adk/contracts.mjs). */
+export interface ContractRequirement {
+  /** The capabilities() boolean this contract gates. */
+  capability: 'tools' | 'delegate' | 'swap' | 'router' | 'bus';
+  /** Consumer id passed to __ccpRequire (error attribution). */
+  consumer: string;
+  /** Minimum producer contract version the ADK supports. */
+  minVersion: number;
+  /** Dotted value paths the producer MUST satisfy. */
+  shape: readonly string[];
+  /** The ccpatch patch expected to produce this contract. */
+  producerPatch: string;
+}
+
+/** Result of validating one ADK contract dependency against the live registry. */
+export interface ContractCheckResult {
+  /** 'unchecked' = nothing to prove (fail-open); 'ok' = validated; 'drift' = refuse. */
+  status: 'unchecked' | 'ok' | 'drift';
+  /** How an 'ok' was proven ('require' probed actual value paths). */
+  via?: 'require' | 'advertised';
+  /** For 'drift': names the contract, producer version, and required minimum. */
+  reason?: string;
+  /** The registry entry that was checked, when one was found. */
+  entry?: { name: string; version: number; producer: string; shape: string[] };
+  /** The contract value, when validated via __ccpRequire. */
+  value?: unknown;
+}
+
+/**
+ * The ADK's centralized pin table: every __ccp* typed contract it consumes and
+ * the minimum version/shape it requires of each producer.
+ */
+export const ADK_CONTRACT_REQUIREMENTS: Readonly<Record<string, Readonly<ContractRequirement>>>;
+
+/**
+ * Validate one ADK contract dependency against the live registry. Never throws;
+ * fail-open ('unchecked') when no registry / no registered entry exists.
+ */
+export function checkContract(name: string): ContractCheckResult;
 
 // ── createAdk: isolated instance ──────────────────────────────────────────────
 

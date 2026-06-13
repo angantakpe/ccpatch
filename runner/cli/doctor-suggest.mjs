@@ -10,6 +10,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { isExtinctEntry } from '../drift-record.mjs';
+
 const DRIFT_JSONL_PATHS = [
   // The doctor itself writes here.
   path.join('storage', 'diagnostics', 'anchor-drift.jsonl'),
@@ -62,6 +64,20 @@ export function formatSuggestion(entry) {
   const lines = [];
   const candidates = Array.isArray(entry.candidates) ? entry.candidates.slice(0, 3) : [];
   lines.push(`▸ ${entry.patch}${entry.detail ? ` — ${entry.detail}` : ''}`);
+  if (isExtinctEntry(entry)) {
+    // Anchor extinction (THREAT_MODEL.md): every probe produced ZERO fuzzy
+    // candidates — the literal has vanished from the bundle. Louder than the
+    // ordinary no-candidates note because "re-run doctor" will not help and
+    // there is no stub to paste; the fix loop starts from scratch.
+    lines.push('    ✖ EXTINCT — anchor literal has vanished from the bundle (zero fuzzy candidates above threshold).');
+    lines.push('      This is NOT ordinary drift; `ccpatch heal` has nothing to propose. Next steps:');
+    lines.push('        1. re-anchor from scratch — see docs/finding-anchors.md');
+    lines.push('        2. check the escape-hatch registry (THREAT_MODEL.md) before bypassing any gate');
+    lines.push('        3. or retire the patch (deprecated: { reason, since } + disable in ccpatch.yml)');
+    lines.push('      If MANY anchors are extinct on one new bundle, suspect an upstream toolchain');
+    lines.push('      change (THREAT_MODEL.md "anchor extinction") — do not chase individual anchors.');
+    return lines.join('\n');
+  }
   if (candidates.length === 0) {
     lines.push('    (no fuzzy candidates recorded — try re-running doctor against a fresh bundle)');
     return lines.join('\n');

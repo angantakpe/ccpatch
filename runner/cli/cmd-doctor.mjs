@@ -64,6 +64,13 @@ export function doctorNextLine(counts, options = {}) {
   const drift = counts.drift || 0;
   const missing = counts.missing || 0;
   const unverified = counts.unverified || 0;
+  const extinct = counts.extinct || 0;
+  if (extinct > 0) {
+    // Extinction beats the heal nudge: heal's fuzzy ranking has ZERO
+    // candidates for these anchors, so pointing at `ccpatch heal` would be a
+    // dead end. Point at the from-scratch re-anchoring loop instead.
+    return `${style.cyan('→ Next:')} ${extinct} anchor(s) EXTINCT — \`ccpatch heal\` cannot help. Re-anchor from scratch (docs/finding-anchors.md), check the escape-hatch registry in THREAT_MODEL.md before bypassing any gate, or retire the patch (deprecated: { reason, since }).`;
+  }
   if (drift > 0 || missing > 0) {
     const seeCandidates = options.suggest ? '' : ' (add --suggest for fuzzy candidates)';
     return `${style.cyan('→ Next:')} \`ccpatch heal\` to propose anchor fixes, then \`ccpatch heal --write\` to apply${seeCandidates}.`;
@@ -99,9 +106,14 @@ export async function runDoctorCore(options, patches, logger, out = {}) {
     logger.log(`[ccpatch] profile=(all enabled) patches=${names.length}`);
   }
 
-  let ok = 0, drift = 0, missing = 0, unverified = 0;
+  let ok = 0, drift = 0, missing = 0, unverified = 0, extinct = 0;
   const unverifiedNames = [];
-  const driftEntries = [];
+  // Drift forensics are built INSIDE the loop (not deferred) so the extinction
+  // signal — zero fuzzy candidates across every probe — can change what gets
+  // printed for the anchor. The assembled records are appended to the JSONL
+  // stream after the loop, exactly as before.
+  const driftRecords = [];
+  const version = options.patchOptions?.version ?? process.env.CCPATCH_CLI_VERSION ?? null;
   // #12: accumulate per-anchor results for --json output
   const anchorResults = [];
   for (const name of names) {
@@ -138,16 +150,43 @@ export async function runDoctorCore(options, patches, logger, out = {}) {
         ok++;
         anchorResults.push({ name, status: 'ok', candidates: res.candidates ?? [] });
       }
-    } else if (res.status === 'drift') {
-      logger.log(`  DRIFT        ${name} — ${res.detail}`);
-      drift++;
-      driftEntries.push({ name, patch, status: res.status, detail: res.detail });
-      anchorResults.push({ name, status: 'drift', candidates: res.candidates ?? [] });
     } else {
-      logger.log(`  MISSING      ${name} — ${res.detail}`);
-      missing++;
-      driftEntries.push({ name, patch, status: res.status, detail: res.detail });
-      anchorResults.push({ name, status: 'missing', candidates: res.candidates ?? [] });
+      // A5: forensics (probes → fuzzyMatch → dedupe → top 3 → record) come from
+      // the shared buildDriftRecord() helper. Passing source/status/detail
+      // preserves the doctor-only fields and keeps the JSONL byte-compatible
+      // with the old writer (extinction adds one ADDITIVE field).
+      const v = patch.verify ?? {};
+      const { record, candidates, extinct: isExtinct } = buildDriftRecord(
+        code,
+        { literal: patch.anchor?.literal ?? null, present: v.present, absent: v.absent },
+        { source: 'doctor', patchName: name, version, status: res.status, detail: res.detail ?? null },
+      );
+      driftRecords.push(record);
+      if (isExtinct) {
+        // Anchor extinction: every probe came back with ZERO fuzzy candidates.
+        // This is the THREAT_MODEL.md "anchor extinction" signature — louder
+        // than DRIFT/MISSING because `heal` has nothing to propose and chasing
+        // candidates is wasted work. (Many EXTINCT at once on a new bundle =
+        // suspect an upstream toolchain change, not N independent regressions.)
+        logger.log(
+          `  EXTINCT      ${name} — ${res.detail}\n` +
+          `               ⚠ anchor literal has vanished from this bundle: zero fuzzy candidates above threshold.\n` +
+          `                 \`ccpatch heal\` cannot fix this. Next steps:\n` +
+          `                   1. re-anchor from scratch — see docs/finding-anchors.md\n` +
+          `                   2. check the escape-hatch registry (THREAT_MODEL.md) before bypassing any gate\n` +
+          `                   3. or retire the patch: mark it deprecated and disable it in ccpatch.yml`
+        );
+        extinct++;
+        anchorResults.push({ name, status: 'extinct', candidates });
+      } else if (res.status === 'drift') {
+        logger.log(`  DRIFT        ${name} — ${res.detail}`);
+        drift++;
+        anchorResults.push({ name, status: 'drift', candidates: res.candidates ?? [] });
+      } else {
+        logger.log(`  MISSING      ${name} — ${res.detail}`);
+        missing++;
+        anchorResults.push({ name, status: 'missing', candidates: res.candidates ?? [] });
+      }
     }
   }
 
@@ -162,19 +201,12 @@ export async function runDoctorCore(options, patches, logger, out = {}) {
   // A5: forensics (probes → fuzzyMatch → dedupe → top 3 → record) come from the
   // shared buildDriftRecord() helper. Passing source/status/detail preserves the
   // doctor-only fields and keeps the JSONL byte-compatible with the old writer.
-  if (driftEntries.length > 0) {
-    const version = options.patchOptions?.version ?? process.env.CCPATCH_CLI_VERSION ?? null;
+  if (driftRecords.length > 0) {
     // S5: first storage-write failure of this command warns once; rest stay quiet.
     let storageWarned = false;
     fs.mkdirSync('storage/outputs', { recursive: true });
     const outPath = path.join('storage/outputs', 'anchor-drift.jsonl');
-    for (const { name, patch, status, detail } of driftEntries) {
-      const v = patch.verify ?? {};
-      const { record } = buildDriftRecord(
-        code,
-        { literal: patch.anchor?.literal ?? null, present: v.present, absent: v.absent },
-        { source: 'doctor', patchName: name, version, status, detail: detail ?? null },
-      );
+    for (const record of driftRecords) {
       try {
         fs.appendFileSync(outPath, JSON.stringify(record) + '\n', 'utf8');
       } catch (err) {
@@ -185,7 +217,8 @@ export async function runDoctorCore(options, patches, logger, out = {}) {
       }
     }
   }
-  logger.log(`\n${ok} ok, ${drift} drifted, ${unverified} unverified, ${missing} missing`);
+  const extinctSuffix = extinct > 0 ? `, ${extinct} extinct` : '';
+  logger.log(`\n${ok} ok, ${drift} drifted, ${unverified} unverified, ${missing} missing${extinctSuffix}`);
 
   // WS6 Item 8: report whether the native single-executable (Bun SEA) repack can
   // achieve the FULL patch set on THIS host, or whether it is reduced/blocked by
@@ -201,6 +234,7 @@ export async function runDoctorCore(options, patches, logger, out = {}) {
   out.drift = drift;
   out.missing = missing;
   out.unverified = unverified;
+  out.extinct = extinct;
   out.ok = ok;
 
   // Match the build's `→ Next:` affordance (build-report.mjs): end the command
@@ -215,7 +249,6 @@ export async function runDoctorCore(options, patches, logger, out = {}) {
 
   // #12/#13: --json output — emit structured result on stdout after all logging is done
   if (options.json || options.jsonOutput) {
-    const version = options.patchOptions?.version ?? process.env.CCPATCH_CLI_VERSION ?? null;
     process.stdout.write(JSON.stringify(
       { version, anchors: anchorResults.map(r => ({ name: r.name, status: r.status, candidates: r.candidates ?? [] })) },
       null,
@@ -223,7 +256,10 @@ export async function runDoctorCore(options, patches, logger, out = {}) {
     ) + '\n');
   }
 
-  if (missing > 0) return 1;
+  // Extinct anchors fail the doctor exactly as missing ones always have
+  // (extinct ⊂ the previous 'missing' bucket — the exit-code contract for CI
+  // consumers like version-matrix.yml is unchanged).
+  if (missing > 0 || extinct > 0) return 1;
   if (unverified > 0 && options.strict) {
     logger.error(`  [strict] UNVERIFIED treated as failure: ${unverifiedNames.join(', ')}`);
     return 1;

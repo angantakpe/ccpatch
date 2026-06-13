@@ -33,8 +33,10 @@ import {
   AgentRouter,
 } from './handoff.mjs';
 import { createMemory } from './memory.mjs';
+import { ADK_CONTRACT_REQUIREMENTS, checkContract } from './contracts.mjs';
 
 export { defineAgent, getAgent, listAgents } from './agent.mjs';
+export { ADK_CONTRACT_REQUIREMENTS, checkContract } from './contracts.mjs';
 export { defineTool, listTools, toolStatuses } from './tool-registry.mjs';
 export { createMemory } from './memory.mjs';
 export { AgentRouter, defineHandoff, restoreSystemPrompt } from './handoff.mjs';
@@ -70,8 +72,11 @@ export function tryAcquireSwap() {
  * @typedef {Object} CapabilityDetail
  * @property {boolean} live   Mirrors the top-level boolean for this capability.
  * @property {string} patch   The patch name that provides this capability.
+ * @property {string} [contract] The typed __ccp* contract name this capability
+ *   is pinned to (a key of ADK_CONTRACT_REQUIREMENTS — see contracts.mjs).
  * @property {string} [reason] Set when the contract handshake DOWNGRADED `live`
- *   to false (e.g. "contract systemPrompt v1 < required v2").
+ *   to false (e.g. "contract systemPrompt v1 < required v2"). Names WHICH
+ *   contract failed and the producer-vs-required version/shape mismatch.
  */
 
 /**
@@ -111,15 +116,21 @@ const CAPABILITY_PATCH = {
  *
  * VERSION/SHAPE HANDSHAKE: where a typed contract is registered
  * (core/contracts.mjs — capabilities() is the ADK's drift-refusal consumer), we
- * cross-check ALL contracted capabilities via __ccpInspectContracts so a
+ * cross-check ALL contracted capabilities via the centralized pin table in
+ * contracts.mjs (ADK_CONTRACT_REQUIREMENTS / checkContract — which routes
+ * through __ccpRequire(name, { minVersion, shape }) when available) so a
  * present-but-shape/version-drifted global is not reported as usable. The direct
  * global probe remains the source of truth (contracts are opt-in per boundary):
  * a capability with NO registered contract keeps its probe result. The contract
  * check only ever DOWNGRADES a capability it can positively prove broken (never
- * invents one) and records why in `detail[cap].reason`. Required minimums:
- *   - swap  → contract 'systemPrompt' minVersion 2 AND shape includes 'getNonce'
- *   - tools → contract 'toolDispatch' shape includes 'registerTool'
- *   - delegate → contract 'agentTool' shape includes 'invoke'
+ * invents one) and records why in `detail[cap].reason` — naming WHICH contract
+ * failed and the producer-vs-required version mismatch. Pinned minimums live in
+ * ONE place, packages/adk/contracts.mjs:
+ *   - tools    → 'toolDispatch' v>=2, shape ['registerTool']
+ *   - delegate → 'agentTool'    v>=1, shape ['invoke']
+ *   - swap     → 'systemPrompt' v>=2, shape ['getNonce']
+ *   - router   → 'submitInput'  v>=1
+ *   - bus      → 'bus'          v>=1, shape ['emit']
  * It is fully defensive (wrapped in try/catch; advisory only, never throws).
  *
  * @returns {Capabilities}
@@ -141,45 +152,23 @@ export function capabilities() {
   }
   caps.detail = detail;
 
-  // Version/shape handshake against the typed contract registry. Only
-  // ever flips a capability true→false (and records a reason); a missing contract
-  // entry leaves the direct probe authoritative.
-  const inspect = globalThis.__ccpInspectContracts;
-  if (typeof inspect === 'function') {
+  // Version/shape handshake against the typed contract registry, driven by the
+  // ONE pin table in contracts.mjs (checkContract routes through
+  // __ccpRequire(name, { minVersion, shape }) when the helper is live). Only
+  // ever flips a capability true→false (and records a reason naming the failed
+  // contract + version mismatch); an unregistered contract leaves the direct
+  // probe authoritative.
+  for (const [name, req] of Object.entries(ADK_CONTRACT_REQUIREMENTS)) {
+    const cap = req.capability;
+    if (!detail[cap]) continue;
+    detail[cap].contract = name; // which contract pins this capability
+    if (!caps[cap]) continue;    // already dead by direct probe — nothing to downgrade
     try {
-      const known = new Map(inspect().map((e) => [e.name, e]));
-
-      // Downgrade `cap` to false + record `reason` (idempotent on the boolean).
-      const downgrade = (cap, reason) => {
+      const res = checkContract(name);
+      if (res.status === 'drift') {
         caps[cap] = false;
         detail[cap].live = false;
-        detail[cap].reason = reason;
-      };
-
-      // tools → 'toolDispatch' must advertise the nonce-gated registrar.
-      if (caps.tools && known.has('toolDispatch')) {
-        const e = known.get('toolDispatch');
-        if (Array.isArray(e.shape) && e.shape.length && !e.shape.includes('registerTool')) {
-          downgrade('tools', 'shape missing registerTool');
-        }
-      }
-
-      // delegate → 'agentTool' must advertise invoke.
-      if (caps.delegate && known.has('agentTool')) {
-        const e = known.get('agentTool');
-        if (Array.isArray(e.shape) && e.shape.length && !e.shape.includes('invoke')) {
-          downgrade('delegate', 'shape missing invoke');
-        }
-      }
-
-      // swap → 'systemPrompt' must be v>=2 AND advertise getNonce.
-      if (caps.swap && known.has('systemPrompt')) {
-        const e = known.get('systemPrompt');
-        if (typeof e.version === 'number' && e.version < 2) {
-          downgrade('swap', `contract systemPrompt v${e.version} < required v2`);
-        } else if (Array.isArray(e.shape) && e.shape.length && !e.shape.includes('getNonce')) {
-          downgrade('swap', 'shape missing getNonce');
-        }
+        detail[cap].reason = res.reason;
       }
     } catch (_) { /* contract probe is advisory only */ }
   }
@@ -189,11 +178,18 @@ export function capabilities() {
 
 /**
  * useAgentBus — return the live __ccpBus or throw if the event bus patch is off.
+ * A registered-but-drifted 'bus' contract (pin: contracts.mjs) is refused with
+ * the drift reason rather than handing back a present-but-broken bus; an
+ * unregistered contract keeps the bare-global fail-open path for test stubs.
  * @returns {{ emit: Function, on?: Function, off?: Function }}
  */
 export function useAgentBus() {
   const bus = globalThis.__ccpBus;
   if (!bus) throw new Error('useAgentBus: __ccpBus not available — ensure event_bus patch is applied');
+  const res = checkContract('bus');
+  if (res.status === 'drift') {
+    throw new Error(`useAgentBus: refusing drifted bus contract — ${res.reason}`);
+  }
   return bus;
 }
 

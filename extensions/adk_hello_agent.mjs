@@ -71,11 +71,15 @@ const AGENT_CODE = `
   // → toolDispatch v2). If it isn't live, skip loudly rather than hang on a
   // never-injecting tool handle.
   if (!caps.tools) {
-    const why = caps.detail && caps.detail.tools && caps.detail.tools.reason
-      ? ' (' + caps.detail.tools.reason + ')' : '';
+    const d = (caps.detail && caps.detail.tools) || {};
+    // d.reason names WHICH contract failed and the version mismatch (the ADK's
+    // centralized pins live in packages/adk/contracts.mjs); d.contract names the
+    // typed __ccp* contract the capability is pinned to.
+    const why = d.reason ? ' (' + d.reason + ')' : '';
+    const pin = d.contract ? ' [contract: ' + d.contract + ']' : '';
     process.stderr.write(
       '[adk-hello] tools capability not live' + why +
-      ' — enable ' + (caps.detail && caps.detail.tools && caps.detail.tools.patch) +
+      ' — enable ' + d.patch + pin +
       '; persona registered, tool skipped.\\n');
     return;
   }

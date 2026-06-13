@@ -50,6 +50,23 @@ requires `systemPrompt` **minVersion 2 with shape `getNonce`** for `swap`, and
 `toolDispatch` shape `registerTool` for `tools` — a host advertising the old v1
 shape is downgraded loudly in `capabilities().detail[cap].reason`.
 
+## headless_bridge: tool-dispatch allowlist (default-deny)
+
+The `headless_bridge` extension's `dispatch` op is gated by a server-side tool
+allowlist read from `CC_BRIDGE_TOOL_ALLOWLIST` at bridge startup:
+
+| `CC_BRIDGE_TOOL_ALLOWLIST` | Effect |
+|---|---|
+| unset / empty | **Deny every `dispatch` op** (the default). A one-time loud warning is printed at bridge startup when unset; denied dispatches return an error naming the variable and both opt-in forms. |
+| `*` | Allow every exposed tool. This was the implicit pre-allowlist behavior; it now requires explicit opt-in. |
+| `ToolA,ToolB` | Allow only the named tools (a `*` entry anywhere in the list means allow-all). |
+
+Only `dispatch` is gated — `hello`, `submit`, `subscribe`, `cancel`, and `bye`
+work regardless of the allowlist. **Breaking change:** bridge clients that
+dispatched tools with the variable unset must now set it (a per-tool list is
+preferred; `'*'` restores the old behavior). See THREAT_MODEL.md ("Remote
+tool/code-execution surface") for why the default is deny-all.
+
 ## Authoring an extension
 
 See [docs/authoring-patches.md](docs/authoring-patches.md) for the full patch manifest reference, lifecycle hooks, and worked examples.
@@ -131,3 +148,4 @@ Note: when using the companion file convention, `validateManifest` will emit a w
 - **v0.2.0** — Initial API documentation.
 - **v0.2.1** — Preload companion `.preload.mjs` file convention (#9).
 - **v0.2.2** — Nonce-gated ADK write surfaces. `expose_tool_dispatch` adds `__ccpRegisterTool`/`__ccpUnregisterTool` (dispatch-nonce gated) and bumps the `toolDispatch` contract to **v2**. `expose_system_prompt` makes `__ccpSetSystemPrompt` two-arg `(nonce, value)`, adds `__ccpGetSystemPromptNonce()`, and bumps the `systemPrompt` contract to **v2** (shape `['set','get','getNonce']`). `contracts` publishes the coarse `__ccpAdkContract` marker. **Breaking:** the old single-arg `__ccpSetSystemPrompt(str)` is superseded; the ADK keeps a legacy fallback for hosts/stubs without the nonce getter.
+- **v0.2.3** — Security-review hardening. **Breaking:** `headless_bridge` tool dispatch is now default-deny — `CC_BRIDGE_TOOL_ALLOWLIST` unset/empty rejects every `dispatch` op; set a per-tool list or `'*'` to restore dispatch (non-dispatch ops unaffected). `policy_gate` prints a one-time loud boot warning when `CCP_POLICY_GATE_MODULE` is configured but the gate degrades to no-gating (missing/throwing module, wrong shape, or throwing `steer()` boot probe) — runtime fail-open behavior unchanged. Capability declarations made honest: `headless_bridge` → `network,prompt,tools,exec,env,fs`; `policy_gate` → `+exec`; `expose_tool_dispatch` → `tools,network,exec`.

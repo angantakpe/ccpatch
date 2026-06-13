@@ -332,21 +332,24 @@ export function recordStage({
  *
  * The returned flushPendingVerify drains state.pendingVerify, runs verifyBatch
  * grouped by snapshot identity, dispatches onVerifyFail heals, and records
- * failures. Sharing state via the `state` handle (nextCode + pendingVerify)
- * keeps the orchestration loop thin.
+ * failures. The flusher takes ONE context object: the runner's apply-state
+ * struct (`state`) — which carries every mutable collection it reads or writes
+ * (pendingVerify, nextCode, failures, verifyIssuesReport, harness) — plus the
+ * frame, the re-check primitive, and the logger. Formerly each collection was
+ * a loose closure parameter; the struct keeps the orchestration loop and this
+ * closure sharing one named handle.
  *
  * @param {object} args
- * @param {object} args.state    mutable shared handle: { pendingVerify, nextCode }
- * @param {string[]} args.failures
- * @param {object[]} args.verifyIssuesReport
+ * @param {object} args.state    the apply-state struct:
+ *                               { pendingVerify, nextCode, failures,
+ *                                 verifyIssuesReport, harness, ... }
  * @param {object} args.frame    CoordinateFrame (records onVerifyFail heal deltas)
  * @param {(verify:object, code:string)=>string[]} args.checkVerify
  * @param {object} args.logger
  * @returns {(reasonPhase: string|null)=>Promise<void>}
  */
-export function makeVerifyFlusher({
-  state, failures, verifyIssuesReport, frame, checkVerify, logger, harness,
-}) {
+export function makeVerifyFlusher({ state, frame, checkVerify, logger }) {
+  const { failures, verifyIssuesReport, harness } = state;
   return async function flushPendingVerify(_reasonPhase) {
     if (state.pendingVerify.length === 0) return;
     logger.debug?.(`  [verify] flushing phase "${_reasonPhase}" (${state.pendingVerify.length} pending)`);

@@ -518,8 +518,12 @@ export function validateManifest(mod, filename, ctx = {}) {
         errors.push(fieldHint('revisit', '.note is required and must be a non-empty string'));
       }
       for (const k of ['addedIn', 'until']) {
-        if (mod.revisit[k] !== undefined && typeof mod.revisit[k] !== 'string') {
-          errors.push(`revisit.${k} must be a string (semver-like, e.g. "2.1.131")`);
+        if (mod.revisit[k] !== undefined) {
+          if (typeof mod.revisit[k] !== 'string') {
+            errors.push(`revisit.${k} must be a string (semver-like, e.g. "2.1.131")`);
+          } else if (parseVariantStem(mod.revisit[k].trim()) == null) {
+            errors.push(`revisit.${k} "${mod.revisit[k]}" is not a valid version (expected semver-like, e.g. "2.1.131")`);
+          }
         }
       }
     }

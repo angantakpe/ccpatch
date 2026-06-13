@@ -284,15 +284,37 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
     }
   }
 
-  // Item 2: `nextCode` and the deferred-verify queue (`pendingVerify`) are the
-  // two pieces of mutable state shared between the apply loop and the verify
-  // flush stage (an onVerifyFail heal rewrites nextCode; the loop pushes into
-  // pendingVerify, the flush drains it). They live on a single `state` handle so
-  // makeVerifyFlusher() can read/write them without the loop and the closure
-  // closing over two separate `let` bindings.
-  const state = { nextCode: code, pendingVerify: [] };
-  const results = {};
+  // Item 2 / Arch review: ONE apply-state struct (`run`) carries every piece of
+  // mutable run state the loop stages read and write, instead of 5+ loose `let`/
+  // `const` collections threaded through the phase loop. The stages already
+  // half-formalized this — applySinglePatch returns an ApplyResult the loop
+  // drives state off, recordStage takes the shared handle — so the struct just
+  // names what was implicitly shared:
+  //   nextCode      — the threaded bundle string (an onVerifyFail heal rewrites it)
+  //   pendingVerify — deferred-verify queue (loop pushes, phase flush drains)
+  //   carriedSha    — recordStage's carried sha256 (postSha(N) reused as preSha(N+1))
+  //   results       — name -> status string map (returned to the caller)
+  //   failures      — strict/required/forceFail failure lines (throws at the end)
+  //   timings/drifts/verifyIssuesReport — report buckets for downstream tooling
+  //   phaseTraces   — per-phase overlap traces
+  //   harness       — per-build harness-timing buckets (ms): the per-patch work
+  //                   that runs OUTSIDE apply() (coverage injection, reverse-diff/
+  //                   hash capture, conflict span materialization, verify scans),
+  //                   previously lumped into one opaque "overhead" number.
+  const run = {
+    nextCode: code,
+    pendingVerify: [],
+    carriedSha: undefined,
+    results: {},
+    failures: [],
+    timings: [],
+    drifts: [],
+    verifyIssuesReport: [],
+    phaseTraces: { pre: [], main: [], post: [] },
+    harness: makeHarnessBuckets(),
+  };
   // S5: run-scoped latch — first storage-write failure warns, rest stay quiet.
+  // Also collects every failed artifact label for report.artifactsDegraded.
   const warnStorageOnce = makeStorageWarnOnce(logger);
   const globalStrict = patchOptions.strict === true;
   const storageRoot = patchOptions.storageRoot ?? PROJECT_ROOT;
@@ -301,23 +323,8 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
   // phase batch, so flushPendingVerify has nothing to scan. Strict mode keeps
   // verify on — silently dropping assertions there would defeat the gate.
   const skipVerify = patchOptions.skipVerify === true && !globalStrict;
-  const failures = [];
-  // Per-phase trace for overlap detection.
-  const phaseTraces = { pre: [], main: [], post: [] };
 
   const topoOrdered = topoSort(patchNames, patches);
-
-  // Report buckets — populated as patches apply, returned to caller for
-  // downstream tooling (dashboards, timing budgets, drift triage).
-  const timings = [];
-  const drifts = [];
-  const verifyIssuesReport = [];
-  // Per-build harness-timing buckets (ms). These attribute the per-patch work
-  // that runs OUTSIDE apply() — coverage injection, reverse-diff/hash capture,
-  // conflict span materialization, verify scans — which the build summary
-  // previously lumped into one opaque "overhead" number. Threaded into
-  // recordStage / the verify flusher / detectAndRecordOverlaps below.
-  const harness = makeHarnessBuckets();
 
   // Deferred verify queue, flushed at phase boundaries and at the very end.
   // Each entry snapshots the code as it was IMMEDIATELY after its own apply()
@@ -349,11 +356,12 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
   // invariant assertion below delegate to it.
   const frame = new CoordinateFrame(code.length);
   // Verify stage (Item 2): the deferred-verify phase-flush closure. Extracted to
-  // apply-pipeline.mjs; it reads/writes state.pendingVerify and state.nextCode
-  // (heals) and pushes into failures / verifyIssuesReport. Behavior is identical
-  // to the former inline closure.
+  // apply-pipeline.mjs; it reads/writes run.pendingVerify and run.nextCode
+  // (heals) and pushes into run.failures / run.verifyIssuesReport. The flusher
+  // takes the apply-state struct plus a slim context — not a positional list of
+  // loose collections. Behavior is identical to the former inline closure.
   const flushPendingVerify = makeVerifyFlusher({
-    state, failures, verifyIssuesReport, frame, checkVerify, logger, harness,
+    state: run, frame, checkVerify, logger,
   });
 
   // Enforce phase-respecting dependencies: a patch may only depend on patches
@@ -372,7 +380,7 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
     const patch = patches[name];
     if (!patch) {
       logger.warn(`  [!] Patch not found: ${name} (skipping)`);
-      results[name] = 'skipped';
+      run.results[name] = 'skipped';
       continue;
     }
 
@@ -387,7 +395,7 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
     const patchStrict = globalStrict || patch.required === true;
     const fail = (reason) => {
       const msg = `${name}: ${reason}`;
-      if (patchStrict) failures.push(msg);
+      if (patchStrict) run.failures.push(msg);
     };
 
     // Validate manifest — missing verify or preload inconsistencies are fatal.
@@ -396,7 +404,7 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
     const { ok: manifestOk, errors: manifestErrors, normalized } = validateManifest(patch, name + '.mjs', { variant });
     if (!manifestOk) {
       logger.error(`  [!] Manifest errors for "${name}": ${manifestErrors.join('; ')}`);
-      results[name] = 'skipped';
+      run.results[name] = 'skipped';
       fail(`manifest invalid (${manifestErrors.join('; ')})`);
       continue;
     }
@@ -429,37 +437,37 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
       && typeof patch.apply !== 'function'
       && (normalized.kind ?? 'free') === 'free';
     if (isBootOnly) {
-      timings.push({ name, ms: 0 });
+      run.timings.push({ name, ms: 0 });
       if (bootInjected.has(name)) {
-        results[name] = 'applied';
+        run.results[name] = 'applied';
       } else if (bootSkipped.has(name)) {
         // Sentinel already present in the input — idempotent re-apply.
-        results[name] = 'no-change-ok';
+        run.results[name] = 'no-change-ok';
       } else {
         // Collected but never injected: the registry splice found no anchor
         // (or the code fn failed). Mirror the no-change semantics of a normal
         // apply(): fatal when the patch declares verify.present, unless
         // --best-effort downgrades it (and always fatal for strict/required).
         logger.warn(`  [!] Patch "${name}" boot hook not injected (boot-registry anchor miss).`);
-        results[name] = 'no-change';
+        run.results[name] = 'no-change';
         const reason = 'boot hook not injected (boot-registry anchor miss)';
         const hasPresent = toList(normalized.verify?.present)
           .some((s) => typeof s === 'string' && s.length > 0);
         if ((hasPresent && patchOptions.bestEffort !== true) || patchStrict) {
-          failures.push(`${name}: ${reason}`);
+          run.failures.push(`${name}: ${reason}`);
         }
       }
       if (normalized.verify && !skipVerify) {
-        state.pendingVerify.push({
+        run.pendingVerify.push({
           name,
           patch,
           patchStrict,
           lifecycleCtx: {
-            name, phase: phaseOf(patch), code: state.nextCode,
-            appliedCode: state.nextCode, opts: { ...patchOptions },
+            name, phase: phaseOf(patch), code: run.nextCode,
+            appliedCode: run.nextCode, opts: { ...patchOptions },
             verify: { issues: [] }, attempt: 1, logger,
           },
-          snapshot: state.nextCode,
+          snapshot: run.nextCode,
           verify: normalized.verify,
           present: toList(normalized.verify.present),
           absent: toList(normalized.verify.absent),
@@ -473,7 +481,7 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
     const lifecycleCtx = {
       name,
       phase: phaseOf(patch),
-      code: state.nextCode,
+      code: run.nextCode,
       appliedCode: null,
       opts: { ...patchOptions },
       verify: { issues: [] },
@@ -485,13 +493,32 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
     {
       const hookRes = await fireHook(patch, 'onBeforeApply', lifecycleCtx, logger);
       if (!hookRes.ok) {
-        results[name] = 'error';
+        run.results[name] = 'error';
         fail(`onBeforeApply threw: ${hookRes.error.message}`);
         continue;
       }
     }
     const beforeOpts = lifecycleCtx.opts;
     const beforeCode = lifecycleCtx.code;
+
+    // String-identity threading (see runner/reverse-diff.mjs captureReverseDiff):
+    // `beforeCode` must be the SAME string reference as run.nextCode — the
+    // previous patch's effectiveCode — unless an onBeforeApply hook deliberately
+    // replaced ctx.code. recordStage keys its carried-sha reuse
+    // (postSha256(N) === preSha256(N+1)) off exactly that reference identity;
+    // an accidental copy here (slice/concat/`String()`) stays CORRECT but
+    // silently doubles the sha256 work, which is the dominant build cost.
+    // Cheap dev-mode guard (one === compare): break loudly instead.
+    if (process.env.CCPATCH_DEBUG
+        && beforeCode !== run.nextCode
+        && typeof patch.onBeforeApply !== 'function') {
+      throw new Error(
+        `[ccpatch dev] string-identity invariant broken before "${name}": preCode is not ` +
+        `the same reference as run.nextCode and no onBeforeApply hook explains it. ` +
+        `Thread the previous effectiveCode through unchanged — a copy silently doubles ` +
+        `reverse-diff hashing (see runner/reverse-diff.mjs).`
+      );
+    }
 
     // Resolve @At selector (if declared) before calling apply().
     let atSites = null;
@@ -504,7 +531,7 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
             logger.warn(`      Candidate (score ${c.score.toFixed(2)}): \`${c.snippet.slice(0, 80)}\` at offset ${c.offset}`);
           }
         }
-        results[name] = 'error';
+        run.results[name] = 'error';
         fail(`@At: ${resolved.error}`);
         continue;
       }
@@ -528,7 +555,7 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
     // bytes equally, so a successful self-heal nets out and does NOT trip the
     // gate; a genuine non-additive break (a patch kind that doesn't preserve the
     // frame, or an onBeforeApply that swapped ctx.code) still diverges and throws.
-    frame.assertAdditive(beforeCode, state.nextCode, code, name);
+    frame.assertAdditive(beforeCode, run.nextCode, code, name);
 
     try {
       const preCode = beforeCode;
@@ -542,20 +569,20 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
         frame, globalStrict, patchOptions, logger, warnStorageOnce, compileKind,
         storageRoot,
       });
-      timings.push({ name, ms: r.timingMs });
-      results[name] = r.status;
+      run.timings.push({ name, ms: r.timingMs });
+      run.results[name] = r.status;
       // Finding #1/#2: forceFail escalates to a build failure REGARDLESS of
       // per-patch strictness (a verify.present no-change in default mode, or a
       // stale-fallback apply under strict). Otherwise fall back to the normal
       // strict/required gate via fail().
       if (r.failReason) {
-        if (r.forceFail) failures.push(`${name}: ${r.failReason}`);
+        if (r.forceFail) run.failures.push(`${name}: ${r.failReason}`);
         else fail(r.failReason);
       }
-      if (r.driftEntry) drifts.push(r.driftEntry);
+      if (r.driftEntry) run.drifts.push(r.driftEntry);
       if (r.trace) {
-        phaseTraces[r.trace.phase] = phaseTraces[r.trace.phase] || [];
-        phaseTraces[r.trace.phase].push(r.trace);
+        run.phaseTraces[r.trace.phase] = run.phaseTraces[r.trace.phase] || [];
+        run.phaseTraces[r.trace.phase].push(r.trace);
       }
 
       // Only patches that produced a usable string continue into the
@@ -568,7 +595,7 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
         {
           const hookRes = await fireHook(patch, 'onAfterApply', lifecycleCtx, logger);
           if (!hookRes.ok) {
-            results[name] = 'error';
+            run.results[name] = 'error';
             fail(`onAfterApply threw: ${hookRes.error.message}`);
             continue;
           }
@@ -583,10 +610,10 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
         // (Finding #3). Returns the coverage-instrumented final code.
         effectiveCode = recordStage({
           name, normalized, preCode, effectiveCode, atSites,
-          lifecycleCtx, patchOptions, logger, state, harness,
+          lifecycleCtx, patchOptions, logger, state: run, harness: run.harness,
         });
 
-        state.nextCode = effectiveCode;
+        run.nextCode = effectiveCode;
         lifecycleCtx.appliedCode = effectiveCode;
       }
 
@@ -598,12 +625,12 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
         // in one linear scan per snapshot, then dispatches onVerifyFail
         // per-patch as needed. `snapshot` captures the code immediately after
         // this patch's apply() so verify sees only this patch's contribution.
-        state.pendingVerify.push({
+        run.pendingVerify.push({
           name,
           patch,
           patchStrict,
           lifecycleCtx,
-          snapshot: state.nextCode,
+          snapshot: run.nextCode,
           verify: normalized.verify,
           present: toList(normalized.verify.present),
           absent: toList(normalized.verify.absent),
@@ -612,7 +639,7 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
       }
     } catch (err) {
       logger.error(`  [!] Error applying patch "${name}": ${err.message}`);
-      results[name] = 'error';
+      run.results[name] = 'error';
       fail(`apply() threw: ${err.message}`);
     }
   }
@@ -638,7 +665,7 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
   let overlapOutcome = null;
   if (bc && bc.entry && Array.isArray(bc.entry.conflicts)) {
     try {
-      const finalSha = sha256(state.nextCode);
+      const finalSha = sha256(run.nextCode);
       bc.finalSha256 = finalSha;
       if (finalSha === bc.entry.outputSha256) {
         overlapOutcome = replayCachedConflicts(
@@ -654,26 +681,28 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
   }
   if (!overlapOutcome) {
     overlapOutcome = detectAndRecordOverlaps(
-      phaseTraces, frame, globalStrict, logger, warnStorageOnce, storageRoot, harness,
+      run.phaseTraces, frame, globalStrict, logger, warnStorageOnce, storageRoot, run.harness,
     );
   }
   // Hand the (fresh or replayed) conflict records back to the caller so a
   // fresh build can persist them into the cache entry.
   if (bc) bc.conflicts = overlapOutcome.allConflicts;
-  for (const f of overlapOutcome.failures) failures.push(f);
+  for (const f of overlapOutcome.failures) run.failures.push(f);
 
   // Finding #1/#2: tally the loud outcomes so the build summary can surface
   // them. `noChange` patches silently injected nothing (anchors likely drifted);
   // `appliedFallback` patches only applied by replaying a stale stored diff.
   // Assembled into a structured report via buildPatchReport().
-  const report = buildPatchReport(timings, drifts, verifyIssuesReport, results, harness);
+  const report = buildPatchReport(
+    run.timings, run.drifts, run.verifyIssuesReport, run.results, run.harness,
+  );
   if (report.appliedFallback > 0) {
     logger.warn('');
     logger.warn(`  [!] ${report.appliedFallback} patch(es) applied via STALE FALLBACK DIFF — anchors have drifted, fix anchors`);
     logger.warn('');
   }
 
-  if (failures.length > 0) {
+  if (run.failures.length > 0) {
     // The gate that produced these failures may be global strict, per-patch
     // required, OR the default-mode Finding #1/#2 escalation (a verify.present
     // patch that no-op'd / a stale-fallback apply). Keep the historical
@@ -684,12 +713,26 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
       ? ''
       : '\n  (set --best-effort or CCPATCH_BEST_EFFORT=1 to downgrade no-op/fallback failures to warnings)';
     throw new Error(
-      `${failures.length} patch failure(s) in ${mode}:\n  - ${failures.join('\n  - ')}${hint}`
+      `${run.failures.length} patch failure(s) in ${mode}:\n  - ${run.failures.join('\n  - ')}${hint}`
     );
   }
 
   // ARCH1: coverage-apply manifest + patch-results catalog, consolidated.
-  writeApplyArtifacts({ results, patches, phaseTraces, patchOptions, phaseOf, logger, warnStorageOnce, storageRoot });
+  writeApplyArtifacts({
+    results: run.results, patches, phaseTraces: run.phaseTraces,
+    patchOptions, phaseOf, logger, warnStorageOnce, storageRoot,
+  });
+
+  // Task 4: surface degraded sidecar writes. Every best-effort artifact write
+  // (conflicts JSONL, anchor-drift JSONL, coverage-apply manifest, patch-results
+  // catalog) routes its failure through the run-scoped warn-once latch, which
+  // also COLLECTS each failed artifact (deduped by label). A degraded run still
+  // succeeds — the bundle is fine, the forensics are incomplete — but callers
+  // (build summary, --json report) can now tell the difference. Absent on the
+  // happy path so the report shape is unchanged when nothing failed.
+  if (warnStorageOnce.failures.length > 0) {
+    report.artifactsDegraded = warnStorageOnce.failures.slice();
+  }
 
   // Return shape (LOCKED contract — see cli.mjs apply path which reads .code +
   // .report defensively): the patched bundle (`code`), the per-patch outcome
@@ -698,5 +741,5 @@ export async function applyNamedPatches(code, patches, patchNames, logger = cons
   // outcomes can destructure: const { results } = await applyNamedPatches(...)
   // Finding #1/#2: `noChange` / `appliedFallback` counts let the build summary
   // print no-op and stale-fallback tallies prominently (see cli/build-report.mjs).
-  return { code: state.nextCode, results, report };
+  return { code: run.nextCode, results: run.results, report };
 }

@@ -7,8 +7,9 @@ include scripts/mk/cli.mk
 .PHONY: help refmap refmap-check smoke-bridge smoke-integration \
         smoke-integration-roundtrip test-tty canary \
         bridge-host bridge-host-stop bridge-tail bridge-submit \
-        verticals-check lint lint-dead lint-unused \
-        test\:patches test\:patch test\:tty lint\:dead lint\:unused heal
+        verticals-check lint lint-dead lint-unused lint-registry lint-capabilities \
+        test\:patches test\:patch test\:tty lint\:dead lint\:unused \
+        lint\:registry lint\:capabilities heal
 
 # ── Naming-drift aliases ────────────────────────────────────────────────────
 # Kill the spelling drift between the two build systems: every operation that
@@ -25,6 +26,8 @@ test\:patch: test-patch ## Alias for test-patch (npm-style spelling): make test:
 test\:tty: test-tty ## Alias for test-tty (npm-style spelling)
 lint\:dead: lint-dead ## Alias for lint-dead (npm-style spelling)
 lint\:unused: lint-unused ## Alias for lint-unused (npm-style spelling)
+lint\:registry: lint-registry ## Alias for lint-registry (npm-style spelling)
+lint\:capabilities: lint-capabilities ## Alias for lint-capabilities (npm-style spelling)
 
 # ── Verticals: testing the headless bridge + agent tree ─────────────────────
 
@@ -145,7 +148,13 @@ lint-dead: ## Static dead-code check via tsc --checkJs (unused locals/params/imp
 lint-unused: ## Find unused exports / files / dependencies via knip
 	@node_modules/.bin/knip
 
-lint: lint-dead lint-unused ## Run all dead-code checks
+lint-registry: ## Validate ccpatch.yml against the patch corpus (entries, acks, dependsOn)
+	@node scripts/lint-registry.mjs
+
+lint-capabilities: ## Capability-honesty check: declared capabilities vs syscall-shaped source patterns
+	@node scripts/lint-capabilities.mjs
+
+lint: lint-dead lint-unused lint-registry lint-capabilities ## Run all dead-code + registry/capability checks
 
 help: ## Show this help
 	@echo "Usage: make <target> [VERSION=x.y.z]"

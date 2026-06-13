@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
 import { getAgent as getAgentDefault } from './agent.mjs';
 import { defineTool as defineToolDefault } from './tool-registry.mjs';
+import { checkContract } from './contracts.mjs';
 
 /**
  * handoff.mjs — tool-call-driven agent handoffs (delegate / swap) + AgentRouter.
@@ -320,13 +321,13 @@ export function __resetSystemPromptDriftGuardForTests() {
  * `verify { present }` and capabilities()'s advisory handshake catch a drifted
  * host, but the actual WRITE here is where a present-but-broken `systemPrompt`
  * contract would do real damage. Before a live write, consult
- * __ccpRequire('systemPrompt', { minVersion: 2, shape: ['getNonce'] }) — but ONLY
- * when BOTH the require helper AND a registered 'systemPrompt' contract exist
- * (checked via __ccpInspectContracts). If __ccpRequire THROWS, that is PROVEN
- * drift: we refuse the write with a clear thrown Error rather than calling the
- * drifted global. If __ccpRequire is absent OR the contract is not registered, we
- * proceed unchanged — fail-open preserves test stubs that set bare globals with no
- * contract registry.
+ * checkContract('systemPrompt') — the centralized pin in contracts.mjs (v>=2,
+ * shape ['getNonce'], routed through __ccpRequire when the helper is live).
+ * Proven drift refuses the write with a clear thrown Error (naming the contract
+ * and the producer-vs-required versions) rather than calling the drifted
+ * global. An unregistered contract / absent registry proceeds unchanged —
+ * fail-open preserves test stubs that set bare globals with no contract
+ * registry.
  *
  * Memoization is asymmetric ON PURPOSE: we ONLY latch `_driftChecked = true` once
  * a REGISTERED contract has positively validated. The fail-open branches (no
@@ -337,26 +338,24 @@ export function __resetSystemPromptDriftGuardForTests() {
  */
 function assertSystemPromptContract() {
   if (_driftChecked) return;
-  const require_ = globalThis.__ccpRequire;
-  const inspect = globalThis.__ccpInspectContracts;
-  // Fail-open (NOT latched): no require helper, or no inspector to confirm the
-  // contract is registered, means a bare-global host/test stub — proceed
+  // Centralized pin: contracts.mjs requires 'systemPrompt' v>=2 with shape
+  // ['getNonce'] through __ccpRequire when the helper is live, falling back to
+  // the registry's advertised metadata otherwise.
+  const res = checkContract('systemPrompt');
+  // Fail-open (NOT latched): no registry helpers, or no registered
+  // 'systemPrompt' contract, means a bare-global host/test stub — proceed
   // unchanged, but re-check on the next write in case the registry populates late.
-  if (typeof require_ !== 'function' || typeof inspect !== 'function') return;
-  let registered = false;
-  try {
-    registered = inspect().some((e) => e && e.name === 'systemPrompt');
-  } catch (_) {
-    // Inspector itself is broken/absent — treat as "not registered", fail-open
-    // (not latched, so a recovered inspector is honored later).
-    return;
+  if (res.status === 'unchecked') return;
+  // Contract IS registered → the handshake is now load-bearing. Drift is
+  // proven; refuse the write (and do NOT latch, so a recovered host re-checks).
+  if (res.status === 'drift') {
+    throw new Error(`[adk:handoff] refusing persona write — systemPrompt contract drift: ${res.reason}`);
   }
-  if (!registered) return; // unguarded boundary → fail open, re-check next time.
-  // Contract IS registered → the handshake is now load-bearing. A throw here is
-  // proven drift; surface it (and do NOT latch, so a recovered host re-checks).
-  require_('systemPrompt', { consumer: 'adk:handoff', minVersion: 2, shape: ['getNonce'] });
-  // Positively validated a registered contract → safe to memoize from here on.
-  _driftChecked = true;
+  // Positively validated a registered contract → safe to memoize from here on,
+  // but ONLY when the actual value paths were probed through __ccpRequire; an
+  // advertised-metadata-only 'ok' stays unlatched so a later-appearing require
+  // helper is still consulted.
+  if (res.via === 'require') _driftChecked = true;
 }
 
 /**

@@ -206,13 +206,36 @@ function assertRenderedFrame(t, { code, raw, probeLog, timedOut }, label) {
 const binPath = findPatchedBinary();
 const python = findPython();
 
+/**
+ * Loud skip: this file is the ONLY Tier-4 interactive-boot canary (the boot
+ * deadlock class it exists for shipped through an otherwise fully green
+ * suite), so a silent skip is itself a coverage failure. Besides t.skip()'s
+ * reporter line we print an unmissable stderr banner, and the CI workflow
+ * that runs this suite re-derives the same preconditions to annotate
+ * $GITHUB_STEP_SUMMARY (see .github/workflows/ci.yml "Surface Tier-4
+ * boot-tty skip").
+ */
+function loudSkip(t, reason) {
+  const msg = `TIER-4 PTY BOOT CANARY SKIPPED — ${reason}`;
+  console.error(
+    '\n' +
+    '!'.repeat(74) + '\n' +
+    `!!! [boot-tty] ${msg}\n` +
+    '!!! The interactive boot-deadlock class (v2.1.175) is ONLY caught by this\n' +
+    '!!! tier. Run `make canary` (builds if needed) to exercise it for real.\n' +
+    '!'.repeat(74) + '\n'
+  );
+  t.diagnostic(`[boot-tty] ${msg}`);
+  t.skip(reason);
+}
+
 function skipIfMissing(t) {
   if (!binPath) {
-    t.skip('no patched binary found in releases/ — run `make patch-claude-code` first');
+    loudSkip(t, 'no patched binary found in releases/ — run `make patch-claude-code` first');
     return true;
   }
   if (!python) {
-    t.skip('python3 (with pty module) not available — pty boot smoke needs it');
+    loudSkip(t, 'python3 (with pty module) not available — pty boot smoke needs it');
     return true;
   }
   return false;

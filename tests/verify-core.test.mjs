@@ -1,7 +1,13 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { checkVerifyCore, countOccurrences, toList } from '../runner/verify-core.mjs';
+import {
+  checkVerifyCore,
+  countOccurrences,
+  findOccurrences,
+  scanOccurrences,
+  toList,
+} from '../runner/verify-core.mjs';
 import { checkVerify } from '../runner/runner.mjs';
 import { verifyBatch } from '../runner/verify-batch.mjs';
 
@@ -22,6 +28,51 @@ describe('verify-core — countOccurrences', () => {
   });
   it('returns 0 for empty needle', () => {
     assert.equal(countOccurrences('abc', ''), 0);
+  });
+});
+
+describe('verify-core — findOccurrences (matching kernel)', () => {
+  it('records non-overlapping, leftmost-first offsets', () => {
+    assert.deepEqual(findOccurrences('ababab', 'ab'), [0, 2, 4]);
+    assert.deepEqual(findOccurrences('aaa', 'aa'), [0]); // NOT [0, 1]
+    assert.deepEqual(findOccurrences('xyz', 'q'), []);
+    assert.deepEqual(findOccurrences('abc', ''), []);
+  });
+  it('countOccurrences is the kernel’s length', () => {
+    assert.equal(countOccurrences('aaa', 'aa'), findOccurrences('aaa', 'aa').length);
+  });
+});
+
+describe('verify-core — scanOccurrences (multi-literal kernel)', () => {
+  // For EVERY literal, the multi-literal scan must agree with the per-literal
+  // kernel: scanOccurrences(code, lits).get(lit) === findOccurrences(code, lit).
+  function assertScanMatchesKernel(code, literals) {
+    const positions = scanOccurrences(code, literals);
+    for (const lit of literals) {
+      assert.deepEqual(
+        positions.get(lit),
+        findOccurrences(code, lit),
+        `offset mismatch for literal ${JSON.stringify(lit)}`,
+      );
+    }
+  }
+
+  it('matches the kernel on the fast path (small sets)', () => {
+    assertScanMatchesKernel('alpha beta alpha gamma beta beta', ['alpha', 'beta', 'zzz', 'a', '']);
+  });
+
+  it('matches the kernel on the bucketed walk (>64 literals), incl. self-overlap and unicode', () => {
+    const code = 'aaaa λλλλ ✓abc✓abc ababab '.repeat(20);
+    const literals = ['aa', 'aaa', 'ab', 'abab', 'λλ', '✓abc', 'a', '✓', 'zz'];
+    for (let i = 0; i < 70; i++) literals.push(`lit-${i}-nomatch`);
+    assert.ok(literals.length > 64);
+    assertScanMatchesKernel(code, literals);
+  });
+
+  it('dedupes duplicate literals and tolerates empty input', () => {
+    const positions = scanOccurrences('abab', ['ab', 'ab']);
+    assert.deepEqual(positions.get('ab'), [0, 2]);
+    assert.deepEqual([...scanOccurrences('abab', []).keys()], []);
   });
 });
 

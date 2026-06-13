@@ -52,10 +52,14 @@ import {
 const caps = capabilities();
 // → { tools, delegate, swap, router, bus } — each a boolean (use as `if (caps.swap)`).
 // caps.detail adds per-capability remediation info:
-//   caps.detail.swap === { live, patch: 'expose_system_prompt', reason? }
-// `reason` is set only when the contract version/shape handshake DOWNGRADED the
-// capability — e.g. a drifted host advertising an old systemPrompt v1 (no nonce
-// gate) flips caps.swap to false with reason "contract systemPrompt v1 < required v2".
+//   caps.detail.swap === { live, patch: 'expose_system_prompt', contract: 'systemPrompt', reason? }
+// `contract` names the typed __ccp* contract the capability is pinned to; the
+// pins (minVersion + shape per contract) are centralized in ONE module,
+// packages/adk/contracts.mjs (ADK_CONTRACT_REQUIREMENTS / checkContract — also
+// exported from the package root). `reason` is set only when that handshake
+// DOWNGRADED the capability — e.g. a drifted host advertising an old
+// systemPrompt v1 (no nonce gate) flips caps.swap to false with reason
+// "contract systemPrompt v1 < required v2 (producer \"expose_system_prompt\")".
 
 // 1. Register an agent persona (its systemPrompt is a swap target — see SECURITY).
 defineAgent({

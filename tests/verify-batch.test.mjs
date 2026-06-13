@@ -230,4 +230,133 @@ describe('verifyBatch — edge cases', () => {
     }]);
     assert.deepEqual(r[0].issues, []);
   });
+
+  it('self-overlapping literal counts agree with the core kernel (non-overlapping)', () => {
+    // 'aa' in 'aaa' is ONE non-overlapping occurrence. The pre-dedup batch
+    // scan recorded overlapping matches (2) and diverged from checkVerifyCore;
+    // both now compose the same kernel.
+    const item = { patchName: 'p', present: 'aa', count: 1 };
+    assertParity('aaa', item);
+    assert.deepEqual(verifyBatch('aaa', [item])[0].issues, []);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Property-style parity: core vs batch over synthetic cases
+// ---------------------------------------------------------------------------
+//
+// The architecture invariant is that verifyBatch (positions-Map path) and
+// checkVerifyCore (direct-scan path) produce IDENTICAL issue arrays for the
+// same item — both compose the same non-overlapping matching kernel. These
+// cases are built to exercise every kernel path:
+//   - small literal sets (fast path: per-literal findOccurrences)
+//   - >64 unique literals (the bucketed single-pass walk)
+//   - self-overlapping literals ('aa', 'abab', repeated-char runs)
+//   - short (<2 char) literals (un-bucketed indexOf path)
+//   - non-Latin-1 literals (the *65536 prefix keying)
+//   - empty / missing / mixed present+absent+count blocks
+
+describe('verifyBatch — property parity with checkVerifyCore', () => {
+  // Deterministic PRNG (mulberry32) so failures reproduce.
+  function rng(seed) {
+    let a = seed >>> 0;
+    return () => {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function synthCase(seed, literalCount) {
+    const rand = rng(seed);
+    // Small alphabet → literals repeat and self-overlap inside the code.
+    const alphabet = 'abcλ✓\n ';
+    const pick = (s) => s[Math.floor(rand() * s.length)];
+    let code = '';
+    const codeLen = 200 + Math.floor(rand() * 400);
+    for (let i = 0; i < codeLen; i++) code += pick(alphabet);
+
+    const literals = [];
+    for (let i = 0; i < literalCount; i++) {
+      const len = 1 + Math.floor(rand() * 6);
+      let lit = '';
+      // Half the literals are slices of the code (guaranteed hits), half are
+      // random (mostly misses).
+      if (rand() < 0.5 && code.length > len) {
+        const at = Math.floor(rand() * (code.length - len));
+        lit = code.slice(at, at + len);
+      } else {
+        for (let j = 0; j < len; j++) lit += pick(alphabet);
+      }
+      // Suffix a discriminator on a few so the literal set stays large enough
+      // to force the bucketed walk when literalCount > 64.
+      if (rand() < 0.3) lit += `#${i}`;
+      literals.push(lit);
+    }
+
+    const items = [];
+    for (let i = 0; i < literals.length; i++) {
+      const item = { patchName: `p${i}` };
+      const roll = rand();
+      if (roll < 0.45) item.present = literals[i];
+      else if (roll < 0.7) item.absent = literals[i];
+      else {
+        item.present = [literals[i], literals[(i + 7) % literals.length]];
+        item.absent = literals[(i + 13) % literals.length];
+      }
+      const countRoll = rand();
+      if (countRoll < 0.25) item.count = Math.floor(rand() * 4);
+      else if (countRoll < 0.4) {
+        item.count = { present: Math.floor(rand() * 4), absent: Math.floor(rand() * 2) };
+      }
+      items.push(item);
+    }
+    return { code, items };
+  }
+
+  function assertCaseParity({ code, items }, label) {
+    const batch = verifyBatch(code, items);
+    assert.equal(batch.length, items.length);
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      const core = checkVerifyCore(
+        { present: it.present, absent: it.absent, count: it.count },
+        code,
+        { style: 'default' },
+      );
+      assert.deepEqual(
+        batch[i].issues,
+        core,
+        `${label} item ${i} (${JSON.stringify(it)}):\n  batch=${JSON.stringify(batch[i].issues)}\n  core=${JSON.stringify(core)}`,
+      );
+    }
+  }
+
+  it('parity holds on the fast path (small literal sets)', () => {
+    for (const seed of [1, 2, 3, 42, 1337]) {
+      assertCaseParity(synthCase(seed, 8), `seed=${seed}`);
+    }
+  });
+
+  it('parity holds on the bucketed-walk path (>64 unique literals)', () => {
+    for (const seed of [7, 99, 2026]) {
+      assertCaseParity(synthCase(seed, 90), `seed=${seed}`);
+    }
+  });
+
+  it('parity holds for crafted self-overlapping / repeated-run literals', () => {
+    const code = 'aaaa abab ababab λλλλ ✓✓✓ \n\n\n aaaa';
+    const items = [
+      { patchName: 'p0', present: 'aa', count: 4 },
+      { patchName: 'p1', present: 'aaa', count: 2 },
+      { patchName: 'p2', present: 'abab', count: 2 },
+      { patchName: 'p3', present: 'λλ', count: 2 },
+      { patchName: 'p4', absent: '✓✓', count: { absent: 1 } },
+      { patchName: 'p5', present: ['aa', 'abab'], count: { present: 6 } },
+      { patchName: 'p6', present: 'a', count: 12 },
+      { patchName: 'p7', absent: 'zz' },
+    ];
+    assertCaseParity({ code, items }, 'crafted');
+  });
 });

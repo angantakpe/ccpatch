@@ -91,7 +91,13 @@ export default {
   category: 'expose',
 
   description: 'Expose MCP tool registry, health probe, context factory, and invoker via globalThis.',
-  capabilities: ["tools"],
+  // Honest capability set (review fix): beyond altering tool dispatch (tools),
+  // the exposed surface is socket-adjacent — __ccpMcpHealth inspects live MCP
+  // client connections and __ccpInvokeTool routes dispatches through MCP/fetch
+  // -backed tools (network) — and __ccpInvokeTool calls tool.call() directly,
+  // outside the interactive permission loop, so a nonce holder can run
+  // subprocess-executing tools (Bash, …) with no allow/deny prompt (exec).
+  capabilities: ['tools', 'network', 'exec'],
   verify: {
     present: '__ccpToolDispatchExposed_v2',
     // Sentinel is injected exactly once.
@@ -100,7 +106,7 @@ export default {
     also_present: ['__ccpGetDispatchNonce'],
   },
   apply: (code) => {
-    if (code.includes('__ccpToolDispatchExposed_v2')) return code;
+    if (code.includes('__ccpToolDispatchExposed_v2') && code.includes('__ccpGetDispatchNonce')) return code;
 
     // ── Anchor resolution (multi-anchor fallback chain) ───────────────────
 
