@@ -108,17 +108,28 @@ test('defineTool routes injection through the gated registrar with the dispatch 
   }
 });
 
-test('a wrong dispatch nonce makes the gated registrar throw', () => {
+test('a wrong dispatch nonce does NOT throw at define time — it queues for bounded retry (consistent with the drain path)', async () => {
   const restore = isolateGlobals();
   try {
     installGatedRegistrar('REAL');
-    // Hand the registry the WRONG nonce.
+    // Hand the registry the WRONG nonce — the gated registrar throws on every
+    // attempt. The SYNCHRONOUS first attempt must NOT escape fatally: an invalid/
+    // rotated nonce is a host runtime condition the bounded poll retries, exactly
+    // like drainQueue. (Previously this threw at define time — an inconsistency
+    // with every other injection path. See defineToolIn's first-attempt catch.)
     globalThis.__ccpGetDispatchNonce = () => 'WRONG';
     const scope = createToolScope();
-    assert.throws(
-      () => defineToolIn(scope, { name: 'bad', inputSchema: { type: 'object' }, execute: async () => 'x' }),
-      /invalid nonce\. Call __ccpGetDispatchNonce\(\) at startup\./,
+    let h;
+    assert.doesNotThrow(() => {
+      h = defineToolIn(scope, { name: 'bad', inputSchema: { type: 'object' }, execute: async () => 'x' });
+    }, 'a wrong-nonce define must not throw synchronously');
+    assert.equal(
+      toolStatusesIn(scope).find((s) => s.name === 'bad')?.status, 'queued',
+      'the tool is queued for retry, not crashed',
     );
+    // dispose settles the pending awaiter to false without waiting out the poll.
+    h.dispose();
+    assert.equal(await h.ready, false, 'ready settles false after dispose');
   } finally {
     restore();
   }

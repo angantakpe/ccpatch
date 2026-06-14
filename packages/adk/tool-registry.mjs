@@ -918,10 +918,19 @@ export function defineToolIn(scope, { name, description, inputSchema, execute, o
   // callers that care attach their own handler.
   injected.catch(() => {});
 
-  // Synchronous first attempt. tryInject may THROW (gated registrar, invalid
-  // nonce) — that is a PROGRAMMER/host error surfaced to the defineTool caller, so
-  // it is intentionally NOT caught here (the scheduler paths catch their own).
-  const outcome = tryInject(scope, def);
+  // Synchronous first attempt. tryInject may THROW (gated registrar, invalid/
+  // rotated nonce) — but that is a HOST runtime condition, not a programmer
+  // error: the ADK acquires the nonce internally, and every OTHER injection path
+  // (drainQueue / removeFromRaw) already treats a nonce throw as transient and
+  // retries. Treat the first attempt the same way — queue and let the bounded
+  // poll re-attempt — instead of letting it escape fatally and asymmetrically.
+  let outcome;
+  try {
+    outcome = tryInject(scope, def);
+  } catch (err) {
+    debug(`[adk:tools] tool "${name}" first inject threw (${err?.message ?? err}) — queueing for bounded retry`);
+    outcome = 'refused';
+  }
   if (outcome === 'ok') {
     scope.live.set(name, 'live');
     resolveReady(true);
@@ -1021,6 +1030,15 @@ export function disposeToolScope(scope) {
   scope.drained = false;
   scope.pollHandle = null;
   scope.pollAttempts = 0;
+  // Reset cadence + once-only warning bookkeeping so a REUSED scope starts clean.
+  // Without this, a scope disposed after downshifting to the bus cadence keeps the
+  // 250ms/20-attempt values, and pollWarned stays true — permanently suppressing
+  // the "patch not enabled" warning on the next use. (scheduleDrain re-derives
+  // pollInterval/pollLimit, but only when re-armed; reset them anyway for clarity.)
+  scope.pollWarned = false;
+  scope.pollBaseTicks = 0;
+  scope.pollInterval = POLL_INTERVAL_MS;
+  scope.pollLimit = POLL_LIMIT;
 }
 
 /**

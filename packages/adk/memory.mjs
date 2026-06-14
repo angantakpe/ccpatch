@@ -468,7 +468,17 @@ export function createMemory({ path: filePath, transform, maxBytes, appendLog = 
       } catch {
         /* file vanished between read and here → nothing to quarantine */
       }
-      if (existed) {
+      // Distinguish genuine corruption (parse/decode failure → no fs errno) from
+      // OS-level access or transient errors. A perfectly good file we simply
+      // cannot open right now — EACCES/EPERM (wrong uid), EBUSY/EMFILE/ENFILE/
+      // EAGAIN (transient), EISDIR/ELOOP (misconfig) — must NOT be quarantined:
+      // renaming it aside would be data loss for the real owner, not recovery.
+      // Only quarantine when the failure looks like actual corruption.
+      const NON_CORRUPT_CODES = new Set([
+        'EACCES', 'EPERM', 'EBUSY', 'EMFILE', 'ENFILE', 'EAGAIN', 'EISDIR', 'ELOOP',
+      ]);
+      const looksCorrupt = !(err && err.code && NON_CORRUPT_CODES.has(err.code));
+      if (existed && looksCorrupt) {
         const quarantine = `${resolved}.corrupt-${Date.now()}`;
         try {
           renameSync(resolved, quarantine);
@@ -484,6 +494,12 @@ export function createMemory({ path: filePath, transform, maxBytes, appendLog = 
               `and could NOT be quarantined (${qErr?.message ?? qErr}); starting from an empty store.`,
           );
         }
+      } else if (existed) {
+        // Exists but failed for an access/transient reason — leave it untouched.
+        console.warn(
+          `createMemory: ${resolved} could not be read (${err?.message ?? err}); ` +
+            `leaving it in place (not corruption) and starting from an empty store.`,
+        );
       } else {
         console.warn(
           `createMemory: ${resolved} could not be read (${err?.message ?? err}); ` +
@@ -779,6 +795,19 @@ export function createMemory({ path: filePath, transform, maxBytes, appendLog = 
     },
     set(key, value) {
       ensureLoaded();
+      // Validate JSON-serializability SYNCHRONOUSLY, at the call site. The actual
+      // persist happens later (debounced rewrite / append delta) where it
+      // serializes the WHOLE cache — so a non-serializable value (cycle, BigInt,
+      // throwing toJSON) there would not just drop THIS write but throw on every
+      // subsequent flush too, silently poisoning the entire store for the life of
+      // the instance with only a background console.warn. Fail loud here instead.
+      try {
+        JSON.stringify(value);
+      } catch (err) {
+        throw new TypeError(
+          `createMemory.set("${key}"): value is not JSON-serializable (${err?.message ?? err}); refusing to store it.`,
+        );
+      }
       cache[key] = value;
       dirtyKeys.add(key); // remember what WE changed for the merge.
       knownKeys.add(key); // we are now aware of this key (matters for clear-merge).
