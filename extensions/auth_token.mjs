@@ -43,11 +43,31 @@ export default {
     if (process.env.CC_BRIDGE_TOKEN) { current = process.env.CC_BRIDGE_TOKEN; return; }
     const file = process.env.CC_BRIDGE_TOKEN_FILE
       || path.join(os.homedir(), '.config', 'ccpatch', 'token');
-    // Best-effort: warn (non-fatal) if the secret file is group/world-readable.
+    // The token is ROOT-EQUIVALENT (see __warnWeakToken below): anyone who can
+    // read this file gains full in-process access. A group/world-readable
+    // secret file is therefore a real key-leak, not a style nit. Treat readable
+    // perms as FAIL-CLOSED: refuse to load the token (current stays '') so the
+    // bridge rejects every connection instead of serving an exposed secret.
+    // On POSIX the default-config path is also pre-created with 0600 so the
+    // common 'echo > ~/.config/ccpatch/token' workflow can't silently land at
+    // an inherited-umask mode. Override CC_BRIDGE_TOKEN_FILE owns its own perms;
+    // we still refuse to read it if it is group/world-readable.
+    const isWindows = (process.platform === 'win32');
+    if (!process.env.CC_BRIDGE_TOKEN_FILE && !isWindows) {
+      // Pre-create the default path at 0600 so a fresh write inherits tight perms.
+      try {
+        fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+        if (!fs.existsSync(file)) fs.writeFileSync(file, '', { mode: 0o600 });
+      } catch (_) {}
+    }
     try {
       const st = fs.statSync(file);
-      if (st.mode & 0o077) {
-        console.error('[ccpatch] auth_token: token file ' + file + ' is group/world-readable (mode ' + (st.mode & 0o777).toString(8) + '); chmod 600 it');
+      // POSIX perm bits only; skip the check on Windows where st.mode group/
+      // world bits are not meaningful.
+      if (!isWindows && (st.mode & 0o077)) {
+        console.error('[ccpatch] auth_token: REFUSING to load token file ' + file + ' — it is group/world-readable (mode ' + (st.mode & 0o777).toString(8) + '), which leaks a ROOT-EQUIVALENT secret. Run: chmod 600 ' + file + ' (or set CC_BRIDGE_TOKEN). The bridge will reject all connections until this is fixed.');
+        current = '';
+        return;
       }
     } catch (_) {}
     try { current = fs.readFileSync(file, 'utf8').split(/\\r?\\n/)[0].trim(); }

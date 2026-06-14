@@ -40,8 +40,12 @@
  *     onStreamEvent(ev) { return false },
  *   }
  *
- * FAIL-OPEN: a missing module, a throwing member, or an absent host contract all
- * degrade to "no gating" — this patch must never wedge a turn. BOOT VISIBILITY:
+ * FAIL-OPEN (default): a missing module, a throwing member, or an absent host
+ * contract all degrade to "no gating" — this patch must never wedge a turn.
+ * FAIL-CLOSED (opt-in): set CCP_POLICY_GATE_REQUIRED=1 and a configured-but-
+ * degraded gate instead BLOCKS every outbound Anthropic request (synthetic
+ * assistant turn) so nothing proceeds unpoliced. Use it where a silently-
+ * disabled gate is worse than an unavailable CLI. BOOT VISIBILITY:
  * when CCP_POLICY_GATE_MODULE is set but the gate degrades (module missing/
  * throwing, wrong export shape, or steer() throwing during a one-shot boot
  * probe), ONE loud console.warn is printed at boot — always, not just under
@@ -71,6 +75,18 @@ const BOOT = `
   try { DEBUG = (process.env.CLAUDE_DEBUG === '1' || process.env.CC_DEBUG === '1'); } catch (_e) {}
   function dbg(msg) { if (DEBUG) { try { process.stderr.write('[ccp:policy_gate] ' + msg + '\\n'); } catch (_e) {} } }
 
+  // FAIL-CLOSED opt-in. By default the gate fails OPEN (a missing/broken policy
+  // module degrades to no-gating) so it can never wedge a turn. Operators who
+  // depend on enforcement can set CCP_POLICY_GATE_REQUIRED=1: then a configured-
+  // but-degraded gate stops short-circuiting silently and instead installs a
+  // hard BLOCK on every outbound Anthropic request, so NO model call proceeds
+  // unpoliced. This trades availability for safety, which is the whole point of
+  // opting in. A typo'd module path now fails loudly AND closed, not silently
+  // open. (Only armed when a module is configured — an unset module is 'inert',
+  // not 'degraded', and never blocks.)
+  var REQUIRED = false;
+  try { REQUIRED = (process.env.CCP_POLICY_GATE_REQUIRED === '1'); } catch (_e) {}
+
   // Load the host-supplied policy module (env-pointed). Inert when unset.
   var policy = null;
   var modPath = '';
@@ -98,9 +114,37 @@ const BOOT = `
   function bootDegraded(reason) {
     if (__bootWarned) return;
     __bootWarned = true;
+    if (REQUIRED) {
+      try {
+        console.error('[ccpatch] policy_gate: CCP_POLICY_GATE_MODULE is set (' + modPath + ') but the policy gate is DEGRADED: ' + reason + '. CCP_POLICY_GATE_REQUIRED=1 is set, so the gate is FAILING CLOSED: every outbound Anthropic request will be BLOCKED until a valid policy module loads. Fix the module (or unset CCP_POLICY_GATE_REQUIRED to fall back to fail-open).');
+      } catch (_e) {}
+      installFailClosed(reason);
+      return;
+    }
     try {
-      console.warn('[ccpatch] policy_gate: CCP_POLICY_GATE_MODULE is set (' + modPath + ') but the policy gate is DEGRADED to NO-GATING: ' + reason + '. The CLI continues WITHOUT policy enforcement (fail-open).');
+      console.warn('[ccpatch] policy_gate: CCP_POLICY_GATE_MODULE is set (' + modPath + ') but the policy gate is DEGRADED to NO-GATING: ' + reason + '. The CLI continues WITHOUT policy enforcement (fail-open). Set CCP_POLICY_GATE_REQUIRED=1 to fail closed instead.');
     } catch (_e) {}
+  }
+
+  // Hard fail-closed: block every outbound API call with a synthetic assistant
+  // turn explaining the gate is unavailable. Registered via the same deferred
+  // __ccpOnFetchBefore path the normal gate uses, so it is robust to prepend
+  // order. syntheticAssistant() is a hoisted function declaration below.
+  var __failClosedRegistered = false;
+  function installFailClosed(reason) {
+    function reg() {
+      if (__failClosedRegistered) return;
+      if (typeof globalThis.__ccpOnFetchBefore !== 'function') return;
+      __failClosedRegistered = true;
+      globalThis.__ccpOnFetchBefore('policy_gate_fail_closed', function (ctx) {
+        try {
+          if (!ctx || !ctx.isApi) return;
+          ctx._intercept = syntheticAssistant('Policy gate is required (CCP_POLICY_GATE_REQUIRED=1) but unavailable: ' + reason + '. Blocking this request until the policy module loads.');
+        } catch (_e) {}
+      }, 0); // priority 0 — run before any other before-hook
+    }
+    reg();
+    try { setTimeout(reg, 0); } catch (_e) {}
   }
 
   if (!modPath) { dbg('no policy module; gate inert'); return; }
@@ -219,7 +263,7 @@ export default {
   capabilities: ['network', 'prompt', 'fs', 'env', 'exec'],
   phase: 'post',
   dependsOn: ['fetch_interceptor', 'expose_system_prompt'],
-  env: ['CCP_POLICY_GATE_MODULE', 'CCP_POLICY_GATE_PRIORITY', 'CLAUDE_DEBUG'],
+  env: ['CCP_POLICY_GATE_MODULE', 'CCP_POLICY_GATE_PRIORITY', 'CCP_POLICY_GATE_REQUIRED', 'CLAUDE_DEBUG'],
   verify: {
     // BOOT references the sentinel exactly twice (guard read + assignment).
     present: ['__ccpPolicyGateInstalled_v1'],

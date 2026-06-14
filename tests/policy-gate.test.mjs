@@ -166,3 +166,39 @@ test('boot probe: a healthy module does NOT print the degrade warn', () => {
   assert.ok(calls.before, 'gate should register for a healthy module');
   assert.ok(calls.steer.length >= 1, 'steer should be installed for a healthy module');
 });
+
+// ── FAIL-CLOSED opt-in (review fix) ─────────────────────────────────────────
+// CCP_POLICY_GATE_REQUIRED=1 turns a configured-but-degraded gate from silent
+// fail-OPEN into a hard BLOCK on every outbound API request, so a typo'd module
+// path can never silently disable enforcement.
+
+test('fail-closed: required + missing module BLOCKS every outbound API request', async () => {
+  const missing = join(tmpdir(), 'ccp-pg-does-not-exist-' + process.pid + '.cjs');
+  const calls = makeEnv({ CCP_POLICY_GATE_MODULE: missing, CCP_POLICY_GATE_REQUIRED: '1' });
+  assert.ok(calls.before, 'fail-closed gate must register a before-handler even with no valid module');
+  const ctx = { url: 'https://api.anthropic.com/v1/messages', isApi: true, options: { body: '{"x":1}' } };
+  await calls.before.handler(ctx);
+  assert.ok(ctx._intercept, 'required+degraded gate must intercept (synthetic block) the request');
+  // It must be a real Response (the synthetic assistant turn), not a thrown error.
+  assert.ok(ctx._intercept instanceof Response, '_intercept should be a synthetic Response');
+});
+
+test('fail-closed: a non-API request is NOT blocked (only API calls are gated)', async () => {
+  const missing = join(tmpdir(), 'ccp-pg-does-not-exist-2-' + process.pid + '.cjs');
+  const calls = makeEnv({ CCP_POLICY_GATE_MODULE: missing, CCP_POLICY_GATE_REQUIRED: '1' });
+  const ctx = { url: 'https://example.com/telemetry', isApi: false, options: {} };
+  await calls.before.handler(ctx);
+  assert.equal(ctx._intercept, undefined, 'non-API requests must pass through even when failing closed');
+});
+
+test('fail-open (default): required UNSET ⇒ missing module degrades to no-gating, no block', async () => {
+  const missing = join(tmpdir(), 'ccp-pg-does-not-exist-3-' + process.pid + '.cjs');
+  const { calls } = captureWarn({ CCP_POLICY_GATE_MODULE: missing }); // no CCP_POLICY_GATE_REQUIRED
+  // With no required flag and no valid module, nothing intercepts (fail-open).
+  // The before-handler may be absent entirely (nothing to register).
+  if (calls.before) {
+    const ctx = { url: 'https://api.anthropic.com/v1/messages', isApi: true, options: { body: '{}' } };
+    await calls.before.handler(ctx);
+    assert.equal(ctx._intercept, undefined, 'fail-open must never block');
+  }
+});

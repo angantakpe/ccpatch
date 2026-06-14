@@ -267,6 +267,38 @@ describe('Bun SEA module-graph decoder — parseElfBunGraph', () => {
       /Could not match the JS region/,
     );
   });
+
+  // ── Structural fingerprint (review fix) ────────────────────────────────────
+  // The repack version gate keys on the Bun BANNER STRING, which cannot detect a
+  // same-size schema RESHUFFLE within a validated major.minor. validateGraphSchema
+  // converts that silent-corruption path into a loud abort: a StringPointer that
+  // escapes the blob (the signature of a moved field) is rejected BEFORE any
+  // offset rewrite. These tests pin that behavior on the real fixture.
+  it('validateGraphSchema accepts the real, consistent fixture graph', (t) => {
+    if (!existsSync(FIXTURE)) { t.skip(`fixture not available: ${FIXTURE}`); return; }
+    // parseElfBunGraph already calls validateGraphSchema internally; a clean
+    // fixture parse is proof the consistent path passes.
+    assert.doesNotThrow(() => parseElfBunGraph(readFileSync(FIXTURE)));
+  });
+
+  it('parseElfBunGraph rejects a same-size reshuffle (record StringPointer out of bounds)', (t) => {
+    if (!existsSync(FIXTURE)) { t.skip(`fixture not available: ${FIXTURE}`); return; }
+    const binary = Buffer.from(readFileSync(FIXTURE)); // mutable copy
+    // First parse to locate a real record's name StringPointer .off field.
+    const g = parseElfBunGraph(binary);
+    const rec = g.records[0];
+    // Corrupt the name pointer's offset so [off, off+len) escapes the blob —
+    // exactly what a moved-field schema change would produce — without changing
+    // any size (record size, byte_count, payload_len all unchanged, so every
+    // pre-existing arithmetic check still passes). Only validateGraphSchema sees it.
+    const namePtrOffField = rec.ptr.name.fieldPos; // file offset of the {off,len} pair
+    binary.writeUInt32LE(g.offsets.byteCount + 1000, namePtrOffField); // off well past blob end
+    assert.throws(
+      () => parseElfBunGraph(binary),
+      /schema (changed|check)/i,
+      'a StringPointer escaping the blob must fail loud, not silently corrupt offsets',
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------

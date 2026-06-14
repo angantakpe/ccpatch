@@ -155,6 +155,38 @@ for (const file of AUTOMATION) {
   });
 }
 
+// ── 4b. verify.weak ratchet (shrink-only escape hatch) ───────────────────────
+//
+// `verify.weak: true` is a real gate bypass: it lets a patch ship a present-only
+// verify that CANNOT detect wrong-location apply or double-apply (see
+// manifest-validators.validateVerify). The corpus is currently at ZERO real
+// patches using it; this is a ratchet that keeps it there. To legitimately add a
+// weak verify, add the patch stem to WEAK_VERIFY_ALLOWLIST below in the same
+// change and justify it — the list may only shrink over time.
+//
+// `_`-prefixed files (extensions/_*.mjs) are examples/templates, not shipped
+// patches, and are exempt.
+const WEAK_VERIFY_ALLOWLIST = new Set([
+  // (empty — keep it that way; prefer verify.count or verify.absent)
+]);
+
+for (const dir of ['core', 'extensions']) {
+  for (const file of walkMjs(join(ROOT, dir))) {
+    const stem = file.split('/').pop().replace(/\.mjs$/, '');
+    if (stem.startsWith('_')) continue; // examples/templates exempt
+    const src = readFileSync(file, 'utf8');
+    if (/\bweak:\s*true\b/.test(src) && !WEAK_VERIFY_ALLOWLIST.has(stem)) {
+      console.error(
+        `ERROR: ${relative(ROOT, file)} declares verify.weak: true but is not in ` +
+        `WEAK_VERIFY_ALLOWLIST (scripts/lint-escape-hatches.mjs). A present-only ` +
+        `verify cannot detect wrong-location/double apply — switch to verify.count ` +
+        `or verify.absent, or register the stem with justification.`,
+      );
+      hasErrors = true;
+    }
+  }
+}
+
 // ── 5. allowOverlapWith inventory (INFO) ─────────────────────────────────────
 
 const pairs = [];
