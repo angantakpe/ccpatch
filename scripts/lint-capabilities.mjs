@@ -241,7 +241,12 @@ export function runLint() {
     console.error(`\nlint-capabilities: ${errorCount} error(s), ${warnCount} in-flight warning(s) across ${files.length} files.`);
     return 1;
   }
-  console.log(`OK: capability declarations match syscall-shaped usage (${files.length} files scanned${warnCount ? `, ${warnCount} in-flight warning(s)` : ''}).`);
+  console.log(`OK: no undeclared syscall-shaped patterns found in ${files.length} scanned files${warnCount ? ` (${warnCount} in-flight warning(s))` : ''}.`);
+  // Honesty caveat (mirrors the header block + THREAT_MODEL.md): a clean run is a
+  // heuristic tripwire, NOT proof a patch is incapable of network/fs/exec/env.
+  // Indirect, dynamic, and injected-string capability use slips past this scan.
+  // The real backstop is the ack gate + human review of the unsandboxed source.
+  console.log('     (heuristic only — does NOT prove capability-incapability; see THREAT_MODEL.md)');
   return 0;
 }
 

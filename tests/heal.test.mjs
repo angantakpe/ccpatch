@@ -297,6 +297,26 @@ describe('heal — extinct anchors are surfaced, not silently dropped', () => {
     assert.match(res.nextLine, /finding-anchors\.md/);
   });
 
+  it('runHeal --write on extinct-only drift is a no-op on disk (never rewrites to a bad anchor)', () => {
+    // The strongest fail-loud guarantee: even with write:true, an extinct anchor
+    // (zero fuzzy candidates) must NEVER be turned into a registry edit. A heal
+    // that silently rewrote anchors.mjs to a wrong literal here would be the
+    // worst failure mode in the framework — a confident, committed mis-patch.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ccpatch-heal-extinct-write-'));
+    const driftPath = path.join(dir, 'anchor-drift.jsonl');
+    const anchorsPath = path.join(dir, 'anchors.mjs');
+    fs.writeFileSync(driftPath, JSON.stringify(EXTINCT_ENTRY) + '\n', 'utf8');
+    fs.writeFileSync(anchorsPath, ANCHORS_SRC, 'utf8');
+
+    const res = runHeal({ driftPath, anchorsPath, write: true });
+    assert.equal(res.ok, true);
+    assert.equal(res.wrote, false, 'extinct-only drift must not produce a write even with write:true');
+    assert.equal(res.changes.length, 0);
+    assert.equal(res.extinct.length, 1);
+    // The decisive assertion: the registry file is byte-identical to the input.
+    assert.equal(fs.readFileSync(anchorsPath, 'utf8'), ANCHORS_SRC);
+  });
+
   it('healNextLine prefers proposals over the extinct nudge when both exist', () => {
     const withChanges = healNextLine({ changeCount: 2, empty: false, extinctCount: 3 });
     assert.match(withChanges, /--write/);
