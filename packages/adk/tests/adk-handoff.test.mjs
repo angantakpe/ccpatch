@@ -561,8 +561,10 @@ test('swap against an unregistered-at-define target emits handoff.pin.deferred',
 
   const reg = createAgentScope();
   const define = createDefineHandoff({ scope: createHandoffScope(), getAgent: (n) => getAgentIn(reg, n), defineTool });
-  // Defined BEFORE the agent exists → nothing to pin.
-  const handle = define({ target: 'later', mode: 'swap' });
+  // Defined BEFORE the agent exists → nothing to pin. allowDeferredPin opts into
+  // the legacy pin-on-first-resolve path (the default now throws — see the
+  // "refuses an unregistered swap target by default" test below).
+  const handle = define({ target: 'later', mode: 'swap', allowDeferredPin: true });
   // Agent appears afterward.
   defineAgentIn(reg, { name: 'later', systemPrompt: 'LATE PERSONA' });
 
@@ -570,6 +572,23 @@ test('swap against an unregistered-at-define target emits handoff.pin.deferred',
   assert.match(res, /persona swapped/i);
   assert.equal(globalThis.__ccpSystemPromptOverride, 'LATE PERSONA');
   assert.ok(topics(events).includes('handoff.pin.deferred'), 'emits handoff.pin.deferred');
+});
+
+test('defineHandoff refuses an unregistered swap target by default (TOCTOU window closed)', () => {
+  resetGlobals();
+  const reg = createAgentScope();
+  const define = createDefineHandoff({ scope: createHandoffScope(), getAgent: (n) => getAgentIn(reg, n), defineTool });
+  // No agent "ghost" registered → default behavior must THROW at definition time
+  // rather than silently deferring the pin (the define→first-execute window).
+  assert.throws(
+    () => define({ target: 'ghost', mode: 'swap' }),
+    /not registered.*allowDeferredPin/s,
+    'unregistered swap target throws unless allowDeferredPin is set',
+  );
+  // The escape hatch still allows the deferred path.
+  assert.doesNotThrow(() => define({ target: 'ghost', mode: 'swap', allowDeferredPin: true }));
+  // delegate mode is unaffected — it never pins a persona.
+  assert.doesNotThrow(() => define({ target: 'ghost', mode: 'delegate' }));
 });
 
 // ── AgentRouter announces code-driven control on first submit ─────────────────
@@ -752,8 +771,8 @@ test('deferred-pin captures the persona on first resolve and refuses later drift
 
   const reg = createAgentScope();
   const define = createDefineHandoff({ scope: createHandoffScope(), getAgent: (n) => getAgentIn(reg, n), defineTool });
-  // Target unregistered at define time → pin deferred.
-  const handle = define({ target: 'deferred', mode: 'swap', allowSwapTargets: ['deferred'] });
+  // Target unregistered at define time → pin deferred (opt-in via allowDeferredPin).
+  const handle = define({ target: 'deferred', mode: 'swap', allowSwapTargets: ['deferred'], allowDeferredPin: true });
 
   // First resolve: agent now exists. Captures the pin on this very first execute.
   defineAgentIn(reg, { name: 'deferred', systemPrompt: 'FIRST PERSONA' });
@@ -786,7 +805,7 @@ test('deferred-pin does NOT re-emit pin.deferred on subsequent (unchanged) execu
 
   const reg = createAgentScope();
   const define = createDefineHandoff({ scope: createHandoffScope(), getAgent: (n) => getAgentIn(reg, n), defineTool });
-  const handle = define({ target: 'd2', mode: 'swap' });
+  const handle = define({ target: 'd2', mode: 'swap', allowDeferredPin: true });
   defineAgentIn(reg, { name: 'd2', systemPrompt: 'STABLE' });
 
   const events1 = captureBus();

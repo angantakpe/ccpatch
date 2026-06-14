@@ -69,3 +69,4 @@ storage/diagnostics/*.jsonl
 
 # ADK memory test scratch (path-sandbox forces stores under repo root)
 .tmp-adk-memory-tests/
+.tmp-adk-user-agents-tests/

@@ -498,3 +498,62 @@ test('transform { onWrite, onRead } round-trips through disk (base64)', async ()
   await plain.flush();
   assert.match(readFileSync(plainFile, 'utf8'), /"k": "v"/, 'no transform → plaintext JSON');
 });
+
+// ── append-log (delta) mode ───────────────────────────────────────────────────
+
+test('appendLog mode persists deltas to <path>.log and replays them on reload', async () => {
+  const dir = freshDir();
+  const file = join(dir, 'store.json');
+  const m1 = createMemory({ path: file, appendLog: true });
+  m1.set('a', 1);
+  m1.set('b', 2);
+  m1.delete('a');
+  // Deltas are written synchronously on each mutation (no debounce in this mode).
+  assert.ok(existsSync(`${file}.log`), 'delta log file is created');
+
+  // A fresh instance reconstructs the store by replaying the log.
+  const m2 = createMemory({ path: file, appendLog: true });
+  assert.equal(m2.get('a'), undefined, 'deleted key not replayed');
+  assert.equal(m2.get('b'), 2, 'surviving key replayed');
+  assert.deepEqual(m2.keys().sort(), ['b']);
+});
+
+test('appendLog clear() is replayed (store empty after reload)', async () => {
+  const dir = freshDir();
+  const file = join(dir, 'store.json');
+  const m1 = createMemory({ path: file, appendLog: true });
+  m1.set('x', 'y');
+  m1.clear();
+  m1.set('z', 1);
+  const m2 = createMemory({ path: file, appendLog: true });
+  assert.deepEqual(m2.keys(), ['z'], 'clear wiped pre-clear keys; post-clear set survives');
+});
+
+test('appendLog compacts the log once it outgrows maxBytes (replay stays correct)', async () => {
+  const dir = freshDir();
+  const file = join(dir, 'store.json');
+  // Tiny cap so a handful of deltas trips compaction.
+  const m1 = createMemory({ path: file, appendLog: true, maxBytes: 200 });
+  for (let i = 0; i < 50; i++) m1.set(`k${i}`, 'x'.repeat(20));
+  // After compaction the log holds a single {snap:…} checkpoint instead of 50
+  // separate delta lines (the checkpoint is one JSON object on one line).
+  const logText = readFileSync(`${file}.log`, 'utf8');
+  const lines = logText.split('\n').filter((l) => l.trim());
+  assert.ok(lines.length < 50, `compaction collapsed 50 deltas into ${lines.length} line(s)`);
+  assert.ok(lines.some((l) => l.includes('"snap"')), 'compacted log contains a snapshot checkpoint');
+
+  const m2 = createMemory({ path: file, appendLog: true, maxBytes: 200 });
+  assert.equal(m2.keys().length, 50, 'all keys survive compaction + replay');
+  assert.equal(m2.get('k49'), 'x'.repeat(20));
+});
+
+test('maxBytes override raises the default-mode cap (no silent data loss)', async () => {
+  const dir = freshDir();
+  const file = join(dir, 'store.json');
+  const m1 = createMemory({ path: file });
+  m1.set('big', 'a'.repeat(1000));
+  await m1.flush();
+  // Reload with a generous cap — contents must load, not be ignored.
+  const m2 = createMemory({ path: file, maxBytes: 10 * 1024 * 1024 });
+  assert.equal(m2.get('big'), 'a'.repeat(1000));
+});

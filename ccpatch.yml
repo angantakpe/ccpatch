@@ -83,6 +83,15 @@ ack:
   expose_tool_dispatch: [tools, network, exec]
   expose_system_prompt: [prompt]
   adk_hello_agent: [tools]
+  # adk_user_agents runs arbitrary user-authored ADK modules from ~/.ccpatch/agents/
+  # — those modules inject tools (tools) and may swap personas (prompt).
+  adk_user_agents: [tools, prompt]
+  # adk profile additions (delegate + router capabilities for the full ADK
+  # surface). prime_agent_tool_on_boot primes the native AgentTool so delegate
+  # handoffs resolve; expose_submit_input drives the input bar for AgentRouter.
+  # expose_agent_tool is acked in the daemon block below (shared producer).
+  prime_agent_tool_on_boot: [tools]
+  expose_submit_input: [prompt]
   # daemon / headless-bridge stack — the patches the `daemon` profile adds on top
   # of `minimal`. This is the most powerful profile in the corpus (headless agent
   # loop + tool dispatch + an external control bridge), so each ack is a
@@ -205,6 +214,7 @@ patches:
   # delegate handoffs add expose_agent_tool + prime_agent_tool_on_boot; for the
   # event bus add event_bus.
   adk_hello_agent: true           # register a hello agent + adk_ping tool via the ADK
+  adk_user_agents: false          # load user-authored ADK modules from ~/.ccpatch/agents/*.mjs (opt-in)
 
   # ── Verticals (composed on top of the horizontals above) ────────────────────
   event_bus: false                # typed pub/sub (__ccpBus) — shared by orchestrator/bridge
@@ -298,6 +308,31 @@ profiles:
   native:
     extends: standard
     patches: []
+
+  # adk — standard + the full Agent Development Kit surface. Loads
+  # @codehornets/adk into the session (adk_hello_agent's boot block) with EVERY
+  # ccpatch primitive the ADK can consume wired up, so capabilities() reports all
+  # five live: tools (expose_tool_dispatch — already in standard), swap
+  # (expose_system_prompt — already in standard), delegate (expose_agent_tool +
+  # prime_agent_tool_on_boot), router (expose_submit_input), and bus (event_bus).
+  #
+  # SECURITY: this composes expose_tool_dispatch + expose_agent_tool +
+  # expose_system_prompt — the same tools/prompt/exec/network capability set the
+  # daemon profile gates. UNLIKE daemon, the ADK profile is intentionally
+  # PRE-ACKED in the ack: block above (adk_hello_agent / expose_* entries), so
+  # `--profile adk` builds without --allow-unacked. It deliberately does NOT pull
+  # in expose_api_client or headless_bridge (no external NDJSON control socket),
+  # so it is a strictly smaller surface than daemon — in-process agent
+  # orchestration, not remote control.
+  adk:
+    extends: standard
+    patches:
+      - expose_agent_tool
+      - prime_agent_tool_on_boot
+      - expose_submit_input
+      - event_bus
+      - adk_hello_agent
+      - adk_user_agents
 
   # power lists everything explicitly -- no extends
   power:

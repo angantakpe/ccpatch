@@ -637,6 +637,13 @@ function captureCurrentPrompt() {
  * @property {object} [inputSchema]   Override the tool input schema.
  * @property {string} [promptKey='task']  Property carrying the prompt to hand over.
  * @property {string[]} [allowSwapTargets] Allowlist; swap only proceeds if target ∈ it.
+ * @property {boolean} [allowDeferredPin=false] Swap-mode TOCTOU escape hatch. By
+ *   default a `swap` handoff whose target is NOT registered at definition time
+ *   THROWS — there is no persona to pin, so the define→first-execute window would
+ *   be guarded only by the name allowlist (see the residual-trust note below).
+ *   Set true to opt back into the legacy pin-on-first-resolve behavior (the first
+ *   execute captures the pin) when you genuinely intend to define the handoff
+ *   before its target agent.
  */
 
 /**
@@ -666,6 +673,7 @@ export function createDefineHandoff({ scope, getAgent, defineTool }) {
     inputSchema,
     promptKey = 'task',
     allowSwapTargets,
+    allowDeferredPin = false,
   } = {}) {
     // PROGRAMMER errors — bad/missing args throw at definition time.
     if (typeof target !== 'string' || !target) {
@@ -708,25 +716,40 @@ export function createDefineHandoff({ scope, getAgent, defineTool }) {
     // executes — so a swapped-in persona that later drifts is refused with
     // handoff.pin.mismatch exactly like the define-time-pinned case.
     //
-    // RESIDUAL TRUST ASSUMPTION (TOCTOU not fully closed): the pin is captured at
-    // the FIRST execute, NOT at defineHandoff(). So whatever persona is registered
-    // under `target` in the window between defineHandoff() and that first execute
-    // is trusted IMPLICITLY — if an attacker re-defines the target before it is
-    // first invoked, pin-on-first-resolve will faithfully pin (and thereafter
-    // defend) the ALREADY-SUBSTITUTED persona. The name allowlist is the only guard
-    // across that initial window. We cannot close it here without a registered
-    // persona to hash at definition time; callers that need a hard guarantee should
-    // ensure the target is defined BEFORE the handoff (so the define-time pin above
-    // applies) rather than relying on the deferred path.
+    // DEFAULT: the deferred path is REFUSED (see the throw below) so the
+    // define→first-execute window cannot exist unless the caller explicitly opts
+    // in with { allowDeferredPin: true }. RESIDUAL TRUST ASSUMPTION when they DO
+    // opt in: the pin is captured at the FIRST execute, NOT at defineHandoff(), so
+    // whatever persona is registered under `target` in the window between
+    // defineHandoff() and that first execute is trusted IMPLICITLY — if an attacker
+    // re-defines the target before it is first invoked, pin-on-first-resolve will
+    // faithfully pin (and thereafter defend) the ALREADY-SUBSTITUTED persona. The
+    // name allowlist is the only guard across that initial window. Callers that need
+    // a hard guarantee should leave allowDeferredPin off and define the target
+    // BEFORE the handoff so the define-time pin above applies.
     let pinnedHash = null;
     let pinDeferred = false;
     if (mode === 'swap') {
       const defAtDefine = getAgent(target);
       if (defAtDefine && typeof defAtDefine.systemPrompt === 'string') {
         pinnedHash = hashPrompt(defAtDefine.systemPrompt);
-      } else {
-        // Can't pin what doesn't exist yet — note it for the execute path.
+      } else if (allowDeferredPin) {
+        // Opt-in legacy path: can't pin what doesn't exist yet — note it for the
+        // execute path, which captures the pin on first resolve. The caller has
+        // explicitly accepted the define→first-execute window (allowDeferredPin).
         pinDeferred = true;
+      } else {
+        // DEFAULT: refuse to define a swap handoff against an unregistered target.
+        // There is no persona to pin, so the define→first-execute window would be
+        // guarded only by the name allowlist — a real TOCTOU surface. Fail loud at
+        // definition time (a programmer error) instead of silently deferring;
+        // define the target agent first, or pass { allowDeferredPin: true } to
+        // accept the window deliberately.
+        throw new Error(
+          `defineHandoff: swap target "${target}" is not registered — define the agent before the ` +
+          `handoff so its persona can be pinned at definition time, or pass { allowDeferredPin: true } ` +
+          `to opt into pin-on-first-resolve (accepting the define→first-execute TOCTOU window).`,
+        );
       }
     }
 
