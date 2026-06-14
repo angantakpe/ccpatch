@@ -14,6 +14,8 @@
  * registering an agent is granting it the right to become the active persona.
  */
 
+import { host } from './host.mjs';
+
 /**
  * @typedef {Object} AgentDef
  * @property {string} name            Unique agent id (registry key).
@@ -50,7 +52,7 @@ function warnAgentRedefined(scope, name, prevPrompt, nextPrompt) {
   const warned = scope.warnedRedefines || (scope.warnedRedefines = new Set());
   if (!warned.has(name)) {
     warned.add(name);
-    const debug = process.env.CLAUDE_DEBUG || globalThis.__ccpDebug;
+    const debug = host.debug();
     try {
       if (debug) {
         console.warn(
@@ -65,7 +67,7 @@ function warnAgentRedefined(scope, name, prevPrompt, nextPrompt) {
   }
   // Bus emit is independent of the once-per-name console dedupe so downstream
   // auditors observe EVERY redefine; guard it like the other modules.
-  try { globalThis.__ccpBus?.emit('agent.redefined', { name }); } catch (_) {}
+  host.emit('agent.redefined', { name });
 }
 
 /**

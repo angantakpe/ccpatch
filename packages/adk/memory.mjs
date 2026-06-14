@@ -10,6 +10,7 @@ import {
 } from 'node:fs';
 import { dirname, resolve, relative, isAbsolute } from 'node:path';
 import { cwd, pid } from 'node:process';
+import { host } from './host.mjs';
 
 // Default hard cap on the on-disk store: refuse to JSON.parse unbounded input.
 // Overridable per-instance via createMemory({ maxBytes }). In the default
@@ -285,7 +286,7 @@ export function createMemory({ path: filePath, transform, maxBytes, appendLog = 
       // (e.g. "[1,2]" or "42" or "null") must NOT become the store — get/set
       // assume a plain object. Reset to {} and warn.
       if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        if (process.env.CLAUDE_DEBUG || globalThis.__ccpDebug) {
+        if (host.debug()) {
           console.warn(
             `createMemory: ${resolved} parsed to a non-object (${
               Array.isArray(parsed) ? 'array' : parsed === null ? 'null' : typeof parsed

@@ -23,6 +23,8 @@
  * the ADK's required minimum.
  */
 
+import { host } from './host.mjs';
+
 /**
  * @typedef {Object} ContractRequirement
  * @property {string} capability    The capabilities() boolean this contract gates.
@@ -130,7 +132,7 @@ export function checkContract(name) {
   const req = ADK_CONTRACT_REQUIREMENTS[name];
   if (!req) return { status: 'unchecked', reason: `unknown ADK contract "${name}"` };
 
-  const inspect = globalThis.__ccpInspectContracts;
+  const inspect = host.inspectContracts();
   if (typeof inspect !== 'function') return { status: 'unchecked' };
 
   let entry;
@@ -166,7 +168,7 @@ export function checkContract(name) {
   }
 
   // 3. Strongest check: __ccpRequire probes the actual value paths.
-  const require_ = globalThis.__ccpRequire;
+  const require_ = host.requireFn();
   if (typeof require_ === 'function') {
     try {
       const value = require_(name, {

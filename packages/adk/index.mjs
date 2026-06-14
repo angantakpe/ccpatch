@@ -9,11 +9,36 @@
  *      imports keep working unchanged.
  *
  *   2. createAdk() — returns an object exposing the SAME API but backed by an
- *      isolated scope. Two createAdk() instances never share agent/tool/handoff
- *      state, which enables per-test / per-session isolation.
+ *      isolated scope, for per-test / per-session isolation.
  *
- * The ADK sits on top of ccpatch-exposed globals (__ccpRawTools, __ccpAgentTool,
- * __ccpSetSystemPrompt, __ccpSubmitInput, __ccp_path, __ccpBus). Use
+ * ISOLATION CONTRACT (read this before relying on createAdk() for isolation).
+ * The boundary is NOT uniform, because some of the resources the ADK sits on are
+ * irreducibly process-global. Each createAdk() method is one of:
+ *
+ *   INSTANCE-LOCAL — two instances never share this state:
+ *     • defineAgent / getAgent / listAgents   (per-instance agent registry)
+ *     • defineTool / listTools / toolStatuses  (per-instance tool scope; the
+ *       LIVE __ccpRawTools array is still the one shared sink, but each instance
+ *       owns its OWN queue/lifecycle/dispose bookkeeping)
+ *     • defineHandoff / restoreSystemPrompt / swapDepth / tryAcquireSwap
+ *       (per-instance swap-stack FOOTPRINT + exclusive-lock ownership)
+ *     • AgentRouter                            (bound to this instance's agents)
+ *     • dispose()                              (tears down only this instance)
+ *
+ *   PROCESS-GLOBAL — shared by EVERY instance and the DEFAULT exports alike,
+ *   because the underlying primitive is a single global slot. Scoping these would
+ *   be theatre, so they are deliberately NOT scoped, and say so on the instance:
+ *     • currentPersona()  reads the ONE live persona slot (__ccpGetSystemPrompt).
+ *       swapDepth() is per-instance, but the persona it reflects is global — an
+ *       out-of-order restore across instances fails safely (see handoff.mjs).
+ *     • capabilities()    probes process globals; identical for all instances.
+ *     • useAgentBus()     returns the ONE __ccpBus.
+ *     • createMemory()    is keyed by FILE PATH, not by instance. Two instances
+ *       (or two processes) opening the same path share that store on purpose
+ *       (cross-process last-write merge). Pass distinct `path:` for separation.
+ *
+ * The ADK sits on top of ccpatch-exposed globals, reached ONLY through the
+ * host port (host.mjs) — no module touches `globalThis.__ccp*` directly. Use
  * capabilities() to preflight which primitives are actually live.
  */
 
@@ -34,6 +59,7 @@ import {
 } from './handoff.mjs';
 import { createMemory } from './memory.mjs';
 import { ADK_CONTRACT_REQUIREMENTS, checkContract } from './contracts.mjs';
+import { host } from './host.mjs';
 
 export { defineAgent, getAgent, listAgents } from './agent.mjs';
 export { ADK_CONTRACT_REQUIREMENTS, checkContract } from './contracts.mjs';
@@ -137,11 +163,11 @@ const CAPABILITY_PATCH = {
  */
 export function capabilities() {
   const caps = {
-    tools: Array.isArray(globalThis.__ccpRawTools),
-    delegate: typeof globalThis.__ccpAgentTool?.invoke === 'function',
-    swap: typeof globalThis.__ccpSetSystemPrompt === 'function',
-    router: typeof globalThis.__ccpSubmitInput === 'function',
-    bus: !!globalThis.__ccpBus,
+    tools: host.hasRawTools(),
+    delegate: host.hasDelegate(),
+    swap: host.hasSetSystemPrompt(),
+    router: host.hasSubmitInput(),
+    bus: host.hasBus(),
   };
 
   // Remediation detail. `live` mirrors each boolean; `patch` names
@@ -184,7 +210,7 @@ export function capabilities() {
  * @returns {{ emit: Function, on?: Function, off?: Function }}
  */
 export function useAgentBus() {
-  const bus = globalThis.__ccpBus;
+  const bus = host.bus();
   if (!bus) throw new Error('useAgentBus: __ccpBus not available — ensure event_bus patch is applied');
   const res = checkContract('bus');
   if (res.status === 'drift') {
@@ -195,6 +221,7 @@ export function useAgentBus() {
 
 /**
  * @typedef {Object} Adk
+ * @property {string} id  Stable per-instance id (introspection / debug only).
  * @property {typeof defineAgent} defineAgent
  * @property {typeof getAgent} getAgent
  * @property {typeof listAgents} listAgents
@@ -213,10 +240,17 @@ export function useAgentBus() {
  * @property {() => void} dispose  Tear down this instance's tool/swap/agent scopes (idempotent).
  */
 
+/** Monotonic counter backing each createAdk() instance's `id`. */
+let _adkSeq = 0;
+
 /**
- * Create an isolated ADK instance. All agent/tool/handoff state is scoped to the
- * returned object; two instances never share registries. The returned API mirrors
- * the top-level exports exactly.
+ * Create an ADK instance with INSTANCE-LOCAL agent/tool/handoff scopes. Two
+ * instances never share those registries. Per the ISOLATION CONTRACT at the top
+ * of this file, `capabilities`, `useAgentBus`, and `createMemory` are deliberately
+ * NOT instance-scoped — they front process-global resources (the globals probe,
+ * the single bus, and path-keyed on-disk stores) and are shared with every other
+ * instance and the DEFAULT exports. The returned API otherwise mirrors the
+ * top-level exports exactly.
  *
  * @returns {Adk}
  */
@@ -224,6 +258,10 @@ export function createAdk() {
   const agentScope = createAgentScope();
   const toolScope = createToolScope();
   const handoffScope = createHandoffScope();
+  // Stable id for this instance — lets debug output / bus consumers tell two
+  // instances apart. The swap scope already carries its own id (handoffScope.id);
+  // we surface a parallel adk id for introspection.
+  const id = `adk-${++_adkSeq}`;
 
   const agentApi = createAgentRegistry(agentScope);
   const toolApi = createToolRegistry(toolScope);
@@ -239,6 +277,7 @@ export function createAdk() {
   let disposed = false;
 
   return {
+    id,
     defineAgent: agentApi.defineAgent,
     getAgent: agentApi.getAgent,
     listAgents: agentApi.listAgents,
@@ -260,6 +299,12 @@ export function createAdk() {
         super({ getAgent: agentApi.getAgent, ...opts });
       }
     },
+    // PROCESS-GLOBAL (see the ISOLATION CONTRACT at the top of this file): these
+    // three front single global resources, so the instance intentionally hands
+    // back the SAME functions the DEFAULT exports use — they are not re-scoped.
+    //   • capabilities — probes process globals (identical for every instance)
+    //   • useAgentBus  — returns the one __ccpBus
+    //   • createMemory — path-keyed store; pass distinct `path:` to separate
     createMemory,
     capabilities,
     useAgentBus,
