@@ -260,6 +260,52 @@ export const PATCH_FIELDS = Object.freeze([
   { section: 'Coverage', name: 'coverageMarker?', type: 'string', doc: 'Opt-in runtime coverage marker.' },
 ]);
 
+// ── Author-facing discriminated patch shapes (emitted AFTER Patch) ───────────
+// `Patch` (built from PATCH_FIELDS above) is the permissive superset on which
+// every field is optional-or-present; it stays the back-compatible annotation
+// and is what validateManifest() normalizes. These narrower shapes exist purely
+// to GUIDE AUTHORS to the valid "which 3-of-15 fields does my kind need?"
+// combination, and to give editors a tighter contract when a patch is annotated
+// `@type {import('../types/patch').PatchInput}`.
+//
+// Verbatim TS (like TYPE_ALIASES) — these encode hand-tuned union/intersection
+// shapes that are not produced from flat field descriptors. The discriminant
+// field names (kind / target / code / transform / apply / bootInject) are the
+// stable shape contract; they do not rotate. gen-types.mjs emits this block
+// immediately after the Patch interface.
+export const PATCH_SHAPE_BLOCK = `/** Fields common to every patch shape (everything except the kind discriminants). */
+export type PatchCommon = Omit<
+  Patch,
+  'kind' | 'target' | 'code' | 'transform' | 'apply' | 'bootInject'
+>;
+
+/** A declarative prefix/postfix/transpiler patch. Requires \`target\`; the runner synthesizes apply(). */
+export type DeclarativePatch = PatchCommon & {
+  kind: 'prefix' | 'postfix' | 'transpiler';
+  target: KindTarget;
+  code?: string;
+  transform?: (functionBody: string, opts: Record<string, unknown>) => string;
+};
+
+/** A free-form patch: a hand-written apply() escape hatch. */
+export type FreePatch = PatchCommon & {
+  kind?: 'free';
+  apply: (code: string, opts?: Record<string, unknown>) => string;
+};
+
+/** A boot-time patch: contributes a bootInject block to the combined boot splice; no apply()/target needed. */
+export type BootPatch = PatchCommon & {
+  bootInject: BootInject;
+};
+
+/**
+ * Discriminated union of the three valid patch shapes. Annotate an authored
+ * patch with this (instead of the permissive \`Patch\`) to have the type system
+ * enforce the right field set for its kind — e.g. a \`kind: 'prefix'\` patch then
+ * REQUIRES \`target\`, and a \`FreePatch\` REQUIRES \`apply\`.
+ */
+export type PatchInput = DeclarativePatch | FreePatch | BootPatch;`;
+
 // ── Teaching hints for validateManifest rejections (U3) ──────────────────────
 // A single declarative source for the *guidance* half of a rejection message:
 // each field's expected shape plus a one-line correct example. validateManifest

@@ -8,8 +8,9 @@ include scripts/mk/cli.mk
         smoke-integration-roundtrip test-tty canary \
         bridge-host bridge-host-stop bridge-tail bridge-submit \
         verticals-check lint lint-dead lint-unused lint-registry lint-capabilities lint-contracts \
+        lint-ordering lint-honesty \
         test\:patches test\:patch test\:tty lint\:dead lint\:unused \
-        lint\:registry lint\:capabilities heal
+        lint\:registry lint\:capabilities lint\:contracts lint\:ordering lint\:honesty heal
 
 # ── Naming-drift aliases ────────────────────────────────────────────────────
 # Kill the spelling drift between the two build systems: every operation that
@@ -29,6 +30,8 @@ lint\:unused: lint-unused ## Alias for lint-unused (npm-style spelling)
 lint\:registry: lint-registry ## Alias for lint-registry (npm-style spelling)
 lint\:capabilities: lint-capabilities ## Alias for lint-capabilities (npm-style spelling)
 lint\:contracts: lint-contracts ## Alias for lint-contracts (npm-style spelling)
+lint\:ordering: lint-ordering ## Alias for lint-ordering (npm-style spelling)
+lint\:honesty: lint-honesty ## Alias for lint-honesty (npm-style spelling)
 
 # ── Verticals: testing the headless bridge + agent tree ─────────────────────
 
@@ -158,7 +161,13 @@ lint-capabilities: ## Capability-honesty check: declared capabilities vs syscall
 lint-contracts: ## Contract-honesty check: every cross-patch __ccp* global must call __ccpProvide (or be allowlisted)
 	@node scripts/lint-contracts.mjs
 
-lint: lint-dead lint-unused lint-registry lint-capabilities lint-contracts ## Run all dead-code + registry/capability/contract checks
+lint-ordering: ## Ordering-honesty check: no bootInject+priority runtime-ordering misuse (docs/ordering.md)
+	@node scripts/lint-ordering.mjs
+
+lint-honesty: ## All honesty lints in one pass: capabilities + contracts + escape-hatches + ordering
+	@node scripts/lint-honesty.mjs
+
+lint: lint-dead lint-unused lint-registry lint-honesty ## Run all dead-code + registry + honesty (capability/contract/escape-hatch/ordering) checks
 
 help: ## Show this help
 	@echo "Usage: make <target> [VERSION=x.y.z]"

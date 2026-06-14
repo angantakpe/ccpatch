@@ -185,6 +185,11 @@ export interface BootInject {
  *
  * Required: `description`, `verify`, and either `apply` (for kind='free') or
  * `target` + `code`/`transform` (for declarative kinds).
+ *
+ * This interface is the permissive superset (every shape field is optional). For
+ * a tighter, kind-aware contract that enforces the right field set, annotate the
+ * patch with the `PatchInput` discriminated union (DeclarativePatch | FreePatch
+ * | BootPatch) emitted below.
  */
 export interface Patch {
   // ── Required ──
@@ -261,6 +266,41 @@ export interface Patch {
   /** Opt-in runtime coverage marker. */
   coverageMarker?: string;
 }
+
+// ── Discriminated patch shapes (kind-aware author contract) ──
+
+/** Fields common to every patch shape (everything except the kind discriminants). */
+export type PatchCommon = Omit<
+  Patch,
+  'kind' | 'target' | 'code' | 'transform' | 'apply' | 'bootInject'
+>;
+
+/** A declarative prefix/postfix/transpiler patch. Requires `target`; the runner synthesizes apply(). */
+export type DeclarativePatch = PatchCommon & {
+  kind: 'prefix' | 'postfix' | 'transpiler';
+  target: KindTarget;
+  code?: string;
+  transform?: (functionBody: string, opts: Record<string, unknown>) => string;
+};
+
+/** A free-form patch: a hand-written apply() escape hatch. */
+export type FreePatch = PatchCommon & {
+  kind?: 'free';
+  apply: (code: string, opts?: Record<string, unknown>) => string;
+};
+
+/** A boot-time patch: contributes a bootInject block to the combined boot splice; no apply()/target needed. */
+export type BootPatch = PatchCommon & {
+  bootInject: BootInject;
+};
+
+/**
+ * Discriminated union of the three valid patch shapes. Annotate an authored
+ * patch with this (instead of the permissive `Patch`) to have the type system
+ * enforce the right field set for its kind — e.g. a `kind: 'prefix'` patch then
+ * REQUIRES `target`, and a `FreePatch` REQUIRES `apply`.
+ */
+export type PatchInput = DeclarativePatch | FreePatch | BootPatch;
 
 /** Normalized form returned by validateManifest(). */
 export interface NormalizedPatch {
