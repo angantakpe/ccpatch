@@ -1,24 +1,34 @@
 # ccpatch ADK — Agent Development Kit
 
-> **Status: Experimental / not wired into the shipped patch pipeline.**
+> **Status: Experimental / opt-in. Reachable via the `adk` profile, NOT in the
+> default `make patch-claude-code` build.**
 >
-> The ADK is a standalone companion toolkit, **not part of the default
-> `make patch-claude-code` build**. Nothing in `core/`, `extensions/`,
-> `runner/`, or `ccpatch.yml` imports or invokes it — the only in-repo
-> consumers are this package's own `tests/adk-*.test.mjs` suites
-> (`packages/adk/tests/`, run via `npm test -w @codehornets/adk` or the root
-> `npm run test:adk`). It is a *consumer* of the
-> globals that shipped patches expose onto `globalThis` (see the handshake
-> notes in `core/contracts.mjs` and `extensions/expose_system_prompt.mjs`),
-> but it does not ship as a patch itself. Treat the API below as aspirational /
-> evolving; do not assume it is loaded in a patched session unless you have
-> explicitly arranged to load it. Always call `capabilities()` to preflight.
+> The ADK is a companion toolkit that ships behind its own build profile. It is
+> **not** part of the default `standard` build, but `--profile adk`
+> (`ccpatch.yml`) composes the five primitive patches it consumes and loads
+> `@codehornets/adk` into the patched session: `extensions/adk_hello_agent.mjs`
+> emits a boot module that `import()`s the ADK (copied to
+> `<bundle-dir>/ccpatch-adk/` by the build) and `extensions/adk_user_agents.mjs`
+> loads user-authored modules from `~/.ccpatch/agents/*.mjs`. The ADK itself
+> ships no bundle anchor — it is a *consumer* of the `__ccp*` globals/contracts
+> that other patches expose (see `core/contracts.mjs` and
+> `extensions/expose_system_prompt.mjs`).
 >
-> Because of this deliberate experimental status, the repo's `knip.json` lists
-> `packages/adk/**` under `ignore` on purpose — so knip's dead-code reporting
-> does not flag the ADK's test-only sources/exports as accidentally unused.
-> Remove that ignore (and this banner) if/when the ADK is promoted into the
-> default build.
+> **What the shipped profile actually exercises is a subset of the API.** The
+> built-in `adk_hello_agent` registers a persona + injects one tool (the `tools`
+> capability only). `defineHandoff` / `swap` / `AgentRouter` / `createMemory` /
+> `useAgentBus` are wired at the *capability* level (the globals are exposed and
+> `capabilities()` reports them live under `--profile adk`) but no shipped patch
+> consumes them — they are reachable today only through your own
+> `~/.ccpatch/agents/*.mjs` modules or the test suites. Treat anything beyond the
+> hello-agent path as evolving; always call `capabilities()` to preflight.
+>
+> The in-repo test consumers are this package's own `tests/adk-*.test.mjs`
+> suites (run via `npm test -w @codehornets/adk` or the root `npm run test:adk`).
+> `knip.json` still lists `packages/adk/**` under `ignore` because the package's
+> public exports are consumed by user modules / tests rather than by `core/`
+> directly; revisit that ignore (and tighten this banner) if a shipped patch ever
+> consumes the handoff/router/memory/bus exports.
 
 The ADK is a small, dependency-free (ESM, Node 20+, no build step) toolkit for
 **defining, registering, and orchestrating agents inside a live Claude Code
