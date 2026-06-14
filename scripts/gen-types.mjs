@@ -30,6 +30,7 @@ import {
   TYPE_ALIASES,
   INTERFACES,
   PATCH_FIELDS,
+  PATCH_SHAPE_BLOCK,
   NORMALIZED_FIELDS,
   enumValues,
   KINDS_LIST,
@@ -161,9 +162,20 @@ function generate() {
  *
  * Required: \`description\`, \`verify\`, and either \`apply\` (for kind='free') or
  * \`target\` + \`code\`/\`transform\` (for declarative kinds).
+ *
+ * This interface is the permissive superset (every shape field is optional). For
+ * a tighter, kind-aware contract that enforces the right field set, annotate the
+ * patch with the \`PatchInput\` discriminated union (DeclarativePatch | FreePatch
+ * | BootPatch) emitted below.
  */
 export interface Patch {${emitSectionedFields(PATCH_FIELDS)}
 }`);
+
+  // Author-facing discriminated shapes (PatchCommon / DeclarativePatch /
+  // FreePatch / BootPatch / PatchInput). Verbatim from the schema; must come
+  // after Patch (PatchCommon = Omit<Patch, …>).
+  parts.push(`// ── Discriminated patch shapes (kind-aware author contract) ──`);
+  parts.push(PATCH_SHAPE_BLOCK);
 
   // NormalizedPatch interface.
   parts.push(`/** Normalized form returned by validateManifest(). */
