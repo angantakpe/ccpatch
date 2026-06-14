@@ -139,6 +139,13 @@ export interface HandoffOptions {
   promptKey?: string;
   /** Allowlist; a swap only proceeds if target ∈ it (programmer error otherwise). */
   allowSwapTargets?: string[];
+  /**
+   * Swap-mode TOCTOU escape hatch (default false). By default defineHandoff
+   * THROWS when a `swap` target is not registered at definition time (no persona
+   * to pin). Set true to opt into legacy pin-on-first-resolve, accepting the
+   * define→first-execute window.
+   */
+  allowDeferredPin?: boolean;
 }
 
 /** Register a tool-call-driven handoff to `target` in the DEFAULT instance. */
@@ -270,10 +277,33 @@ export interface Memory {
   dispose(): void;
 }
 
+/** Reversible on-disk transform (e.g. encrypt/encode). onRead MUST invert onWrite. */
+export interface MemoryTransform {
+  /** Map the serialized JSON string to the bytes written to disk. Default identity. */
+  onWrite?: (jsonString: string) => string;
+  /** Map raw on-disk bytes back to a JSON string before parse. Default identity. */
+  onRead?: (raw: string) => string;
+}
+
 /** Options for createMemory. */
 export interface CreateMemoryOptions {
   /** Store path; must resolve within the project root (default .claude/adk-memory.json). */
   path?: string;
+  /** Reversible on-disk transform (encrypt/encode/redact). Caller-supplied; no crypto bundled. */
+  transform?: MemoryTransform;
+  /**
+   * On-disk size cap (default 5 MB). In default mode bounds the whole-file
+   * rewrite + the read that is otherwise ignored; in appendLog mode it is the
+   * delta-log compaction threshold.
+   */
+  maxBytes?: number;
+  /**
+   * Persist mutations as O(delta) NDJSON records to a sibling `<path>.log`,
+   * replayed on load and compacted past maxBytes. For stores that outgrow the
+   * default full-rewrite cost. Does NOT do the default mode's cross-process key
+   * merge (single owning process intended).
+   */
+  appendLog?: boolean;
 }
 
 /** Create a JSON-file key/value store with an in-memory write-through cache. */

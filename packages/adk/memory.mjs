@@ -1,6 +1,7 @@
 import {
   readFileSync,
   writeFileSync,
+  appendFileSync,
   mkdirSync,
   statSync,
   renameSync,
@@ -10,7 +11,11 @@ import {
 import { dirname, resolve, relative, isAbsolute } from 'node:path';
 import { cwd, pid } from 'node:process';
 
-// Hard cap on the on-disk store: refuse to JSON.parse unbounded input.
+// Default hard cap on the on-disk store: refuse to JSON.parse unbounded input.
+// Overridable per-instance via createMemory({ maxBytes }). In the default
+// (atomic-rewrite) mode this bounds the whole-file rewrite cost; in append-log
+// mode it is the compaction threshold (the delta log is rewritten to a fresh
+// snapshot once it grows past this).
 const MAX_FILE_BYTES = 5 * 1024 * 1024; // 5 MB
 // How long to coalesce rapid set()/delete() before hitting the disk.
 const DEBOUNCE_MS = 100;
@@ -72,12 +77,33 @@ function registerExitListenerOnce() {
  * schedule a DEBOUNCED async write (last-write-wins, no lost write). flush()
  * forces the pending write synchronously/awaitably; it also runs on exit.
  *
- * @param {{ path?: string, transform?: MemoryTransform }} [opts]
+ * SCALE MODES:
+ *   - default (atomic-rewrite): every flush rewrites the whole file via a 0600
+ *     temp + atomic rename, with cross-process lost-write merge. O(store) per
+ *     flush; bounded by `maxBytes`.
+ *   - append-log (`appendLog: true`): mutations are appended as NDJSON delta
+ *     records to a sibling `<path>.log`, so a write is O(delta) regardless of
+ *     store size. The log is replayed on load and COMPACTED back to a single
+ *     snapshot record once it exceeds `maxBytes`. This is the path the original
+ *     5 MB-cap TODO called for; use it for stores that legitimately outgrow the
+ *     full-rewrite cost. TRADE-OFF: append-log mode does NOT perform the
+ *     cross-process key merge the rewrite path does — the last process to write
+ *     a key wins (a single owning process is the intended model).
+ *
+ * @param {{ path?: string, transform?: MemoryTransform, maxBytes?: number, appendLog?: boolean }} [opts]
  * @returns {Memory}
  */
-export function createMemory({ path: filePath, transform } = {}) {
+export function createMemory({ path: filePath, transform, maxBytes, appendLog = false } = {}) {
   const root = resolve(cwd());
   const resolved = resolve(filePath ?? `${root}/.claude/adk-memory.json`);
+  // Per-instance cap (compaction threshold in append-log mode). A non-finite or
+  // non-positive override falls back to the default rather than disabling the cap.
+  const capBytes =
+    typeof maxBytes === 'number' && Number.isFinite(maxBytes) && maxBytes > 0
+      ? maxBytes
+      : MAX_FILE_BYTES;
+  // Sibling delta-log path (append-log mode only).
+  const logPath = `${resolved}.log`;
 
   // PATH SANDBOX: the resolved path must live within the project root.
   // relative(root, resolved) starting with '..' (or being absolute on its own)
@@ -146,11 +172,91 @@ export function createMemory({ path: filePath, transform } = {}) {
    */
   let firstDirtyAt = -1;
 
+  // ── append-log (delta) persistence ──────────────────────────────────────────
+  // Reconstruct the store by replaying the NDJSON delta log over the base
+  // snapshot. Each line is one record: a {snap:{…}} compaction checkpoint, or a
+  // delta {op:'set'|'del'|'clear', key?, value?}. Replayed in file order, so the
+  // last write to a key wins. Malformed lines are skipped (best-effort), and the
+  // whole log falls back to the base snapshot on any read error.
+  function readFromLog(base) {
+    let store = base && typeof base === 'object' && !Array.isArray(base) ? base : {};
+    let raw;
+    try {
+      // NOTE: we intentionally do NOT cap the log read by capBytes. The log is
+      // compacted to a single {snap:…} checkpoint once its DELTA growth exceeds
+      // the cap (see appendDelta/compactLog), but that checkpoint is bounded by
+      // the STORE size, not the delta cap — a large store legitimately yields a
+      // snapshot bigger than capBytes. Bounding the read here would discard a
+      // valid compacted log. Replay is O(log) and the compactor keeps the log
+      // from growing without bound in deltas.
+      statSync(logPath); // throws → no log yet → base snapshot only (catch below)
+      raw = onRead(readFileSync(logPath, 'utf8'));
+    } catch {
+      return store; // no log yet / unreadable → base snapshot only
+    }
+    for (const line of raw.split('\n')) {
+      const s = line.trim();
+      if (!s) continue;
+      let rec;
+      try { rec = JSON.parse(s); } catch { continue; } // skip a torn/garbage line
+      if (!rec || typeof rec !== 'object') continue;
+      if (rec.snap && typeof rec.snap === 'object' && !Array.isArray(rec.snap)) {
+        store = rec.snap; // a checkpoint replaces everything before it
+      } else if (rec.op === 'set' && typeof rec.key === 'string') {
+        store[rec.key] = rec.value;
+      } else if (rec.op === 'del' && typeof rec.key === 'string') {
+        delete store[rec.key];
+      } else if (rec.op === 'clear') {
+        store = {};
+      }
+    }
+    return store;
+  }
+
+  // Append one delta record to the log (O(record), not O(store)). Creates the
+  // dir + 0600 log on first write. Compacts to a fresh snapshot once the log
+  // outgrows the cap so replay cost stays bounded. Never throws into the caller.
+  function appendDelta(rec) {
+    try {
+      mkdirSync(dirname(logPath), { recursive: true });
+      let size = 0;
+      try { size = statSync(logPath).size; } catch { /* no log yet */ }
+      if (size > capBytes) {
+        compactLog();
+        return;
+      }
+      appendFileSync(logPath, onWrite(JSON.stringify(rec)) + '\n', { mode: FILE_MODE, encoding: 'utf8' });
+      try { chmodSync(logPath, FILE_MODE); } catch { /* belt-and-suspenders */ }
+      dirty = false;
+      firstDirtyAt = -1;
+    } catch (err) {
+      console.warn(`createMemory: delta append failed: ${err?.message ?? err}`);
+    }
+  }
+
+  // Rewrite the log as a single snapshot checkpoint (atomic temp + rename). This
+  // is the only O(store) write in append-log mode; it runs when the log grows
+  // past the cap or on an explicit flush of pending dirt.
+  function compactLog() {
+    mkdirSync(dirname(logPath), { recursive: true });
+    const tmp = `${logPath}.${pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
+    try {
+      writeFileSync(tmp, onWrite(JSON.stringify({ snap: cache })) + '\n', { mode: FILE_MODE, encoding: 'utf8' });
+      renameSync(tmp, logPath);
+      chmodSync(logPath, FILE_MODE);
+    } catch (err) {
+      try { rmSync(tmp, { force: true }); } catch { /* ignore cleanup failure */ }
+      throw err;
+    }
+    dirty = false;
+    firstDirtyAt = -1;
+  }
+
   // Read the file exactly once; subsequent reads come from `cache`.
   function ensureLoaded() {
     if (loaded) return;
     loaded = true;
-    cache = readFromDisk();
+    cache = appendLog ? readFromLog(readFromDisk()) : readFromDisk();
     // Seed knownKeys with everything we loaded: these are keys this instance is
     // aware of, so on a clear-merge they are ours to drop (vs. foreign keys).
     for (const k of Object.keys(cache)) knownKeys.add(k);
@@ -165,9 +271,10 @@ export function createMemory({ path: filePath, transform } = {}) {
       // SIZE BOUND: guard before reading/parsing unbounded input.
       const st = statSync(resolved);
       loadedMtimeMs = st.mtimeMs;
-      if (st.size > MAX_FILE_BYTES) {
+      if (st.size > capBytes) {
         console.warn(
-          `createMemory: ${resolved} is ${st.size} bytes (> ${MAX_FILE_BYTES} cap); ignoring contents.`,
+          `createMemory: ${resolved} is ${st.size} bytes (> ${capBytes} cap); ignoring contents. ` +
+          `Raise it with createMemory({ maxBytes }) or switch to { appendLog: true } for O(delta) writes.`,
         );
         return {};
       }
@@ -206,10 +313,11 @@ export function createMemory({ path: filePath, transform } = {}) {
   // failure. Still: the contents are UNTRUSTED-AT-REST PLAINTEXT JSON — 0600
   // limits who can read it, it is not encrypted.
   //
-  // SCALE: every flush rewrites the WHOLE file (O(store)), not a
-  // delta. That is acceptable here because MAX_FILE_BYTES (5 MB) bounds the
-  // rewrite cost. A store that outgrows that cap should move to an append/delta
-  // log format instead of full-file rewrites.
+  // SCALE: in the DEFAULT mode every flush rewrites the WHOLE file (O(store)),
+  // not a delta — acceptable because `capBytes` bounds the rewrite cost. A store
+  // that outgrows that cap should pass { appendLog: true } to createMemory(),
+  // which persists O(delta) NDJSON records (see appendDelta/compactLog below) and
+  // only pays the O(store) rewrite at compaction time.
   function writeToDisk() {
     mkdirSync(dirname(resolved), { recursive: true });
 
@@ -233,7 +341,7 @@ export function createMemory({ path: filePath, transform } = {}) {
     // we resolve it in favour of honouring the local clear for known names.
     try {
       const st = statSync(resolved);
-      if (st.mtimeMs > loadedMtimeMs && st.size <= MAX_FILE_BYTES) {
+      if (st.mtimeMs > loadedMtimeMs && st.size <= capBytes) {
         const diskRaw = JSON.parse(onRead(readFileSync(resolved, 'utf8')));
         if (diskRaw !== null && typeof diskRaw === 'object' && !Array.isArray(diskRaw)) {
           if (dirtyClear) {
@@ -308,6 +416,18 @@ export function createMemory({ path: filePath, transform } = {}) {
     firstDirtyAt = -1; // restart the coalesce window after a flush.
   }
 
+  // Persist one mutation. In append-log mode this writes an O(delta) record
+  // immediately (no debounce — appends are cheap and we want crash-durability of
+  // each delta); in the default mode it marks dirty + arms the debounced rewrite.
+  function persist(rec) {
+    if (appendLog) {
+      dirty = true;
+      appendDelta(rec);
+      return;
+    }
+    scheduleWrite();
+  }
+
   // Mark dirty and (re)arm the debounce timer. The actual write reads the
   // live `cache` at fire time, so coalesced sets are last-write-wins.
   function scheduleWrite() {
@@ -346,12 +466,17 @@ export function createMemory({ path: filePath, transform } = {}) {
   }
 
   // Force any pending write to land now. Awaitable; safe to call when clean.
+  // In append-log mode each delta is already written synchronously on mutation,
+  // so flush() only has work if a delta append failed (still dirty) — then we
+  // compact the whole store to a clean snapshot.
   async function flush() {
     if (timer) {
       clearTimeout(timer);
       timer = null;
     }
-    if (dirty) writeToDisk();
+    if (!dirty) return;
+    if (appendLog) compactLog();
+    else writeToDisk();
   }
 
   // Best-effort flush on process exit so a debounced write isn't lost.
@@ -368,7 +493,8 @@ export function createMemory({ path: filePath, transform } = {}) {
     }
     if (dirty) {
       try {
-        writeToDisk();
+        if (appendLog) compactLog();
+        else writeToDisk();
       } catch {
         /* nothing we can do at exit */
       }
@@ -399,14 +525,14 @@ export function createMemory({ path: filePath, transform } = {}) {
       dirtyKeys.add(key); // remember what WE changed for the merge.
       knownKeys.add(key); // we are now aware of this key (matters for clear-merge).
       snapshotClone = null; // invalidate the memoized snapshot.
-      scheduleWrite();
+      persist({ op: 'set', key, value });
     },
     delete(key) {
       ensureLoaded();
       delete cache[key];
       dirtyKeys.add(key); // a delete is dirt too (key→absent in cache).
       snapshotClone = null; // invalidate the memoized snapshot.
-      scheduleWrite();
+      persist({ op: 'del', key });
     },
     keys() {
       ensureLoaded();
@@ -435,7 +561,7 @@ export function createMemory({ path: filePath, transform } = {}) {
       // NB: knownKeys is intentionally NOT cleared — it records the keys this
       // instance intends to wipe, which the clear-merge needs to drop them.
       snapshotClone = null; // invalidate the memoized snapshot.
-      scheduleWrite();
+      persist({ op: 'clear' });
     },
     flush,
     dispose,
