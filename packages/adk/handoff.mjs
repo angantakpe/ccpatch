@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { getAgent as getAgentDefault } from './agent.mjs';
 import { defineTool as defineToolDefault } from './tool-registry.mjs';
 import { checkContract } from './contracts.mjs';
+import { host } from './host.mjs';
 
 /**
  * handoff.mjs — tool-call-driven agent handoffs (delegate / swap) + AgentRouter.
@@ -188,7 +189,7 @@ const SwapCoordinator = {
       }
       return false;
     }
-    const setSP = globalThis.__ccpSetSystemPrompt;
+    const setSP = host.setSystemPromptFn();
     if (typeof setSP !== 'function') return false;
     // Pop only after we know the writer exists and the top is ours.
     this.stack.pop();
@@ -284,8 +285,7 @@ export function createHandoffScope() {
 }
 
 function busEmit(topic, payload) {
-  const bus = globalThis.__ccpBus;
-  if (bus) try { bus.emit(topic, payload); } catch (_) {}
+  host.emit(topic, payload);
 }
 
 /**
@@ -372,8 +372,8 @@ function assertSystemPromptContract() {
  */
 function setLiveSystemPrompt(value) {
   assertSystemPromptContract();
-  const getNonce = globalThis.__ccpGetSystemPromptNonce;
-  const setSP = globalThis.__ccpSetSystemPrompt;
+  const getNonce = host.getSystemPromptNonceFn();
+  const setSP = host.setSystemPromptFn();
   if (typeof getNonce === 'function') {
     setSP(getNonce(), value); // gated path
   } else {
@@ -407,7 +407,7 @@ const SWAP_TOOL_KEEP = new Set(['transfer_back']);
  */
 function restrictLiveTools(allow) {
   if (!Array.isArray(allow) || allow.length === 0 || allow.includes('*')) return null;
-  const raw = globalThis.__ccpRawTools;
+  const raw = host.rawTools();
   if (!Array.isArray(raw)) return null;
   const permit = new Set(allow);
   for (const k of SWAP_TOOL_KEEP) permit.add(k);
@@ -431,7 +431,7 @@ function restrictLiveTools(allow) {
  */
 function restoreLiveTools(removed) {
   if (!Array.isArray(removed) || !removed.length) return;
-  const raw = globalThis.__ccpRawTools;
+  const raw = host.rawTools();
   if (!Array.isArray(raw)) return;
   for (const t of removed) {
     if (t && typeof t.name === 'string' && !raw.some((x) => x && x.name === t.name)) {
@@ -469,7 +469,7 @@ export function swapDepthIn(scope) {
  * @returns {string|null}
  */
 export function currentPersona() {
-  return globalThis.__ccpGetSystemPrompt?.() ?? null;
+  return host.getSystemPrompt();
 }
 
 /**
@@ -604,7 +604,7 @@ export function disposeHandoffScope(scope) {
     if (handle && typeof handle.unregister === 'function') {
       try { handle.unregister(); } catch (_) {}
     } else {
-      const raw = globalThis.__ccpRawTools;
+      const raw = host.rawTools();
       if (Array.isArray(raw)) {
         const i = raw.findIndex((t) => t && t.name === 'transfer_back');
         if (i !== -1) raw.splice(i, 1);
@@ -622,10 +622,10 @@ export function disposeHandoffScope(scope) {
  * we capture whatever is there (may be undefined) so restore() can put it back.
  */
 function captureCurrentPrompt() {
-  const g = globalThis.__ccpGetSystemPrompt;
+  const g = host.systemPromptGetterRaw();
   if (typeof g === 'function') { try { return g(); } catch (_) { /* fall through */ } }
   // Best-effort: the override slot used by expose_system_prompt.
-  return globalThis.__ccpSystemPromptOverride ?? null;
+  return host.systemPromptOverride();
 }
 
 /**
@@ -759,7 +759,7 @@ export function createDefineHandoff({ scope, getAgent, defineTool }) {
       inputSchema: schema,
       execute: async (input) => {
         const id = `ho-${++scope.seq}`;
-        const from = globalThis.__ccp_path || 'root';
+        const from = host.path() || 'root';
         const prompt = (input && typeof input[promptKey] === 'string') ? input[promptKey] : '';
         const startMs = Date.now();
 
@@ -767,7 +767,7 @@ export function createDefineHandoff({ scope, getAgent, defineTool }) {
         // system-prompt-override primitive is missing. (RUNTIME condition →
         // bus event + graceful fallback, NOT a throw.)
         let effectiveMode = mode;
-        if (mode === 'swap' && typeof globalThis.__ccpSetSystemPrompt !== 'function') {
+        if (mode === 'swap' && !host.hasSetSystemPrompt()) {
           effectiveMode = 'delegate';
           busEmit('handoff.degraded', {
             id, target, requested: 'swap', used: 'delegate',
@@ -840,7 +840,7 @@ export function createDefineHandoff({ scope, getAgent, defineTool }) {
             }
             resultText = `Handed off to "${target}" — persona swapped in place. (call transfer_back to revert)`;
           } else {
-            const agentTool = globalThis.__ccpAgentTool;
+            const agentTool = host.agentTool();
             if (!agentTool || typeof agentTool.invoke !== 'function') {
               throw new Error('delegate handoff: __ccpAgentTool.invoke not available (enable expose_agent_tool)');
             }
@@ -967,7 +967,7 @@ export class AgentRouter extends EventEmitter {
 
     this.#active = agentName;
 
-    const submit = globalThis.__ccpSubmitInput;
+    const submit = host.submitInput();
     if (typeof submit === 'function') {
       // RUNTIME NOTE: the first time the router actually drives the session via
       // __ccpSubmitInput, announce `router.active` on the bus once so operators

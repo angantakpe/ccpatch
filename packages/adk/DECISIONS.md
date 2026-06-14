@@ -15,7 +15,28 @@ The text below is sourced from the pristine committed (`git show HEAD:`) version
 of the modules, so it reflects the rationale as written before the numbering was
 stripped.
 
+For the post-audit architecture review (host port, isolation contract, and the
+remaining known-debt items), see [REVIEW.md](REVIEW.md).
+
 ---
+
+## host port + isolation contract (architecture review #1 / #2)
+
+### host.mjs — single port onto the `__ccp*` host primitives
+All access to the ccpatch-exposed globals (`__ccpRawTools`, `__ccpSetSystemPrompt`,
+`__ccpBus`, `__ccpRequire`, …) now routes through `host.mjs` instead of each
+module reaching into `globalThis` directly. The port reads `globalThis` **live**
+on every call (never snapshots at import) so bare-global test stubs and
+late-binding hosts both keep working. This collapses ~40 duplicated guard sites
+into one place and makes the coupling to the bundle explicit and swappable. See
+REVIEW.md §2.
+
+### Isolation contract — instance-local vs. process-global, stated per method
+`createAdk()` previously implied uniform isolation. The boundary is now documented
+explicitly in `index.mjs` (and mirrored in `index.d.ts`): agents/tools/handoff
+state is INSTANCE-LOCAL; `capabilities` / `useAgentBus` / `createMemory` front
+single process-global resources and are intentionally shared (memory is keyed by
+file path, not by instance). Instances now carry a stable `id`. See REVIEW.md §1.
 
 ## tool-registry.mjs
 

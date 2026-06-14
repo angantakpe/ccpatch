@@ -421,11 +421,14 @@ export function checkContract(name: string): ContractCheckResult;
 // ── createAdk: isolated instance ──────────────────────────────────────────────
 
 /**
- * An isolated ADK instance. Mirrors the top-level exports exactly, but all
- * agent/tool/handoff state is scoped to this object; two instances never share
- * registries.
+ * An ADK instance. agent/tool/handoff state is INSTANCE-LOCAL (two instances
+ * never share those registries); `capabilities`, `useAgentBus`, and
+ * `createMemory` front PROCESS-GLOBAL resources and are intentionally shared.
+ * See the ISOLATION CONTRACT in index.mjs for the per-method breakdown.
  */
 export interface Adk {
+  /** Stable per-instance id (introspection / debug only). */
+  id: string;
   defineAgent(spec: AgentDef): AgentDef;
   getAgent(name: string): AgentDef | null;
   listAgents(): AgentDef[];

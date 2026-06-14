@@ -18,6 +18,7 @@
  */
 
 import { checkContract } from './contracts.mjs';
+import { host } from './host.mjs';
 
 /**
  * Poll cadence and ceiling. Two cadences, both bounded to ≈5s:
@@ -40,7 +41,7 @@ const MAX_INPUT_BYTES = 256 * 1024;
  * @returns {string|undefined}
  */
 function getDispatchNonce() {
-  return globalThis.__ccpGetDispatchNonce?.();
+  return host.getDispatchNonce();
 }
 
 /**
@@ -51,7 +52,7 @@ function getDispatchNonce() {
  * @param {string} msg
  */
 function debug(msg) {
-  if (!(process.env.CLAUDE_DEBUG || globalThis.__ccpDebug)) return;
+  if (!host.debug()) return;
   try { console.warn(msg); } catch (_) {}
 }
 
@@ -457,18 +458,18 @@ function tryInject(toolDef) {
   const toolObj = buildToolObj(toolDef);
 
   // Gated path — the real patch always provides this registrar.
-  if (typeof globalThis.__ccpRegisterTool === 'function') {
+  if (host.hasRegisterTool()) {
     // Drift guard (call-site half): before trusting the gated global, consult the
     // typed contract registry. If the 'toolDispatch' contract is registered and
     // its shape no longer matches (proven drift), refuse rather than call the
     // drifted global. Memoized — runs at most once per process.
     if (!gatedPathTrusted()) return false;
     const nonce = getDispatchNonce();
-    return globalThis.__ccpRegisterTool(nonce, toolObj) === true;
+    return host.callRegisterTool(nonce, toolObj) === true;
   }
 
   // Fallback — direct array mutation when no registrar is present.
-  const getRaw = globalThis.__ccpRawTools;
+  const getRaw = host.rawTools();
   if (!Array.isArray(getRaw)) return false;
   const existing = getRaw.findIndex((t) => t && t.name === toolDef.name);
   if (existing >= 0) getRaw[existing] = toolObj;
@@ -600,7 +601,7 @@ function tickAll() {
  * counts an attempt every interval/base ticks) and per-scope give-up limit.
  */
 function pollOnce(scope) {
-  if (Array.isArray(globalThis.__ccpRawTools)) {
+  if (host.hasRawTools()) {
     drainQueue(scope);
     stopWatchers(scope);
     return;
@@ -649,10 +650,10 @@ function scheduleDrain(scope) {
   // slower safety-net rather than the aggressive primary cadence.
   let busActive = false;
   if (scope.busUnsub === null) {
-    const bus = globalThis.__ccpBus;
+    const bus = host.bus();
     if (bus && typeof bus.on === 'function') {
       const onReady = () => {
-        if (Array.isArray(globalThis.__ccpRawTools)) {
+        if (host.hasRawTools()) {
           drainQueue(scope);
           stopWatchers(scope);
         }
@@ -684,10 +685,10 @@ function scheduleDrain(scope) {
  * @returns {boolean}
  */
 function removeFromRaw(name) {
-  if (typeof globalThis.__ccpUnregisterTool === 'function') {
-    return globalThis.__ccpUnregisterTool(getDispatchNonce(), name) === true;
+  if (host.hasUnregisterTool()) {
+    return host.callUnregisterTool(getDispatchNonce(), name) === true;
   }
-  const getRaw = globalThis.__ccpRawTools;
+  const getRaw = host.rawTools();
   if (!Array.isArray(getRaw)) return false;
   const i = getRaw.findIndex((t) => t && t.name === name);
   if (i < 0) return false;
