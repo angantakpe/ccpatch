@@ -27,8 +27,13 @@ import {
   statSync,
   readdirSync,
   utimesSync,
+  symlinkSync,
+  realpathSync,
+  openSync,
+  closeSync,
 } from 'node:fs';
 import { join, relative } from 'node:path';
+import { tmpdir } from 'node:os';
 import { cwd, platform } from 'node:process';
 
 import { createMemory } from '../memory.mjs';
@@ -149,12 +154,84 @@ test('memory ignores a file larger than the 5 MB cap (empty store, no throw)', (
   }
 });
 
-test('memory tolerates a corrupt file as an empty store', () => {
+test('memory tolerates a corrupt file as an empty store (and quarantines it)', () => {
   const dir = freshDir();
   const file = join(dir, 'corrupt.json');
   writeFileSync(file, '{ not valid json', 'utf8');
-  const mem = createMemory({ path: file });
-  assert.deepEqual(mem.snapshot(), {}, 'unparseable file → empty store');
+
+  // The load now warns UNCONDITIONALLY (not debug-gated) about the corruption and
+  // moves the bad bytes aside to a .corrupt-* sidecar so the next write can't
+  // silently erase them. Capture warn to assert the message lands.
+  const realWarn = console.warn;
+  const warnings = [];
+  console.warn = (m) => warnings.push(String(m));
+  let mem;
+  try {
+    mem = createMemory({ path: file });
+    assert.deepEqual(mem.snapshot(), {}, 'unparseable file → empty store');
+  } finally {
+    console.warn = realWarn;
+  }
+
+  assert.ok(
+    warnings.some((w) => /corrupt|unreadable/i.test(w)),
+    'warned loudly about the corrupt file',
+  );
+  // The corrupt original was renamed aside to a sidecar (so it's not clobbered).
+  const sidecars = readdirSync(dir).filter((n) => n.startsWith('corrupt.json.corrupt-'));
+  assert.equal(sidecars.length, 1, 'corrupt file quarantined to a .corrupt-* sidecar');
+  assert.equal(
+    readFileSync(join(dir, sidecars[0]), 'utf8'),
+    '{ not valid json',
+    'quarantined sidecar preserves the original bad bytes',
+  );
+  // The live path was vacated by the quarantine rename (until the next write).
+  assert.equal(existsSync(file), false, 'corrupt original moved off the live path');
+});
+
+test('a MISSING file loads as an empty store with NO warn and NO sidecar', () => {
+  // ENOENT must stay the silent first-run path — distinct from corruption.
+  const dir = freshDir();
+  const file = join(dir, 'never-existed.json');
+
+  const realWarn = console.warn;
+  const warnings = [];
+  console.warn = (m) => warnings.push(String(m));
+  try {
+    const mem = createMemory({ path: file });
+    assert.deepEqual(mem.snapshot(), {}, 'missing file → empty store');
+  } finally {
+    console.warn = realWarn;
+  }
+  assert.deepEqual(warnings, [], 'a missing file is silent (no corruption warning)');
+  assert.deepEqual(
+    readdirSync(dir).filter((n) => n.includes('.corrupt-')),
+    [],
+    'no quarantine sidecar for a missing file',
+  );
+});
+
+test('memory.corrupt event is emitted on a corrupt load', () => {
+  const dir = freshDir();
+  const file = join(dir, 'corrupt-evt.json');
+  writeFileSync(file, 'not json at all', 'utf8');
+
+  // Stub the host event bus (host.emit reads globalThis.__ccpBus live on each call).
+  const events = [];
+  const prevBus = globalThis.__ccpBus;
+  globalThis.__ccpBus = { emit: (topic, payload) => events.push({ topic, payload }) };
+  const realWarn = console.warn;
+  console.warn = () => {};
+  try {
+    // Load is lazy — touch the store to trigger readFromDisk (and the emit).
+    createMemory({ path: file }).snapshot();
+  } finally {
+    console.warn = realWarn;
+    globalThis.__ccpBus = prevBus;
+  }
+  const corrupt = events.find((e) => e.topic === 'memory.corrupt');
+  assert.ok(corrupt, "emitted a 'memory.corrupt' event");
+  assert.equal(corrupt.payload.path, file, 'event carries the offending path');
 });
 
 // ── flush() ───────────────────────────────────────────────────────────────────
@@ -556,4 +633,156 @@ test('maxBytes override raises the default-mode cap (no silent data loss)', asyn
   // Reload with a generous cap — contents must load, not be ignored.
   const m2 = createMemory({ path: file, maxBytes: 10 * 1024 * 1024 });
   assert.equal(m2.get('big'), 'a'.repeat(1000));
+});
+
+// ── path sandbox: symlink escape (canonical check) ────────────────────────────
+
+test('memory rejects a path whose ancestor dir is a symlink escaping the root', { skip: platform === 'win32' }, () => {
+  // The lexical sandbox compares STRINGS and is blind to symlinks. Build a path
+  // that passes the lexical check (it lives, textually, under cwd) but whose
+  // parent directory is a symlink pointing OUTSIDE the project root. The canonical
+  // (realpath) check must catch the escape.
+  const dir = freshDir();
+
+  // A real directory OUTSIDE the project root.
+  const outside = mkdtempSync(join(tmpdir(), 'adk-escape-'));
+  try {
+    // A symlink UNDER cwd that points to the outside dir.
+    const linkPath = join(dir, 'sneaky-link');
+    symlinkSync(outside, linkPath, 'dir');
+
+    // Target file sits "under" the symlink → lexically inside cwd, really outside.
+    const escapingPath = join(linkPath, 'store.json');
+    assert.throws(
+      () => createMemory({ path: escapingPath }),
+      /escapes project root .*after resolving symlinks/,
+      'a symlinked ancestor escaping the root is rejected by the canonical check',
+    );
+  } finally {
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test('memory still accepts a legitimate in-root path whose tail does not exist yet', () => {
+  // The canonical check must not over-reject: the target file (and even nested
+  // parent dirs) may not exist yet — they are created lazily on first flush. Only
+  // the deepest EXISTING ancestor is canonicalized.
+  const dir = freshDir();
+  const deep = join(dir, 'does', 'not', 'exist', 'yet', 'store.json');
+  assert.doesNotThrow(() => createMemory({ path: deep }));
+});
+
+// ── durability: fsync before rename + dir fsync (functional smoke) ────────────
+
+test('writeToDisk fsync path persists correctly (round-trips, no leftover tmp/lock)', async () => {
+  // We can't induce a real power-loss in a unit test, but we can prove the new
+  // openSync→writeSync→fsyncSync→closeSync→rename→dir-fsync sequence still produces
+  // a correct, fully-written file and cleans up its temp + lock artifacts.
+  const dir = freshDir();
+  const file = join(dir, 'durable.json');
+  const mem = createMemory({ path: file });
+  mem.set('a', { nested: [1, 2, 3] });
+  mem.set('b', 'hi');
+  await mem.flush();
+
+  assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), { a: { nested: [1, 2, 3] }, b: 'hi' });
+  const leftovers = readdirSync(dir).filter((n) => n.endsWith('.tmp') || n.endsWith('.lock'));
+  assert.deepEqual(leftovers, [], 'no leftover .tmp or .lock artifacts after a durable write');
+});
+
+// ── cross-process lock: stale lock is stolen; held lock falls back ────────────
+
+test('writeToDisk steals a STALE lockfile and completes the write', async () => {
+  const dir = freshDir();
+  const file = join(dir, 'stale-lock.json');
+  // Pre-create the store + a STALE lockfile (mtime far in the past).
+  const mem = createMemory({ path: file });
+  mem.set('seed', 0);
+  await mem.flush();
+
+  const lockPath = `${file}.lock`;
+  const fd = openSync(lockPath, 'w');
+  closeSync(fd);
+  const past = Date.now() / 1000 - 3600; // 1h ago → well past the 10s stale window.
+  utimesSync(lockPath, past, past);
+
+  // A new write must detect the stale lock, steal it, and land the value.
+  mem.set('after', 'stale');
+  await mem.flush();
+
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).after, 'stale', 'write completed after stealing stale lock');
+  assert.equal(existsSync(lockPath), false, 'lockfile released after the write');
+});
+
+test('writeToDisk falls back (no hang/throw) and emits memory.lock.contended when a FRESH lock is held', async () => {
+  const dir = freshDir();
+  const file = join(dir, 'held-lock.json');
+  const mem = createMemory({ path: file });
+  mem.set('x', 1);
+  await mem.flush();
+
+  // Hold a FRESH (non-stale) lock to simulate a healthy concurrent writer.
+  const lockPath = `${file}.lock`;
+  const heldFd = openSync(lockPath, 'w'); // fresh mtime = now.
+
+  const events = [];
+  const prevBus = globalThis.__ccpBus;
+  globalThis.__ccpBus = { emit: (topic, payload) => events.push({ topic, payload }) };
+  try {
+    mem.set('x', 2);
+    // Must NOT hang or throw despite the contended lock — best-effort write lands.
+    await mem.flush();
+  } finally {
+    globalThis.__ccpBus = prevBus;
+    try { closeSync(heldFd); } catch { /* ignore */ }
+    rmSync(lockPath, { force: true });
+  }
+
+  assert.ok(
+    events.some((e) => e.topic === 'memory.lock.contended'),
+    "emitted 'memory.lock.contended' when the lock could not be acquired",
+  );
+  // The fallback write still persisted our value (degraded, but never dropped).
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).x, 2, 'fallback write still persisted the value');
+});
+
+// ── transform round-trip verification at construction ─────────────────────────
+
+test('createMemory THROWS when the transform is not a round-trip (onRead != inverse of onWrite)', () => {
+  const dir = freshDir();
+  const file = join(dir, 'bad-transform.json');
+  // onRead is NOT the inverse of onWrite → store would silently corrupt on reload.
+  const badTransform = {
+    onWrite: (s) => Buffer.from(s, 'utf8').toString('base64'),
+    onRead: (s) => s, // forgot to decode → onRead(onWrite(x)) !== x
+  };
+  assert.throws(
+    () => createMemory({ path: file, transform: badTransform }),
+    /not a round-trip|inverse/,
+    'a non-inverse transform pair is rejected at construction',
+  );
+});
+
+test('createMemory THROWS when a transform function itself throws during the probe', () => {
+  const dir = freshDir();
+  const file = join(dir, 'throwing-transform.json');
+  const throwing = {
+    onWrite: (s) => s,
+    onRead: () => { throw new Error('decrypt failed'); },
+  };
+  assert.throws(
+    () => createMemory({ path: file, transform: throwing }),
+    /threw|inverse/,
+    'a throwing transform is treated as a round-trip failure',
+  );
+});
+
+test('createMemory accepts a valid round-trip transform (no false positive)', () => {
+  const dir = freshDir();
+  const file = join(dir, 'good-transform.json');
+  const good = {
+    onWrite: (s) => Buffer.from(s, 'utf8').toString('base64'),
+    onRead: (s) => Buffer.from(s, 'base64').toString('utf8'),
+  };
+  assert.doesNotThrow(() => createMemory({ path: file, transform: good }));
 });

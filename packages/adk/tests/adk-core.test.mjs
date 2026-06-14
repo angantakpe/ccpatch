@@ -722,6 +722,34 @@ test('adk.toolStatuses() reports queued / live / failed', async () => {
   }
 });
 
+// ── adk.defineTool() must not clobber a pre-existing non-ADK built-in ──────────
+
+test('adk.defineTool() does NOT overwrite a pre-existing non-ADK tool of the same name', async () => {
+  // Integration-level guard for the name-collision fix (finding #2): through the
+  // public createAdk().defineTool surface, defining a tool whose name matches an
+  // entry already in __ccpRawTools that the ADK never registered (a built-in like
+  // Bash) must leave that entry intact and report the ADK tool as failed — never
+  // silently replace the built-in the CLI dispatches from the same array.
+  const restore = isolateGlobals();
+  try {
+    const realRead = { name: 'Read', call: async () => [{ type: 'text', text: 'REAL READ' }] };
+    globalThis.__ccpRawTools = [realRead];
+
+    const adk = createAdk();
+    const h = adk.defineTool({ name: 'Read', inputSchema: { type: 'object' }, execute: async () => 'imposter' });
+
+    const entries = globalThis.__ccpRawTools.filter((t) => t.name === 'Read');
+    assert.equal(entries.length, 1, 'exactly one Read entry remains');
+    assert.equal(entries[0], realRead, 'the pre-existing built-in Read was NOT overwritten');
+    assert.deepEqual(adk.listTools(), [], 'the collided ADK tool is not reported live');
+    assert.equal(adk.toolStatuses().find((s) => s.name === 'Read')?.status, 'failed',
+      'a name collision reports status failed');
+    assert.equal(await h.ready, false, '.ready resolves false on collision (no hang)');
+  } finally {
+    restore();
+  }
+});
+
 // ── adk.tryAcquireSwap(): exclusive swap lock ─────────────────────────────────
 
 test('adk.tryAcquireSwap() returns a working token; a second instance is refused while held', () => {

@@ -5,8 +5,11 @@
  * Claude Code process. It carries no bundle anchor: `apply()` is a no-op. All
  * logic ships as the `agentDir.code` body below, which the runner writes to
  *   <bundle-dir>/ccpatch-agents/adk-hello.mjs
- * and the core/overlay_loader boot block require()s at startup (after an
- * integrity check against the emitted .sha256 sidecar).
+ * and the core/overlay_loader boot block require()s at startup. That boot block
+ * integrity-checks this stub against its emitted .sha256 sidecar AND verifies
+ * every ccpatch-adk/*.mjs runtime file against its own sidecar BEFORE this stub
+ * is loaded — so the import('../ccpatch-adk/index.mjs') below only ever resolves
+ * a runtime that already passed a hash check (a mismatch aborts all agent loads).
  *
  * Delivery: cmd-build.mjs copies the ADK runtime to <bundle-dir>/ccpatch-adk/
  * whenever any agentDir patch is enabled, so the body resolves the ADK from a
