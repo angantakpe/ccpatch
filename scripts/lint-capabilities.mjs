@@ -86,28 +86,25 @@ const ROOT = path.resolve(__dirname, '..');
 // it is a real-but-deferred fix). Keyed by capability so an allowlisted file
 // is still linted for the OTHER capabilities.
 const ALLOWLIST = {
-  // extensions/capture_interactive_request.mjs writes storage/logs/ (capture
-  // sink for the first /v1/messages request shape) but declares only
-  // ['network']. This is a REAL gap, not a false positive.
-  // TODO(capability-honesty): add 'fs' to that patch's capabilities array and
-  // delete this entry — allowlisted only because patch files are owned by the
-  // corpus stream, not by this lint change.
-  'extensions/capture_interactive_request.mjs': {
-    fs: 'real fs write (storage/logs) — declaration fix pending, see TODO above',
-  },
+  // (empty) — every entry here must document why a syscall-shaped hit is a FALSE
+  // positive. The one prior entry (capture_interactive_request's fs write) was a
+  // REAL gap, not a false positive, and is now declared honestly in the patch's
+  // capabilities array, so the allowlist no longer suppresses any real capability.
+  // Keep this map empty unless you can name a genuine false positive: a lint hit
+  // on code that does NOT actually exercise the capability (e.g. the literal
+  // appears only in a string the patch never runs).
 };
 
 // ── In-flight fixes (warn, don't fail) ───────────────────────────────────────
-// These four files' capability declarations are being corrected in a parallel
-// change; their violations are surfaced as WARN so this lint can land first.
-// TODO(capability-honesty): remove each entry as its declaration fix merges —
-// at that point any remaining violation becomes a hard error.
-const IN_FLIGHT_FIXES = new Set([
-  'extensions/headless_bridge.mjs',
-  'extensions/expose_tool_dispatch.mjs',
-  'extensions/policy_gate.mjs',
-  'extensions/auth_token.mjs',
-]);
+// (empty) — this set downgrades a file's capability violations from ERROR to
+// WARN while its declaration is being corrected in a parallel change. All four
+// former entries (headless_bridge, expose_tool_dispatch, policy_gate, auth_token)
+// now declare their full honest capability set, so the lint passes them clean
+// with no suppression. The gate is once again strict: any undeclared
+// syscall-shaped pattern is a hard error, not a warning. Re-add a file here ONLY
+// as a short-lived bridge while a real declaration fix is mid-flight, and delete
+// it the moment that fix lands.
+const IN_FLIGHT_FIXES = new Set([]);
 
 // ── Syscall-shaped patterns ──────────────────────────────────────────────────
 // Each: { cap, label, re }. `re` is tested per-line (comment-only lines are

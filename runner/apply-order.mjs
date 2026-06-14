@@ -36,6 +36,30 @@
  * B dependsOn A but A.priority=5000 and B.priority=1 (B "wants" to go first),
  * A still runs first — priority cannot reorder across a real edge. Priority only
  * decides among nodes that are simultaneously ready.
+ *
+ * ── APPLY order is NOT runtime order for prepend-at-anchor patches ────────────
+ * This module orders the sequence in which patches' apply() transforms run over
+ * the bundle TEXT. For most patches that also IS the runtime execution order:
+ * a patch that splices its hook at a later byte offset runs, at startup, after
+ * earlier-spliced hooks. But a whole class of patches PREPENDS at the FIRST
+ * occurrence of a shared anchor (the shebang / CJS-IIFE head) — e.g. `contracts`
+ * and `fetch_interceptor`. Because each replaces the SAME first occurrence,
+ * whichever applies LAST ends up textually FIRST in the emitted bundle, so for
+ * prepend patches the runtime execution order is the REVERSE of the apply order
+ * computed here. Setting `priority` low to "run early" is therefore correct for
+ * apply but inverted for runtime among prepend patches.
+ *
+ * Do NOT rely on apply order to sequence prepend patches' runtime side effects.
+ * Two mechanisms make runtime order explicit instead of inheriting this
+ * inversion:
+ *   • boot-time code → declare `bootInject: { code, order }`. The boot registry
+ *     (runner/boot-registry.mjs) collects every enabled patch's block and emits
+ *     ONE splice ordered by the declared `order` key — runtime order is exactly
+ *     what you declared, regardless of apply order.
+ *   • order-independence → make the injected helpers self-bootstrap so they work
+ *     no matter which prepend lands first at runtime (the pattern `contracts`
+ *     uses: __ccpProvide/__ccpRequire create the registry on first call).
+ * Prefer one of these over trying to encode runtime order through apply order.
  */
 
 export const PHASE_ORDER = { pre: 0, main: 1, post: 2 };

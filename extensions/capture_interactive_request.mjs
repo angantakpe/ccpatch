@@ -14,7 +14,13 @@ export default {
   category: 'expose',
 
   description: 'Capture first successful interactive /v1/messages request shape for shadow-agent reuse.',
-  capabilities: ["network"],
+  // fs: the injected capture writes storage/logs/interactive-request-capture.jsonl
+  // (mkdirSync + writeFileSync, see apply() below). network: it hooks the patched
+  // fetch to observe the /v1/messages request. Both are real; declaring fs here
+  // (rather than suppressing it in the lint allowlist) means enabling this patch
+  // trips the ack gate, which is the intended forcing function for a disk-writing,
+  // request-capturing patch.
+  capabilities: ["network", "fs"],
   verify: { present: '__ccpInteractiveRequestCaptured_v1', count: { present: 1 } },
   allowOverlapWith: ['model'],
   apply: (code) => {

@@ -4,7 +4,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+import { fileURLToPath } from 'node:url';
+
 import { scanFile } from '../scripts/lint-capabilities.mjs';
+import { readPatchCapabilities } from '../runner/capability-reader.mjs';
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 /** Write a throwaway patch file; return its absolute path. */
 function fixture(body) {
@@ -74,5 +79,31 @@ describe('lint-capabilities — scanFile', () => {
   it('reports one hit per (capability, pattern) per file', () => {
     const p = fixture('fetch("a");\nfetch("b");\nfetch("c");\n');
     assert.equal(scanFile(p, []).length, 1);
+  });
+});
+
+// Regression for the capability-gate hole: capture_interactive_request writes
+// storage/logs/ but used to declare only ['network'], a real fs gap that the
+// lint ALLOWLIST suppressed (so the gate reported OK while a gap shipped). The
+// fix declares 'fs' honestly and empties the allowlist. These assertions pin
+// that the declaration — not a suppression — is what closes the gap, so a future
+// regression (dropping 'fs' from the patch) re-surfaces as a lint hit.
+describe('lint-capabilities — capture_interactive_request is honestly declared', () => {
+  const real = path.join(ROOT, 'extensions/capture_interactive_request.mjs');
+
+  it('declares fs (its injected capture does mkdirSync + writeFileSync)', () => {
+    const caps = readPatchCapabilities(real);
+    assert.ok(caps.includes('fs'), `expected 'fs' in declared caps, got [${caps.join(', ')}]`);
+    assert.ok(caps.includes('network'), `expected 'network' in declared caps, got [${caps.join(', ')}]`);
+  });
+
+  it('would be flagged for fs if it only declared network (the gap is real)', () => {
+    const hits = scanFile(real, ['network']);
+    assert.ok(hits.some(h => h.cap === 'fs'), 'expected an fs hit under the old network-only declaration');
+  });
+
+  it('is clean once scanned against its real declared capabilities (no allowlist needed)', () => {
+    const caps = readPatchCapabilities(real);
+    assert.deepEqual(scanFile(real, caps), []);
   });
 });
