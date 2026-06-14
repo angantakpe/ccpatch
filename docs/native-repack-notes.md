@@ -4,6 +4,86 @@ Audit notes for review finding #7. Scope: `bin/repack-bundle.mjs`,
 `bin/extract-from-binary.mjs`, and the supporting parser in
 `tools/bun-decompiler/decompile.mjs`.
 
+## Support status & fencing (read this first)
+
+> **This is a second-class, best-effort path.** Native repack rewrites the user's
+> local Bun-compiled binary by decoding an **undocumented, unversioned** Bun
+> serialization format. It is the highest-risk surface in the repo. Treat it as a
+> path that *may not run* on a given platform or Bun version and that may fall back
+> to plain-JS or a reduced patch set. **Do NOT build patch features that ASSUME
+> native repack succeeds.** (Architecture-review finding #5.)
+
+### Platform support
+
+| Platform / format | Same-size or smaller splice | Size-increasing (grow) repack |
+|---|---|---|
+| **ELF, linux-x64** | supported | **supported** (`growBunSeaBinary`, `bin/bun-sea-graph.mjs`) |
+| **Thin Mach-O, darwin-arm64 / darwin-x64** | supported | **supported** (`growMachoSea`, `bin/macho-sea-graph.mjs`) — strips code signature, see below |
+| **Fat / universal Mach-O** | n/a | **FAIL LOUD** — thin to a single arch slice first (`emitSkipLine({platform:'macho-fat'})` then `die()`) |
+| **PE / Windows-x64 (and any other format)** | n/a | **FAIL LOUD** (`emitSkipLine({platform:'windows-or-unknown'})` then `die()`) |
+
+The format gate lives at `bin/repack-bundle.mjs` around line 505: magic-byte
+detection (`isElf` / `isMachO` / `isFatMachO`), then the grow-path branches at
+lines 649–683 (`isFatMachO` → skip+die, `!isElf && !isMachO` → skip+die).
+
+### The format is undocumented and unversioned — `VALIDATED_BUN_VERSIONS` is a proxy
+
+The Bun SEA trailer / `StandaloneModuleGraph` layout that follows the embedded JS
+is **not a stable, documented, or versioned-in-the-binary format**. The schema was
+reverse-engineered field-by-field against Bun's `src/standalone_graph/StandaloneModuleGraph.zig`
+at tag **`bun-v1.3.14`** (see "Trailer-offset rewriting" below). There is no
+in-binary version number for the trailer, so the repacker uses the embedded **Bun
+runtime version** as a stand-in for "trailer layout unchanged":
+
+```js
+const VALIDATED_BUN_VERSIONS = ['1.3'];  // major.minor prefixes known-good for this splicer
+```
+
+(`bin/repack-bundle.mjs:64`.) When the detected Bun version's `major.minor` prefix
+is **not** in this set — or cannot be detected at all — the build **fails closed**
+(`die()`), because a layout change could silently produce a binary that launches as
+bare `bun`. `VALIDATED_BUN_VERSIONS` is therefore a *proxy* for "the SEA trailer
+format we decoded is still the one in this binary"; it is not a guarantee.
+
+### Fail-closed guarantees
+
+- **Post-repack smoke check is REQUIRED by default.** `runSmokeCheck` spawns the
+  output with `--version`; bare-`bun` output is a hard `die()`. On the grow path the
+  bar is stronger: the output must print the embedded `<x.y.z> (Claude Code)` line,
+  not merely avoid bare-bun (`requireClaude: isGrow`).
+- **Bun-version drift aborts the build** (the `VALIDATED_BUN_VERSIONS` gate above).
+- **An execution-independent structural post-condition** (`assertStructuralPostCondition`)
+  re-decodes the output graph before anything is written, catching corruption even
+  when the runtime smoke check cannot run (cross-arch / CI sandbox).
+- **`--allow-unverified` is LOCAL-DEV ONLY.** It downgrades the version-drift abort
+  and the "cannot execute the smoke check" abort to warnings. Equivalent env var:
+  `CCPATCH_REPACK_ALLOW_UNVERIFIED=1`. Do not use it for releases. (`bin/repack-bundle.mjs:80-93`.)
+
+### Mach-O grow path emits an UNSIGNED binary
+
+Growing a thin Mach-O invalidates its code signature (the `__LINKEDIT` hashes no
+longer match). Re-signing is out of scope, so `growMachoSea` **strips** the
+`LC_CODE_SIGNATURE` load command and shrinks `__LINKEDIT`. **The emitted darwin
+binary is UNSIGNED and must be re-signed on a darwin host before distribution:**
+
+```
+codesign -s - --force <output>      # ad-hoc
+# or with a Developer ID identity
+```
+
+ccpatch does **not** forge or synthesize signatures.
+
+### Contributor warning
+
+Native repack is a *best-effort, second-class path*. It is only implemented for ELF
+linux-x64 and thin Mach-O darwin; everything else fails loud. It rests on an
+undocumented, unversioned Bun format gated only by a version proxy. **Do NOT design
+any patch, profile, or feature that depends on native repack succeeding** — assume
+it may be unavailable on the target platform/version and fall back to the plain-JS
+path or a reduced patch set. If you add a Bun version to `VALIDATED_BUN_VERSIONS`,
+you must first verify the trailer layout against Bun source at that tag and confirm
+a clean grow round-trip on a real fixture.
+
 ## The real mechanism
 
 Claude versions that ship as a Bun `--compile` native binary embed the CLI's

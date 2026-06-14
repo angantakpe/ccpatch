@@ -2,6 +2,44 @@
 /**
  * scripts/lint-capabilities.mjs — capability-honesty lint.
  *
+ * ┌─ READ THIS FIRST: WHAT THIS LINT IS, AND WHAT IT IS NOT ───────────────────┐
+ * │ This is a BEST-EFFORT HEURISTIC TRIPWIRE, not a sandbox and not a          │
+ * │ guarantee. It scans STATIC SOURCE TEXT for syscall-shaped patterns         │
+ * │ (regexes — see PATTERNS below) and never executes the patch. It therefore  │
+ * │ CANNOT see capability use that is:                                         │
+ * │   • indirect — reached through a helper, re-exported binding, or aliased    │
+ * │     reference the regex does not model (e.g. `const f = globalThis.fetch;   │
+ * │     f(url)`, `const cp = require('node:' + 'child_process')`);             │
+ * │   • dynamic — assembled at runtime from computed strings, `eval`,           │
+ * │     `new Function`, property access by variable name, or imported from a    │
+ * │     dependency that does the syscall on the patch's behalf;                 │
+ * │   • injected-string — code a patch SPLICES INTO the bundle as a string     │
+ * │     literal and that the live CLI later runs. The scanner reads that as     │
+ * │     inert text; it does not run it, so a capability exercised only by the   │
+ * │     injected code can slip past unless its source happens to contain a      │
+ * │     matched pattern verbatim. (Several PATTERNS are deliberately written   │
+ * │     to catch the COMMON injected-string shapes, but coverage is not total.) │
+ * │                                                                            │
+ * │ A CLEAN RUN MEANS exactly: "no obvious undeclared syscall-shaped patterns  │
+ * │ were found in the static source." It does NOT mean "this patch is          │
+ * │ incapable of network / fs / exec / env access." A patch can declare        │
+ * │ `capabilities: []` and still touch the network (or disk, or a subprocess)  │
+ * │ through any of the paths above and pass this lint clean.                   │
+ * │                                                                            │
+ * │ The REAL trust backstop is NOT this script. It is:                         │
+ * │   • the `ack:` capability gate in ccpatch.yml (build-time, refuses to       │
+ * │     apply gate-required capabilities until acknowledged);                  │
+ * │   • human review of the patch source before enabling it;                   │
+ * │   • the in-process, UNSANDBOXED trust model — an enabled patch runs with   │
+ * │     the full privileges of the CLI itself (see THREAT_MODEL.md / SECURITY  │
+ * │     .md). There is no runtime isolation between a patch and the CLI.       │
+ * │                                                                            │
+ * │ Treat this lint as a cheap early-warning signal that catches the careless  │
+ * │ and honest-mistake cases, NOT as evidence that a patch's declared          │
+ * │ capabilities are exhaustive. See the "Capability honesty: heuristic, not  │
+ * │ a guarantee" subsection of THREAT_MODEL.md.                                │
+ * └────────────────────────────────────────────────────────────────────────────┘
+ *
  * THREAT_MODEL.md's capability gate is only as good as each patch's declared
  * `capabilities` array. This lint cross-checks every patch source in core/ and
  * extensions/ against syscall-shaped patterns and fails when a pattern implies

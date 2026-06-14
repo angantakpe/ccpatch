@@ -114,6 +114,14 @@ the `--allow-capabilities` gate and the risk classification. See
 [THREAT_MODEL.md](../THREAT_MODEL.md) for the full meaning of each capability
 and the low/medium/high risk tiers.
 
+This field is **self-reported and trusted on the honor system**. The
+`scripts/lint-capabilities.mjs` check only greps source text for obvious
+syscall-shaped patterns; it cannot detect capability use reached indirectly,
+built dynamically, or hidden in code the patch injects as a string, so a clean
+lint is *not* a guarantee the declaration is complete. The real backstop is the
+`ack:` build-time gate plus human review — see
+[THREAT_MODEL.md](../THREAT_MODEL.md#capability-honesty-heuristic-not-a-guarantee).
+
 ---
 
 ## Identity & docs

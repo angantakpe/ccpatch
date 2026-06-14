@@ -53,7 +53,10 @@ function classify(src) {
     && /code\.slice\(0,\s*[A-Za-z_$][\w$]*\.start\)/.test(src)
     && /'function '\s*\+\s*[A-Za-z_$][\w$]*\.name/.test(src)
   ) {
-    return 'function-override-via-slice → kind:"prefix" or kind:"transpiler"';
+    return 'hand-rolled function override via slice/concat. '
+      + 'Preferred: kind:"prefix" (inject at fn entry) or kind:"transpiler" '
+      + '(rewrite the fn source). Fallback: replaceFunctionByLiteral() from '
+      + 'runner/patch-helpers.mjs. See docs/patch-decision-tree.md §1.';
   }
 
   // Pattern B — single-shot string/regex replace anchored on a quoted literal.
@@ -61,7 +64,10 @@ function classify(src) {
   const replaceCount = (src.match(/code\s*=\s*code\.replace\(/g) || []).length;
   const literalAnchor = /code\.includes\(['"][^'"]{6,}['"]\)/.test(src);
   if (replaceCount === 1 && literalAnchor && !src.includes('for (')) {
-    return 'single-replace with literal anchor → consider kind:"transpiler"';
+    return 'single code.replace() anchored on a quoted literal. '
+      + 'Preferred: kind:"transpiler" scoped to the one function. '
+      + 'Fallback: spliceAfter() from runner/patch-helpers.mjs (throws on '
+      + 'drift). See docs/patch-decision-tree.md §1.';
   }
 
   return null;
@@ -94,13 +100,15 @@ if (!quiet) {
   // per build, not per patch" contract from the expert review. Routed to stderr
   // since this is now a failing gate, not informational stdout.
   console.error(
-    `[ccpatch] ${findings.length} free-form patch(es) could be declarative ` +
-    `(kind: prefix | postfix | transpiler). See docs/authoring-patches.md "Declarative kinds".`
+    `[ccpatch] ${findings.length} free-form patch(es) map cleanly onto a ` +
+    `declarative form (kind: prefix | postfix | transpiler). Prefer declarative ` +
+    `> a runner/patch-helpers.mjs helper > hand-written apply(). ` +
+    `Decision tree: docs/patch-decision-tree.md (also docs/authoring-patches.md "Declarative kinds").`
   );
   for (const { name, reason } of findings) {
     console.error(`  - ${name}: ${reason}`);
   }
-  console.error(`  Codemod: node scripts/codemod-declarative.mjs <patch-name>`);
+  console.error(`  Codemod (does the prefix/transpiler rewrite for you): node scripts/codemod-declarative.mjs <patch-name>`);
 }
 // Enforcing: fail the build when any candidate is found so `npm run lint` gates.
 process.exit(findings.length > 0 ? 1 : 0);

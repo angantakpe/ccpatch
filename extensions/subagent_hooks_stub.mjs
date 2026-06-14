@@ -18,6 +18,20 @@ if (!globalThis.__ccpSubagent) {
     once: function() { return function() {}; },
   };
   globalThis.__ccpSubagentStubInstalled = true;
+  // Register the subagent event bus as a typed contract so consumers
+  // (expose_agent_tool, etc.) get a loud, actionable error instead of a silent
+  // \`undefined\` when this producer is disabled. Bare global kept for back-compat.
+  // Fail-open so a missing/older contract kernel never breaks the CLI.
+  if (typeof globalThis.__ccpProvide === 'function') {
+    try {
+      globalThis.__ccpProvide('subagent', {
+        version: 1,
+        producer: 'subagent_hooks_stub',
+        shape: ['emit', 'on', 'once'],
+        value: globalThis.__ccpSubagent,
+      });
+    } catch (_) {}
+  }
 }
 `;
 

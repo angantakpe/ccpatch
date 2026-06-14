@@ -54,6 +54,9 @@ We will credit reporters in the release notes unless you ask otherwise.
 - A patch that exfiltrates data, opens unsolicited network connections, or
   writes outside its declared paths.
 - A patch whose declared `capabilities` understates what it actually does.
+  Declared capabilities are self-reported; `scripts/lint-capabilities.mjs` is a
+  best-effort source-text heuristic, not a guarantee — see
+  [THREAT_MODEL.md](./THREAT_MODEL.md#capability-honesty-heuristic-not-a-guarantee).
 - An anchor transform that corrupts the bundle in a way the runner's
   `verify` step fails to catch.
 - A bypass of `--strict` capability acknowledgement.

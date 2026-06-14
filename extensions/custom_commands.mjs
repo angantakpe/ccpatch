@@ -9,7 +9,9 @@ export default {
 
     description: 'Slash command registry primitives + generic commands (/clear-cache, /costs, /export, /stats)',
     capabilities: ["prompt","tools"],
-    verify: { present: '__ccpRegisterSlashCommand', count: { present: 2 } },
+    // Hook references the sentinel 3×: the assignment, the queue-drain call,
+    // and the slashCommands contract value (register:).
+    verify: { present: '__ccpRegisterSlashCommand', count: { present: 3 } },
     apply: (code) => {
       // Idempotency (rule 2): sentinel == verify.present marker. Re-apply on an
       // already-patched bundle is a byte-identical no-op.
@@ -101,6 +103,27 @@ globalThis.__handleCustomCommand__ = (input) => {
   }
   return false;
 };
+
+// Register the slash-command registry as a typed contract so consumers
+// (Tier 3 routing patches that wrap __ccpDispatchSlash, or external tooling)
+// get a loud, actionable error instead of a silent \`undefined\` when this
+// producer is disabled. The bare globals above are kept for back-compat.
+// Versioned sentinel keeps this idempotent; fail-open so a missing/older
+// contract kernel never breaks the CLI.
+if (typeof globalThis.__ccpProvide === 'function' && !globalThis.__ccpSlashCommandsProvided_v1) {
+  try {
+    globalThis.__ccpSlashCommandsProvided_v1 = true;
+    globalThis.__ccpProvide('slashCommands', {
+      version: 1,
+      producer: 'custom_commands',
+      shape: ['register', 'dispatch'],
+      value: {
+        register: globalThis.__ccpRegisterSlashCommand,
+        dispatch: globalThis.__ccpDispatchSlash,
+      },
+    });
+  } catch (_) {}
+}
 
 `;
       return spliceAfter(code, CJS_IIFE_HEAD, hook);

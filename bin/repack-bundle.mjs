@@ -54,6 +54,7 @@ function emitSkipLine(info) {
   console.log(formatSkipLine(info));
 }
 
+// FENCED / SECOND-CLASS PATH — see docs/native-repack-notes.md ("Support status & fencing").
 // Bun trailer format this repacker was validated against. The Bun SEA trailer that
 // follows the embedded JS is UNVERSIONED and UNDOCUMENTED: it is a struct of absolute
 // file offsets that we deliberately do not rewrite (we keep the JS region byte-length
@@ -61,6 +62,8 @@ function emitSkipLine(info) {
 // the trailer such that a length-equal splice no longer lands the offsets correctly,
 // the resulting binary launches as bare `bun` with NO error — the failure is silent.
 // We record the assumption here and best-effort warn when the embedded Bun version drifts.
+// This constant is a PROXY for "trailer layout unchanged", not a guarantee; do not build
+// features that assume native repack succeeds on any given Bun version.
 const VALIDATED_BUN_VERSIONS = ['1.3'];  // major.minor prefixes known-good for this splicer
 
 // ---------------------------------------------------------------------------
@@ -520,6 +523,7 @@ function repack(originalBinaryPath, patchedJsPath, outputBinaryPath, options = {
   // future Bun layout changes the trailer, a length-equal repack can still silently produce a
   // binary that launches as bare `bun`. We can't detect a trailer format change directly, so
   // we warn loudly when the embedded Bun version is outside the known-good set as a proxy.
+  // FENCED VERSION GATE — see docs/native-repack-notes.md ("...VALIDATED_BUN_VERSIONS is a proxy").
   // FAIL CLOSED on Bun-version drift (was a best-effort warn). If the embedded Bun version's
   // major.minor prefix is not in VALIDATED_BUN_VERSIONS, the SEA trailer layout this repacker
   // assumes may have changed and a repack could silently produce a bare-`bun` binary. We therefore
@@ -647,6 +651,7 @@ function repack(originalBinaryPath, patchedJsPath, outputBinaryPath, options = {
     const delta = patchedBuf.length - originalRegionSize;
 
     if (isFatMachO) {
+      // FENCED / UNSUPPORTED PLATFORM — see docs/native-repack-notes.md ("Platform support").
       // Fat/universal Mach-O: we would have to thin to the matching arch slice, grow that, and
       // rebuild the fat wrapper (re-aligning every slice). That is not implemented — fail loud
       // and emit the structured skip line WS6 parses.
@@ -666,6 +671,7 @@ function repack(originalBinaryPath, patchedJsPath, outputBinaryPath, options = {
     }
 
     if (!isElf && !isMachO) {
+      // FENCED / UNSUPPORTED PLATFORM — see docs/native-repack-notes.md ("Platform support").
       // Anything else (e.g. PE / Windows) has no grow path — fail loud with a structured skip line.
       emitSkipLine({
         reason: 'native-grow-path-unavailable',

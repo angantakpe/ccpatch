@@ -70,7 +70,8 @@
     "lint:escape-hatches": "node scripts/lint-escape-hatches.mjs",
     "lint:registry": "node scripts/lint-registry.mjs",
     "lint:capabilities": "node scripts/lint-capabilities.mjs",
-    "lint": "concurrently --group --kill-others-on-fail 'npm:lint:dead' 'npm:lint:unused' 'npm:lint:types' 'npm:lint:declarative' 'npm:lint:anchors' 'npm:lint:profiles' 'npm:lint:escape-hatches' 'npm:lint:registry' 'npm:lint:capabilities'",
+    "lint:contracts": "node scripts/lint-contracts.mjs",
+    "lint": "concurrently --group --kill-others-on-fail 'npm:lint:dead' 'npm:lint:unused' 'npm:lint:types' 'npm:lint:declarative' 'npm:lint:anchors' 'npm:lint:profiles' 'npm:lint:escape-hatches' 'npm:lint:registry' 'npm:lint:capabilities' 'npm:lint:contracts'",
     "gen:types": "node scripts/gen-types.mjs",
     "tui": "node bin/patch-tui.mjs"
   },

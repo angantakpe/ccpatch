@@ -7,7 +7,7 @@ include scripts/mk/cli.mk
 .PHONY: help refmap refmap-check smoke-bridge smoke-integration \
         smoke-integration-roundtrip test-tty canary \
         bridge-host bridge-host-stop bridge-tail bridge-submit \
-        verticals-check lint lint-dead lint-unused lint-registry lint-capabilities \
+        verticals-check lint lint-dead lint-unused lint-registry lint-capabilities lint-contracts \
         test\:patches test\:patch test\:tty lint\:dead lint\:unused \
         lint\:registry lint\:capabilities heal
 
@@ -28,6 +28,7 @@ lint\:dead: lint-dead ## Alias for lint-dead (npm-style spelling)
 lint\:unused: lint-unused ## Alias for lint-unused (npm-style spelling)
 lint\:registry: lint-registry ## Alias for lint-registry (npm-style spelling)
 lint\:capabilities: lint-capabilities ## Alias for lint-capabilities (npm-style spelling)
+lint\:contracts: lint-contracts ## Alias for lint-contracts (npm-style spelling)
 
 # ── Verticals: testing the headless bridge + agent tree ─────────────────────
 
@@ -154,7 +155,10 @@ lint-registry: ## Validate ccpatch.yml against the patch corpus (entries, acks, 
 lint-capabilities: ## Capability-honesty check: declared capabilities vs syscall-shaped source patterns
 	@node scripts/lint-capabilities.mjs
 
-lint: lint-dead lint-unused lint-registry lint-capabilities ## Run all dead-code + registry/capability checks
+lint-contracts: ## Contract-honesty check: every cross-patch __ccp* global must call __ccpProvide (or be allowlisted)
+	@node scripts/lint-contracts.mjs
+
+lint: lint-dead lint-unused lint-registry lint-capabilities lint-contracts ## Run all dead-code + registry/capability/contract checks
 
 help: ## Show this help
 	@echo "Usage: make <target> [VERSION=x.y.z]"

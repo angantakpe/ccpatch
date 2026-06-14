@@ -80,6 +80,34 @@ globalThis.__ccpBusWarn = globalThis.__ccpBusWarn || function __ccpBusWarn(name,
   } catch (_) {}
 };
 
+// ── Contract registration ─────────────────────────────────────────────────
+// The fan-out bus above (__ccpOnFetch / __ccpOnFetchBefore / __ccpOnFetchStream
+// / __ccpBusWarn / __ccpOrigFetch) is the cross-patch surface every network
+// subscriber reaches for. Historically those were BARE globals consumed via
+// optional chaining (globalThis.__ccpOnFetch?.(…)), so a disabled producer gave
+// silent \`undefined\` instead of the loud, actionable contract error the system
+// exists to surface. Mirror expose_tool_dispatch / expose_system_prompt: ALSO
+// register a typed contract (the bare globals above are kept for back-compat).
+// Versioned sentinel keeps this idempotent; fail-open so a missing/older kernel
+// never breaks the CLI.
+if (typeof globalThis.__ccpProvide === 'function' && !globalThis.__ccpFetchBusProvided_v1) {
+  try {
+    globalThis.__ccpFetchBusProvided_v1 = true;
+    globalThis.__ccpProvide('fetchBus', {
+      version: 1,
+      producer: 'fetch_interceptor',
+      shape: ['onFetch', 'onFetchBefore', 'onFetchStream', 'busWarn', 'origFetch'],
+      value: {
+        onFetch: globalThis.__ccpOnFetch,
+        onFetchBefore: globalThis.__ccpOnFetchBefore,
+        onFetchStream: globalThis.__ccpOnFetchStream,
+        busWarn: globalThis.__ccpBusWarn,
+        get origFetch() { return globalThis.__ccpOrigFetch; },
+      },
+    });
+  } catch (_) {}
+}
+
 function _ccpIsApiCall(urlStr, options) {
   if ((options?.method || 'GET') !== 'POST') return false;
   const _gwBase = process.env.ANTHROPIC_BASE_URL || '';

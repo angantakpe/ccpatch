@@ -185,6 +185,41 @@ then executes its tool calls unprompted. Acknowledging a `tools`/`exec`/`network
 capability is a build-time decision; it is not a substitute for the runtime
 permission prompts that `--dangerously-skip-permissions` removes.
 
+### Capability honesty: heuristic, not a guarantee
+
+A patch's `capabilities` array is **self-reported**. The whole gate above —
+the ack requirement, the risk tiers, `--allow-capabilities` — trusts that the
+declared list is truthful. ccpatch does **not** prove it.
+
+`scripts/lint-capabilities.mjs` is the only automated check on that honesty,
+and it is a **best-effort heuristic tripwire, not a sandbox and not a proof.**
+It scans each patch's *static source text* for syscall-shaped patterns (a
+`fetch(` call, a `node:child_process` import, an `fs` write shape, a
+`process.env` assignment) and flags any that imply an undeclared capability.
+It never executes the patch, so it cannot see capability use that is reached
+indirectly (through a helper or aliased binding), assembled dynamically (computed
+strings, `eval`, `new Function`), or carried only inside code the patch
+**splices into the bundle as a string** for the live CLI to run later. A patch
+can therefore declare `capabilities: []`, touch the network or disk through one
+of those paths, and still pass the lint clean. A clean lint run means *"no
+obvious undeclared syscall-shaped patterns in the source,"* not *"this patch is
+incapable of network/fs/exec/env access."*
+
+What ccpatch **does** guarantee is narrower and lives at build time, not in the
+scanner:
+
+- the **ack gate** refuses to apply a patch whose *declared* capabilities are
+  gate-required until they are acknowledged in `ccpatch.yml` or via
+  `--allow-capabilities` (see "Apply-time gate" above);
+- there is **no runtime sandbox** — an enabled patch runs in-process with the
+  full privileges of the CLI itself (see [SECURITY.md](./SECURITY.md)).
+
+The real backstop against a dishonest declaration is therefore **human review
+of the patch source before you enable it**, with the lint as a cheap
+early-warning signal — not a substitute. A patch whose declared `capabilities`
+understates what it actually does is treated as a vulnerability (see
+[SECURITY.md](./SECURITY.md#in-scope)).
+
 ## Dangerous combinations & full-bypass flags
 
 The per-patch table treats each patch in isolation, but some combinations are
