@@ -19,6 +19,9 @@ export default {
   // Injected hook references the sentinel twice (idempotency guard + assignment),
   // so a single clean apply yields exactly 2 occurrences. count>2 ⇒ double-applied.
   verify: { present: '__ccpAuth_v1', count: { present: 2 } },
+  // Shared boot-anchor prepend with the other orchestration-bus patches — see the
+  // note in event_bus.mjs. Mutual acknowledgement of intended co-location.
+  allowOverlapWith: ['event_bus', 'agent_lifecycle', 'agent_tree'],
   apply: (code) => {
     const hook = `
 // ══════════════════════════════════════════════════════════════════════════

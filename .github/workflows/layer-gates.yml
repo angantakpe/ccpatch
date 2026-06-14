@@ -1,0 +1,97 @@
+name: layer-gates
+
+# Arch review #4 — separate strict-apply capability gates per architectural layer.
+#
+# `core` (the substrate) and `platform` (the orchestration/expose/observability
+# layer) each get their OWN gated job: a strict build of that profile against the
+# latest claude-code bundle, with --allow-capabilities set to EXACTLY that layer's
+# budget from runner/layer-budgets.mjs. The matrix makes them two independent
+# checks, so a PR sees "layer-gates / core" and "layer-gates / platform"
+# separately — core stays green on a tight budget while platform's wider,
+# intentionally-unacked surface is re-confirmed every build.
+#
+# The budget is read from runner/layer-budgets.mjs (the single source of truth
+# tests/layer-profiles.test.mjs validates against the patches' real declarations),
+# so CI and the test cannot drift: widening a layer's powers requires editing that
+# one file, which both turns this gate's allow-list and re-greens the test.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: layer-gates-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  strict-apply:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        layer: [core, platform]
+    name: ${{ matrix.layer }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies (frozen lockfile)
+        run: bun install --frozen-lockfile
+
+      - name: Install latest Claude Code CLI
+        run: |
+          npm i -g @anthropic-ai/claude-code@latest
+          CC_VERSION="$(npm ls -g @anthropic-ai/claude-code --depth=0 --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);process.stdout.write(j.dependencies["@anthropic-ai/claude-code"].version)})')"
+          echo "CC_VERSION=${CC_VERSION}" >> "$GITHUB_ENV"
+          echo "Installed claude-code version: ${CC_VERSION}"
+
+      - name: Locate installed claude-code bundle
+        run: |
+          CC_BIN="$(npm root -g)/@anthropic-ai/claude-code"
+          if [ -f "${CC_BIN}/cli.js" ]; then
+            echo "CC_BUNDLE=${CC_BIN}/cli.js" >> "$GITHUB_ENV"
+          elif [ -f "${CC_BIN}/cli.mjs" ]; then
+            echo "CC_BUNDLE=${CC_BIN}/cli.mjs" >> "$GITHUB_ENV"
+          else
+            echo "::warning::cli.js/cli.mjs not found under ${CC_BIN}; extracting from native binary"
+            make extract-from-binary VERSION="${CC_VERSION}"
+            echo "CC_BUNDLE=storage/archives/claude-code-v${CC_VERSION}/cli.v${CC_VERSION}.cjs" >> "$GITHUB_ENV"
+          fi
+
+      - name: Resolve this layer's capability budget
+        # Single source of truth: runner/layer-budgets.mjs. A typo / unknown layer
+        # exits non-zero here and fails the job loud rather than passing an empty
+        # --allow-capabilities (which would silently let the ack gate through).
+        run: |
+          BUDGET="$(node runner/layer-budgets.mjs '${{ matrix.layer }}')"
+          echo "Layer '${{ matrix.layer }}' capability budget: ${BUDGET}"
+          echo "LAYER_BUDGET=${BUDGET}" >> "$GITHUB_ENV"
+
+      - name: Strict apply (layer capability gate)
+        # Strict build of the layer profile. --allow-capabilities is EXACTLY the
+        # layer's budget: core passes on network,env; platform must explicitly
+        # allow its wider tools/exec/telemetry surface. If a patch migrates layer
+        # and brings a capability outside the layer's budget, this fails — and so
+        # does tests/layer-profiles.test.mjs — until runner/layer-budgets.mjs is
+        # updated with a deliberate, reviewable acknowledgement.
+        run: |
+          node bin/patch-cli.mjs "$CC_BUNDLE" "/tmp/cli.${{ matrix.layer }}.mjs" \
+            --version "$CC_VERSION" \
+            --profile "${{ matrix.layer }}" \
+            --strict \
+            --allow-capabilities="$LAYER_BUDGET"

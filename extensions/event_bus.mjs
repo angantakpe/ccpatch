@@ -22,6 +22,14 @@ export default {
   // Injected hook references the sentinel twice (idempotency guard + assignment),
   // so a single clean apply yields exactly 2 occurrences. count>2 ⇒ double-applied.
   verify: { present: '__ccpBus_v1', count: { present: 2 } },
+  // These four orchestration-bus patches (event_bus, auth_token, agent_lifecycle,
+  // agent_tree) each PREPEND their own independent, self-bootstrapping boot block
+  // at the shared shebang / CJS-IIFE anchor. The overlap detector flags their
+  // common insertion range (diff-vs-diff) whenever a profile composes them — the
+  // `platform` profile composes all four; `orchestrator` composes three. The
+  // blocks do not clobber each other (each guards its own __ccp* global), so the
+  // co-location is intended; acknowledge it mutually.
+  allowOverlapWith: ['auth_token', 'agent_lifecycle', 'agent_tree'],
   apply: (code) => {
     const hook = `
 // ══════════════════════════════════════════════════════════════════════════

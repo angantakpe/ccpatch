@@ -403,3 +403,67 @@ profiles:
       - cost_tracker
       - save_conversations
       - agent_tree
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # LAYER BOUNDARY  (arch review finding #4)
+  #
+  # `core` and `platform` name the two architectural layers of this repo as
+  # selectable profiles, so the boundary the review identified is first-class and
+  # gated, not just conceptual:
+  #
+  #   core     — the patch SUBSTRATE: the engine plus the load-bearing infra +
+  #              bug-fix patches (== the `minimal` set). This is the stable
+  #              anchor→transform→verify surface with a TIGHT capability budget
+  #              (network, env only — see runner/layer-budgets.mjs). Nothing here
+  #              opens a tool-dispatch / socket / agent surface.
+  #
+  #   platform — the ORCHESTRATION / observability layer that RIDES ON core:
+  #              expose-internals, the ADK, the headless bridge, the agent-tree
+  #              accounting bus. A different, WIDER threat surface (tools, exec,
+  #              prompt, fs, telemetry) with its own capability budget. `platform`
+  #              extends `core`, so core ⊆ platform by construction.
+  #
+  # Each layer has a SEPARATE strict-apply CI gate (.github/workflows/layer-gates
+  # .yml) whose --allow-capabilities budget is sourced from runner/layer-budgets
+  # .mjs. tests/layer-profiles.test.mjs asserts each layer's resolved patch set
+  # declares no gate-required capability outside its budget — so a patch that
+  # migrates layer and brings a new power CANNOT pass CI until the budget (and the
+  # threat-model review it implies) is updated explicitly. That is the forcing
+  # function the review asked for.
+  #
+  # These are ADDITIVE: they do NOT change the default build (PROFILE unset still
+  # honours the per-patch `patches:` flags above). Select them with
+  # `--profile core` / `--profile platform`.
+  # ════════════════════════════════════════════════════════════════════════════
+  core:
+    # The substrate — identical to `minimal`, named to make the boundary explicit
+    # and selectable. Keep in lock-step with `minimal`; layer-profiles.test.mjs
+    # asserts core === minimal so the two can't silently diverge.
+    extends: minimal
+    patches: []
+
+  platform:
+    # Orchestration / expose-internals / observability layer on top of the
+    # substrate. WIDER capability budget — see runner/layer-budgets.mjs. This is
+    # the headless remote-control + agent-tree surface; it is intentionally NOT
+    # pre-acked (see the daemon/orchestrator security note above) — building it
+    # strict re-confirms the threat model per the layer CI gate.
+    extends: core
+    patches:
+      - event_bus
+      - auth_token
+      - agent_lifecycle
+      - agent_tree
+      - assistant_stream_events
+      - expose_tool_dispatch
+      - expose_api_client
+      - expose_submit_input
+      - expose_agent_tool
+      - expose_system_prompt
+      - prime_agent_tool_on_boot
+      - policy_gate
+      - capture_interactive_request
+      - headless_bridge
+      - adk_hello_agent
+      - tools_log
+      - cost_tracker

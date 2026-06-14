@@ -163,6 +163,17 @@ Two additional vertical profiles ship for automation use cases: **daemon** (driv
 
 `doctor` and `capabilities` accept the same `--profile` flag (`make doctor PROFILE=standard`). An explicit `PATCH=name1,name2` list bypasses the profile entirely.
 
+#### The two layers: `core` and `platform`
+
+ccpatch is really two things stacked: a **patch substrate** (the engine plus the load-bearing infra + bug-fix patches) and an **orchestration layer** that rides on it (expose-internals, the ADK, the headless bridge, the agent-tree bus). The `core` and `platform` profiles name that architectural boundary so it is selectable and gated, not just conceptual:
+
+| Profile | Layer | Capability budget | Contents |
+| --- | --- | --- | --- |
+| **core** | The substrate — the stable `anchor → transform → verify` surface. Identical to `minimal`. | `env, fs, network` (local-only: config, overlay/project-root reads, the fetch tee). No tool-dispatch, subprocess, prompt-rewrite, or telemetry power. | the `minimal` set |
+| **platform** | Orchestration / expose-internals / observability, layered on `core` (`extends: core`). A wider threat surface. | `env, exec, fs, network, prompt, telemetry, tools` | `core` + `event_bus`, `auth_token`, `agent_lifecycle`, `agent_tree`, `assistant_stream_events`, `expose_*`, `prime_agent_tool_on_boot`, `policy_gate`, `capture_interactive_request`, `headless_bridge`, `adk_hello_agent`, `tools_log`, `cost_tracker` |
+
+Each layer has its **own strict-apply CI gate** (`.github/workflows/layer-gates.yml`) that builds the profile against the latest `claude-code` with `--allow-capabilities` set to exactly that layer's budget. The budget is the single source of truth in [`runner/layer-budgets.mjs`](runner/layer-budgets.mjs), and `tests/layer-profiles.test.mjs` asserts it **equals** the capability union the layer's patches actually declare. So a patch that migrates layer — or gains a new capability — turns both the test and the layer gate red until the budget (and the threat-model review it implies) is updated by hand. That is the forcing function that keeps the boundary from eroding silently. These profiles are additive: they do not change the default `make patch-claude-code` build.
+
 ### Drift check
 
 ```
