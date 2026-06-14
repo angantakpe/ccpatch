@@ -57,6 +57,8 @@ function* walkMjs(dir) {
   }
 }
 
+/** Run the escape-hatch registry lint. Returns the process exit code (0|1). */
+export function runLint() {
 // ── 1. Collect bypass tokens from code ───────────────────────────────────────
 
 const codeHits = new Map(); // token → [file, ...]
@@ -85,7 +87,7 @@ const sectionMatch = tm.match(
 );
 if (!sectionMatch) {
   console.error('ERROR: THREAT_MODEL.md has no "Escape-hatch registry & audit policy" section');
-  process.exit(1);
+  return 1;
 }
 const registryTokens = new Set();
 for (const row of sectionMatch[0].matchAll(/^\|\s*`([^`]+)`/gm)) {
@@ -205,6 +207,13 @@ if (pairs.length) {
 // ── 6. Exit ──────────────────────────────────────────────────────────────────
 
 if (hasErrors) {
-  process.exit(1);
+  return 1;
 }
 console.log(`OK: ${registryTokens.size} registered escape hatches, no registry drift`);
+return 0;
+}
+
+// Run as a gate only when invoked directly (not when imported by the umbrella/tests).
+if (import.meta.url === `file://${process.argv[1]}`) {
+  process.exit(runLint());
+}
