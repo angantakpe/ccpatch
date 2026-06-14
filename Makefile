@@ -110,7 +110,7 @@ patch-daemon: ## Tier 3 prep — patch cli with the daemon profile (event_bus + 
 	[ ! -f "$$SRC" ] && SRC=$$(ls storage/archives/claude-code-v$(VERSION)/cli*.cjs 2>/dev/null | head -1); \
 	if [ -z "$$SRC" ] || [ ! -f "$$SRC" ]; then echo "ERROR: no cli source for v$(VERSION) — run 'make download VERSION=$(VERSION)' first"; exit 2; fi; \
 	echo "[patch-daemon] using $$SRC"; \
-	node bin/patch-cli.mjs "$$SRC" $(OUTPUT) --profile daemon --allow-unacked
+	node bin/patch-cli.mjs "$$SRC" $(OUTPUT) --profile daemon
 
 smoke-integration: ## Tier 3 — drive a real patched CLI over the bridge (uses CCPATCH_INTEGRATION_CLI if set, else latest releases/)
 	@node tests/smoke_integration.mjs

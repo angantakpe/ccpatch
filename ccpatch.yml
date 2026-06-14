@@ -58,9 +58,11 @@ ack:
   # `make patch-claude-code` (PROFILE=standard) builds cleanly with no capability
   # warnings. Each entry lists the patch's FULL high-risk capability set (not just
   # the ack-required network/exec/env subset) so the broader capabilities gate is
-  # also satisfied. Power-only patches (debug, webhook, save_conversations, …)
-  # remain unacked on purpose: opting into `power` is an explicit choice that
-  # should re-confirm the threat model.
+  # also satisfied. Power-only patches NOT pulled in by a shipped profile (e.g.
+  # debug, cost_tracker, …) remain unacked on purpose: opting into `power` is an
+  # explicit choice that should re-confirm the threat model. The daemon profile's
+  # capability patches ARE acked below (see the "daemon / headless-bridge stack"
+  # block) so `make patch-daemon` builds without --allow-unacked.
   model: [env, network]
   custom_commands: [prompt, tools]
   context_budget_warn: [network, prompt]
@@ -81,6 +83,22 @@ ack:
   expose_tool_dispatch: [tools, network, exec]
   expose_system_prompt: [prompt]
   adk_hello_agent: [tools]
+  # daemon / headless-bridge stack — the patches the `daemon` profile adds on top
+  # of `minimal`. This is the most powerful profile in the corpus (headless agent
+  # loop + tool dispatch + an external control bridge), so each ack is a
+  # deliberate, auditable acknowledgement of THREAT_MODEL.md's headless trust
+  # boundary, NOT a convenience. Acked here so `make patch-daemon` builds without
+  # the blunt --allow-unacked bypass. Each entry lists the patch's FULL declared
+  # capability set so both the ack gate and the broader capabilities gate pass.
+  event_bus: [telemetry]
+  auth_token: [env, fs]
+  expose_api_client: [network]
+  expose_agent_tool: [tools]
+  capture_interactive_request: [network, fs]
+  webhook: [network, env, telemetry]
+  save_conversations: [network, fs, env, telemetry]
+  assistant_stream_events: [telemetry]
+  headless_bridge: [network, prompt, tools, exec, env, fs]
 
 patches:
 
