@@ -62,7 +62,8 @@ import { host } from './host.mjs';
  * @typedef {Object} HandoffScope
  * @property {string} id                 Stable unique scope id (SwapCoordinator stack owner key).
  * @property {number} seq                Monotonic handoff id counter.
- * @property {boolean} swapWarned        True once the degrade-to-delegate warning fired.
+ * @property {boolean} swapDegradeWarned True once the degrade-to-delegate warning fired.
+ * @property {boolean} pinMismatchWarned True once the persona pin-mismatch refusal warning fired.
  * @property {boolean} [_restoreToolRegistered] Internal: transfer_back auto-registered.
  * @property {import('./tool-registry.mjs').ToolHandle} [_restoreToolHandle] Internal: handle for dispose.
  */
@@ -319,7 +320,7 @@ function sanitizeSubmit(s) {
  * @returns {HandoffScope}
  */
 export function createHandoffScope() {
-  return { id: `hoscope-${++_scopeSeq}`, seq: 0, swapWarned: false };
+  return { id: `hoscope-${++_scopeSeq}`, seq: 0, swapDegradeWarned: false, pinMismatchWarned: false };
 }
 
 function busEmit(topic, payload) {
@@ -833,8 +834,8 @@ export function createDefineHandoff({ scope, getAgent, defineTool }) {
             id, target, requested: 'swap', used: 'delegate',
             reason: '__ccpSetSystemPrompt not available',
           });
-          if (!scope.swapWarned) {
-            scope.swapWarned = true;
+          if (!scope.swapDegradeWarned) {
+            scope.swapDegradeWarned = true;
             try {
               console.warn(`[adk:handoff] swap mode unavailable (no __ccpSetSystemPrompt) — using delegate for "${target}"`);
             } catch (_) {}
@@ -858,8 +859,8 @@ export function createDefineHandoff({ scope, getAgent, defineTool }) {
               const liveHash = hashPrompt(def.systemPrompt);
               if (liveHash !== pinnedHash) {
                 busEmit('handoff.pin.mismatch', { id, target, pinned: pinnedHash, live: liveHash });
-                if (!scope.swapWarned) {
-                  scope.swapWarned = true;
+                if (!scope.pinMismatchWarned) {
+                  scope.pinMismatchWarned = true;
                   try {
                     console.warn(`[adk:handoff] swap refused — persona for "${target}" changed since the handoff was defined (pin mismatch)`);
                   } catch (_) {}

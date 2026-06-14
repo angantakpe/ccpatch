@@ -786,3 +786,74 @@ test('createMemory accepts a valid round-trip transform (no false positive)', ()
   };
   assert.doesNotThrow(() => createMemory({ path: file, transform: good }));
 });
+
+test('set() rejects a non-JSON-serializable value synchronously and does NOT poison the store', async () => {
+  const dir = freshDir();
+  const file = join(dir, 'poison.json');
+  const mem = createMemory({ path: file });
+
+  mem.set('good', { a: 1 });
+
+  // A cyclic value (and a BigInt) must be rejected AT THE CALL SITE. Otherwise it
+  // would throw later inside the whole-cache JSON.stringify, dropping this write
+  // AND blocking every future flush — silently poisoning the entire store.
+  const cyclic = {};
+  cyclic.self = cyclic;
+  assert.throws(() => mem.set('bad', cyclic), /not JSON-serializable/);
+  assert.throws(() => mem.set('big', 10n), /not JSON-serializable/);
+
+  // The rejected keys never entered the cache; the good key is unaffected.
+  assert.equal(mem.get('bad'), undefined, 'rejected value did not enter the cache');
+  assert.deepEqual(mem.snapshot(), { good: { a: 1 } });
+
+  // And persistence of the good key is NOT blocked by the rejected writes.
+  await mem.flush();
+  assert.deepEqual(
+    JSON.parse(readFileSync(file, 'utf8')), { good: { a: 1 } },
+    'good key persisted despite the rejected non-serializable writes',
+  );
+});
+
+test('an existing file failing with an OS access code (EACCES) is NOT quarantined — only corruption is', () => {
+  const dir = freshDir();
+  const file = join(dir, 'locked.json');
+  writeFileSync(file, JSON.stringify({ keep: 'me' }), 'utf8');
+
+  // Simulate a read that fails with an access code rather than a parse error.
+  // onRead runs after readFileSync; we throw an EACCES-coded error only for the
+  // real file content (not the construction-time round-trip probe, which must
+  // still pass) so this exercises the SAME catch branch a real permission
+  // failure would — a valid file we simply cannot read right now.
+  const transform = {
+    onWrite: (s) => s,
+    onRead: (s) => {
+      if (s.includes('keep')) throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+      return s;
+    },
+  };
+
+  const realWarn = console.warn;
+  const warnings = [];
+  console.warn = (m) => warnings.push(String(m));
+  try {
+    const mem = createMemory({ path: file, transform });
+    assert.deepEqual(mem.snapshot(), {}, 'unreadable file → empty store, no throw');
+  } finally {
+    console.warn = realWarn;
+  }
+
+  // The valid file must be LEFT IN PLACE — renaming it aside would be data loss.
+  assert.equal(existsSync(file), true, 'access error must not move the file aside');
+  assert.equal(
+    readdirSync(dir).filter((n) => n.includes('.corrupt-')).length, 0,
+    'no quarantine sidecar for an access error',
+  );
+  assert.deepEqual(
+    JSON.parse(readFileSync(file, 'utf8')), { keep: 'me' },
+    'original bytes preserved on disk',
+  );
+  assert.ok(
+    warnings.some((w) => /not corruption/i.test(w)),
+    'warned that the file was left in place (not corruption)',
+  );
+});

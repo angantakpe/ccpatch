@@ -26,6 +26,11 @@ export interface AgentDef {
   systemPrompt?: string;
   /** Allowed tool names (defaults to ['*'] downstream). */
   tools?: string[];
+  /**
+   * If true, the persona is immutable: a later `defineAgent` for the same `name`
+   * with a different `systemPrompt` THROWS instead of silently re-pointing it.
+   */
+  frozen?: boolean;
   /** Optional predicate `(ctx) => nextName|null` for AgentRouter. */
   handoff?: ((context: RouterContext) => string | null | Promise<string | null>) | null;
   /** Optional model override. */
