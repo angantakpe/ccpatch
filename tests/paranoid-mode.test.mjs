@@ -73,6 +73,7 @@ describe('fetch_interceptor — paranoid makes __ccpBusWarn loud', () => {
     // Reset the relevant globals so each run re-installs cleanly.
     delete globalThis.__ccpBusWarn;
     delete globalThis.__ccpDebug;
+    delete globalThis.__ccpBusWarnBudget; // bounded-surfacing budget (review fix)
     // The hook references console + process.env, both available here. We only
     // need the __ccpBusWarn definition, which runs at the top of the hook.
     // eslint-disable-next-line no-eval
@@ -87,7 +88,12 @@ describe('fetch_interceptor — paranoid makes __ccpBusWarn loud', () => {
     return calls;
   }
 
-  it('stays SILENT by default (no CLAUDE_DEBUG, no paranoid)', () => {
+  it('surfaces the first N errors then goes silent by default (bounded surfacing)', () => {
+    // Review fix: even with all debug knobs off, a buggy subscriber must never
+    // fail in TOTAL silence. The first __ccpBusWarnBudget (3) swallowed errors
+    // are printed once to stderr (so the operator notices "set CLAUDE_DEBUG=1"),
+    // then the hook goes quiet. The diag sink still records every one; blast-
+    // radius containment (error still caught) is unchanged.
     const prevP = process.env.CCPATCH_PARANOID;
     const prevD = process.env.CLAUDE_DEBUG;
     delete process.env.CCPATCH_PARANOID;
@@ -95,9 +101,14 @@ describe('fetch_interceptor — paranoid makes __ccpBusWarn loud', () => {
     try {
       installHook();
       const calls = withCapturedStderr(() => {
-        globalThis.__ccpBusWarn('subA', 'after', new Error('boom'));
+        for (let i = 0; i < 6; i++) globalThis.__ccpBusWarn('subA', 'after', new Error('boom' + i));
       });
-      assert.equal(calls.length, 0);
+      // Exactly 3 surfaced, the rest silenced.
+      assert.equal(calls.length, 3);
+      assert.match(calls[0], /\[ccp:bus\]/);
+      assert.match(calls[0], /boom0/);
+      // The last surfaced line points the operator at the full-detail knob.
+      assert.match(calls[2], /CLAUDE_DEBUG=1/);
     } finally {
       if (prevP === undefined) delete process.env.CCPATCH_PARANOID; else process.env.CCPATCH_PARANOID = prevP;
       if (prevD === undefined) delete process.env.CLAUDE_DEBUG; else process.env.CLAUDE_DEBUG = prevD;

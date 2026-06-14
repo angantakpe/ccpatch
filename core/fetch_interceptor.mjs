@@ -58,7 +58,22 @@ globalThis.__ccpBusWarn = globalThis.__ccpBusWarn || function __ccpBusWarn(name,
   try { if (globalThis.__ccpDiag) globalThis.__ccpDiag('bus', line); } catch (_) {}
   var paranoid = false;
   try { paranoid = (process.env.CCPATCH_PARANOID === '1'); } catch (_) {}
-  if (!paranoid && process.env.CLAUDE_DEBUG !== '1' && !globalThis.__ccpDebug) return;
+  var loud = (paranoid || process.env.CLAUDE_DEBUG === '1' || globalThis.__ccpDebug);
+  // Bounded surfacing: even with all debug knobs off, NEVER let a buggy
+  // subscriber fail in total silence. Print the first __CCP_BUS_WARN_BUDGET (3)
+  // swallowed errors to stderr unconditionally — enough to notice "something is
+  // wrong, set CLAUDE_DEBUG=1" without flooding a steady-state hot path — then
+  // go quiet (the diag sink above still records every one). The original blast-
+  // radius containment is unchanged: the error is still caught.
+  if (!loud) {
+    if (typeof globalThis.__ccpBusWarnBudget !== 'number') globalThis.__ccpBusWarnBudget = 3;
+    if (globalThis.__ccpBusWarnBudget <= 0) return;
+    globalThis.__ccpBusWarnBudget--;
+    try {
+      console.error('[ccp:bus] ' + line + (globalThis.__ccpBusWarnBudget === 0 ? ' (further subscriber errors silenced — set CLAUDE_DEBUG=1 to see all)' : ''));
+    } catch (_) {}
+    return;
+  }
   try {
     var prefix = paranoid ? '[ccp:bus][paranoid] ' : '[ccp:bus] ';
     console.error(prefix + line);

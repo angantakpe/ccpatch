@@ -173,7 +173,7 @@ export function parseElfBunGraph(binary) {
     });
   }
 
-  return {
+  const g = {
     elf: { e_phoff, e_shoff, e_phentsize, e_phnum, e_shentsize, e_shnum, e_shstrndx },
     bun, sections, programHeaders,
     blobBase, payloadLen, payloadLenPos: bun.offset,
@@ -182,6 +182,65 @@ export function parseElfBunGraph(binary) {
     },
     records,
   };
+
+  // Structural self-check: the version gate in repack-bundle.mjs keys on the
+  // Bun BANNER STRING, which cannot detect a same-size schema RESHUFFLE — e.g. a
+  // 1.3.x point release that keeps RECORD_SIZE at 52 but reorders the six
+  // StringPointers, or changes which field is the entry point. The arithmetic
+  // checks above (byte_count sum, modulesLen % RECORD_SIZE) catch a size change
+  // but NOT a reorder. validateGraphSchema() asserts the decoded graph is
+  // internally consistent: every offset/length lands inside the blob and the
+  // entry-point id is in range. A reshuffle makes some StringPointer point out
+  // of bounds, so this converts silent offset corruption into a loud abort
+  // BEFORE any rewrite. Fail-closed: throw (the grow path is already wrapped by
+  // repack-bundle's fail-closed die()).
+  validateGraphSchema(g);
+  return g;
+}
+
+/**
+ * Assert a decoded Bun module graph is internally consistent. Throws on any
+ * out-of-bounds pointer or out-of-range index — the signature of a schema
+ * change the banner-string version gate cannot see. Pure (no I/O).
+ *
+ * @param {ReturnType<typeof parseElfBunGraph>} g
+ */
+export function validateGraphSchema(g) {
+  const blobLen = g.offsets.byteCount;            // module data lives in [0, byteCount)
+  const within = (off, len) =>
+    Number.isFinite(off) && Number.isFinite(len) && off >= 0 && len >= 0 && off + len <= blobLen;
+
+  if (!within(g.offsets.modulesOff, g.offsets.modulesLen)) {
+    throw new Error(
+      `Bun graph schema check: modules_ptr [${g.offsets.modulesOff}, +${g.offsets.modulesLen}) ` +
+      `escapes the blob (byte_count=${blobLen}) — Bun SEA schema changed; refusing to grow.`,
+    );
+  }
+  if (g.offsets.argvLen > 0 && !within(g.offsets.argvOff, g.offsets.argvLen)) {
+    throw new Error(
+      `Bun graph schema check: compile_exec_argv_ptr [${g.offsets.argvOff}, +${g.offsets.argvLen}) ` +
+      `escapes the blob (byte_count=${blobLen}) — Bun SEA schema changed; refusing to grow.`,
+    );
+  }
+  if (g.records.length > 0 && (g.offsets.entryPointId < 0 || g.offsets.entryPointId >= g.records.length)) {
+    throw new Error(
+      `Bun graph schema check: entry_point_id (${g.offsets.entryPointId}) out of range ` +
+      `[0, ${g.records.length}) — Bun SEA schema changed; refusing to grow.`,
+    );
+  }
+  for (const rec of g.records) {
+    for (const p of rec.allPtrs) {
+      // len 0 = field absent (off may be 0 or garbage-but-unused); only bounds-
+      // check pointers that actually reference bytes.
+      if (p.len > 0 && !within(p.off, p.len)) {
+        throw new Error(
+          `Bun graph schema check: record #${rec.index} StringPointer [${p.off}, +${p.len}) ` +
+          `escapes the blob (byte_count=${blobLen}) — Bun SEA schema changed (same-size reshuffle?); ` +
+          `refusing to grow.`,
+        );
+      }
+    }
+  }
 }
 
 /**
