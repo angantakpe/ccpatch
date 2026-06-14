@@ -10,6 +10,15 @@
  * Trade-off: one extra file ships next to the bundle, in exchange for fewer
  * bundle anchors that can drift across upstream versions.
  *
+ * Alongside the overlay require, this also injects the agents-dir boot block
+ * (ccpatch-agents/*.mjs loader). That block first integrity-checks every
+ * ccpatch-adk/*.mjs runtime file against its .sha256 sidecar and ABORTS all
+ * agent loading on any mismatch (so a tampered ADK runtime is never import()ed),
+ * then integrity-checks and require()s each agent stub. BOTH the CJS-IIFE path
+ * and the native-ESM fallback inject this equivalent behavior (the ESM path uses
+ * createRequire(import.meta.url)); previously the ESM path injected only the
+ * overlay require and silently dropped every agent.
+ *
  * Ordering:
  *   phase: 'pre' — runs before esm_compat (post) rewrites the IIFE tail.
  *   We anchor on the CJS-IIFE opening so `require` is the IIFE's local
@@ -19,8 +28,96 @@
 
 const SENTINEL = '/* [ccpatch overlay-loader] */';
 const AGENTS_SENTINEL = '/* [ccpatch agents-dir] */';
+// Marker for the ccpatch-adk runtime integrity gate (fix: runtime sidecars were
+// write-only). Lets verify/doctor confirm the gate is present in BOTH the
+// CJS-IIFE and the native-ESM injection paths.
+const ADK_INTEGRITY_SENTINEL = '/* [ccpatch adk-integrity] */';
 
-// Integrity-checking loader block injected into the bundle.
+// ADK runtime files copied next to the bundle (ccpatch-adk/*.mjs). Kept in sync
+// with runner/agents-dir-builder.mjs ADK_RUNTIME_FILES — both are verified
+// against their .sha256 sidecars before any agent stub import()s them. The list
+// is embedded as a literal so the injected boot code has no build-time deps.
+const ADK_RUNTIME_FILES = [
+  'index.mjs',
+  'agent.mjs',
+  'tool-registry.mjs',
+  'handoff.mjs',
+  'memory.mjs',
+];
+const ADK_FILES_JSON = JSON.stringify(ADK_RUNTIME_FILES);
+
+/**
+ * Build the agents-dir boot block as a single statement-expression string.
+ * Parameterized over the host's `require`/dir expressions so the SAME logic
+ * ships in both the CJS-IIFE path (require + __dirname) and the native-ESM
+ * fallback (createRequire(import.meta.url) + dirname(fileURLToPath(...))).
+ *
+ * It (1) integrity-checks every ccpatch-adk/*.mjs against its .sha256 sidecar,
+ * and ABORTS loading all agents on any mismatch — a tampered runtime must never
+ * be import()ed by the agent stubs — then (2) integrity-checks and require()s
+ * each ccpatch-agents/*.mjs. Synchronous fs/crypto, fully wrapped: never throws.
+ *
+ * @param {string} reqVar  identifier holding a CJS `require` in scope
+ * @param {string} dirExpr expression evaluating to the bundle dir (absolute)
+ */
+function agentsDirBlock(reqVar, dirExpr) {
+  return (
+    `${AGENTS_SENTINEL} ` +
+    `(function () { ` +
+    `try { ` +
+    `var __ccp_req = ${reqVar}; ` +
+    `var __ccp_dir = ${dirExpr}; ` +
+    `var __ccp_path = __ccp_req('path'); ` +
+    `var __ccp_afs = __ccp_req('fs'); ` +
+    `var __ccp_crypto = __ccp_req('crypto'); ` +
+    `var __ccp_ad = __ccp_path.resolve(__ccp_dir, 'ccpatch-agents'); ` +
+    `if (!__ccp_afs.existsSync(__ccp_ad)) return; ` +
+    // ── (1) ADK runtime integrity gate ──────────────────────────────────────
+    `${ADK_INTEGRITY_SENTINEL} ` +
+    `var __ccp_adkd = __ccp_path.resolve(__ccp_dir, 'ccpatch-adk'); ` +
+    `if (__ccp_afs.existsSync(__ccp_adkd)) { ` +
+    `var __ccp_adkf = ${ADK_FILES_JSON}; ` +
+    `for (var __ccp_ki = 0; __ccp_ki < __ccp_adkf.length; __ccp_ki++) { ` +
+    `var __ccp_kfp = __ccp_path.join(__ccp_adkd, __ccp_adkf[__ccp_ki]); ` +
+    `if (!__ccp_afs.existsSync(__ccp_kfp)) continue; ` +
+    `var __ccp_ksp = __ccp_kfp + '.sha256'; ` +
+    `if (!__ccp_afs.existsSync(__ccp_ksp)) { ` +
+    `process.stderr.write('[ccpatch] ADK runtime sidecar not found for ' + __ccp_adkf[__ccp_ki] + ' — refusing to load agents (cannot verify runtime).\\n'); ` +
+    `return; ` +
+    `} ` +
+    `var __ccp_kexp = __ccp_afs.readFileSync(__ccp_ksp, 'utf8').trim(); ` +
+    `var __ccp_kact = __ccp_crypto.createHash('sha256').update(__ccp_afs.readFileSync(__ccp_kfp)).digest('hex'); ` +
+    `if (__ccp_kact !== __ccp_kexp) { ` +
+    `process.stderr.write('[ccpatch] INTEGRITY FAIL: ADK runtime hash mismatch: ' + __ccp_adkf[__ccp_ki] + ' — possible tampering. Skipping ALL agent loads.\\n'); ` +
+    `return; ` +
+    `} ` +
+    `} ` +
+    `} ` +
+    // ── (2) per-agent integrity gate + require ──────────────────────────────
+    `var __ccp_entries = __ccp_afs.readdirSync(__ccp_ad).filter(function (f) { return f.endsWith('.mjs'); }).sort(); ` +
+    `for (var __ccp_ai = 0; __ccp_ai < __ccp_entries.length; __ccp_ai++) { ` +
+    `(function (__ccp_fname) { ` +
+    `try { ` +
+    `var __ccp_afp = __ccp_path.join(__ccp_ad, __ccp_fname); ` +
+    `var __ccp_asp = __ccp_afp + '.sha256'; ` +
+    `if (__ccp_afs.existsSync(__ccp_asp)) { ` +
+    `var __ccp_aexp = __ccp_afs.readFileSync(__ccp_asp, 'utf8').trim(); ` +
+    `var __ccp_aact = __ccp_crypto.createHash('sha256').update(__ccp_afs.readFileSync(__ccp_afp)).digest('hex'); ` +
+    `if (__ccp_aact !== __ccp_aexp) { ` +
+    `process.stderr.write('[ccpatch] INTEGRITY FAIL: agent file hash mismatch: ' + __ccp_fname + '\\n'); ` +
+    `return; ` +
+    `} ` +
+    `} ` +
+    `__ccp_req(__ccp_afp); ` +
+    `} catch (e) { process.stderr.write('[ccpatch] agent load failed: ' + __ccp_fname + ': ' + (e && e.message) + '\\n'); } ` +
+    `})(__ccp_entries[__ccp_ai]); ` +
+    `} ` +
+    `} catch (e) { process.stderr.write('[ccpatch] agents-dir load failed: ' + (e && e.message) + '\\n'); } ` +
+    `})();\n`
+  );
+}
+
+// Integrity-checking loader block injected into the bundle (CJS-IIFE path).
 // Uses synchronous fs/crypto so it runs safely at boot before the event loop.
 const hook =
   `${SENTINEL} try { ` +
@@ -42,31 +139,7 @@ const hook =
   `require('./ccpatch-overlay.mjs'); ` +
   `})(); ` +
   `} catch (e) { if (e && e.code !== 'MODULE_NOT_FOUND') console.error('[ccpatch] overlay load failed:', e && e.message); }\n` +
-  `${AGENTS_SENTINEL} ` +
-  `(function () { ` +
-  `var __ccp_ad = require('path').resolve(__dirname, 'ccpatch-agents'); ` +
-  `var __ccp_afs = require('fs'); ` +
-  `if (!__ccp_afs.existsSync(__ccp_ad)) return; ` +
-  `var __ccp_entries = __ccp_afs.readdirSync(__ccp_ad).filter(function (f) { return f.endsWith('.mjs'); }).sort(); ` +
-  `var __ccp_crypto = require('crypto'); ` +
-  `for (var __ccp_ai = 0; __ccp_ai < __ccp_entries.length; __ccp_ai++) { ` +
-  `(function (__ccp_fname) { ` +
-  `try { ` +
-  `var __ccp_afp = require('path').join(__ccp_ad, __ccp_fname); ` +
-  `var __ccp_asp = __ccp_afp + '.sha256'; ` +
-  `if (__ccp_afs.existsSync(__ccp_asp)) { ` +
-  `var __ccp_aexp = __ccp_afs.readFileSync(__ccp_asp, 'utf8').trim(); ` +
-  `var __ccp_aact = __ccp_crypto.createHash('sha256').update(__ccp_afs.readFileSync(__ccp_afp)).digest('hex'); ` +
-  `if (__ccp_aact !== __ccp_aexp) { ` +
-  `process.stderr.write('[ccpatch] INTEGRITY FAIL: agent file hash mismatch: ' + __ccp_fname + '\\n'); ` +
-  `return; ` +
-  `} ` +
-  `} ` +
-  `require(__ccp_afp); ` +
-  `} catch (e) { process.stderr.write('[ccpatch] agent load failed: ' + __ccp_fname + ': ' + (e && e.message) + '\\n'); } ` +
-  `})(__ccp_entries[__ccp_ai]); ` +
-  `} ` +
-  `})();\n`;
+  agentsDirBlock('require', '__dirname');
 
 const __cjsIife__ = '(function(exports, require, module, __filename, __dirname) {';
 
@@ -79,22 +152,46 @@ export default {
   phase: 'pre',
   required: true,
   verify: {
-    present: ["require('./ccpatch-overlay.mjs')", SENTINEL, AGENTS_SENTINEL],
-    count: { present: 3 },
+    // Both injection paths (CJS-IIFE and native-ESM) carry all three sentinels
+    // plus the overlay require, so verify is path-agnostic. The ADK-integrity
+    // sentinel proves the runtime hash gate (fix #1) shipped in either path.
+    // NOTE: the overlay-require arg is pinned WITH its leading './' so it matches
+    // exactly once — the CJS path.resolve() form uses the bare 'ccpatch-overlay.mjs'
+    // (no './'), so './ccpatch-overlay.mjs' is the require call alone in both paths.
+    // Each of the four present strings occurs exactly once → count.present === 4.
+    present: [
+      SENTINEL,
+      AGENTS_SENTINEL,
+      ADK_INTEGRITY_SENTINEL,
+      './ccpatch-overlay.mjs',
+    ],
+    count: { present: 4 },
   },
   apply: (code) => {
     if (code.includes(SENTINEL)) return code; // idempotent
     if (code.includes(__cjsIife__)) {
       return code.replace(__cjsIife__, () => __cjsIife__ + ' ' + hook);
     }
-    // Native-ESM fallback: inject after shebang using createRequire.
+    // Native-ESM fallback: inject after shebang using createRequire. Must inject
+    // the SAME behavior as the CJS path — overlay load AND the agents-dir block
+    // (with the ADK-runtime integrity gate), or native-ESM bundles silently drop
+    // every agent. createRequire(import.meta.url) gives us a CJS require so the
+    // shared agentsDirBlock() body runs unchanged.
     const shebang = '#!/usr/bin/env node';
     if (code.startsWith(shebang)) {
       const esmHook =
         `${SENTINEL} try { ` +
         `const { createRequire: __ccpCR } = await import('node:module'); ` +
-        `__ccpCR(import.meta.url)('./ccpatch-overlay.mjs'); ` +
-        `} catch (e) { if (e && e.code !== 'MODULE_NOT_FOUND') console.error('[ccpatch] overlay load failed:', e && e.message); }\n`;
+        `const __ccpReq = __ccpCR(import.meta.url); ` +
+        `__ccpReq('./ccpatch-overlay.mjs'); ` +
+        `} catch (e) { if (e && e.code !== 'MODULE_NOT_FOUND') console.error('[ccpatch] overlay load failed:', e && e.message); }\n` +
+        `try { ` +
+        `const { createRequire: __ccpCR2 } = await import('node:module'); ` +
+        `const { fileURLToPath: __ccpF2U } = await import('node:url'); ` +
+        `const __ccpReq2 = __ccpCR2(import.meta.url); ` +
+        `const __ccpDir2 = __ccpReq2('path').dirname(__ccpF2U(import.meta.url)); ` +
+        agentsDirBlock('__ccpReq2', '__ccpDir2') +
+        `} catch (e) { process.stderr.write('[ccpatch] agents-dir (esm) load failed: ' + (e && e.message) + '\\n'); }\n`;
       const nl = code.indexOf('\n') + 1;
       return code.slice(0, nl) + esmHook + code.slice(nl);
     }

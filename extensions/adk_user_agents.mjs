@@ -23,8 +23,17 @@
  * per-file and never crash the boot.
  *
  * SECURITY: files in the config dir run with full process privileges inside the
- * CLI — exactly like a patch would. Only the local user can write there
- * (~/.ccpatch is user-owned); the loader does NOT fetch or execute remote code.
+ * CLI — exactly like a patch would, and $CCPATCH_AGENTS_DIR is an env-pointed
+ * (higher-risk) vector. Rather than ASSERT "only the local user can write there",
+ * the loader ENFORCES it: before importing, it stat()s the directory and each
+ * file and SKIPS (with a loud stderr warning) any path that is
+ *   - group- or other-writable (mode & 0o022), or
+ *   - not owned by the current uid (when process.getuid is available; on
+ *     platforms without it, e.g. Windows, the uid check is skipped but the
+ *     world-writable check still applies where the mode bits are meaningful).
+ * The same checks apply to BOTH $CCPATCH_AGENTS_DIR and ~/.ccpatch/agents. The
+ * loader does NOT fetch or execute remote code. Checks are best-effort and
+ * isolated per-path: a stat failure or a single rejected file never crashes boot.
  * Treat the config dir as a trust boundary equal to writing a patch.
  */
 
@@ -35,9 +44,36 @@ const AGENT_CODE = `
 'use strict';
 
 (async () => {
-  const { readdir } = await import('node:fs/promises');
+  const { readdir, stat } = await import('node:fs/promises');
   const path = await import('node:path');
   const { pathToFileURL } = await import('node:url');
+
+  // Ownership/permission gate. A config dir or file that is group/other-writable,
+  // or not owned by us, is an ACE vector (anyone who can write there gets full
+  // in-process code execution). Refuse such paths loudly. Returns true = safe.
+  // Best-effort: a stat error is treated as unsafe (skip + warn), never thrown.
+  const myUid = (typeof process.getuid === 'function') ? process.getuid() : null;
+  async function isTrustworthy(p, kind) {
+    let st;
+    try {
+      st = await stat(p);
+    } catch (e) {
+      process.stderr.write('[adk-user] cannot stat ' + kind + ' ' + p + ': ' + (e && e.message) + ' — skipping\\n');
+      return false;
+    }
+    // World/group-writable bits are only meaningful on POSIX; on Windows the
+    // mode is synthesized and these bits are typically clear, so this is a no-op
+    // there rather than a false reject.
+    if (st.mode & 0o022) {
+      process.stderr.write('[adk-user] refusing ' + kind + ' ' + p + ': group/other-writable (mode ' + (st.mode & 0o777).toString(8) + ') — fix perms (chmod go-w) to load\\n');
+      return false;
+    }
+    if (myUid !== null && st.uid !== myUid) {
+      process.stderr.write('[adk-user] refusing ' + kind + ' ' + p + ': not owned by current user (owner uid ' + st.uid + ', expected ' + myUid + ') — skipping\\n');
+      return false;
+    }
+    return true;
+  }
 
   // The ADK runtime is copied to <bundle-dir>/ccpatch-adk/ by the build; this
   // file lives in <bundle-dir>/ccpatch-agents/, so the ADK is one dir up.
@@ -70,9 +106,14 @@ const AGENT_CODE = `
     } catch (_) {
       continue; // dir absent → nothing to load from it
     }
+    // Gate the directory itself before trusting anything inside it.
+    if (!(await isTrustworthy(dir, 'agents dir'))) continue;
     for (const ent of entries) {
       if (!ent.isFile() || !ent.name.endsWith('.mjs')) continue;
       const file = path.join(dir, ent.name);
+      // Gate each file too: a safe dir can still hold a file someone else owns
+      // (e.g. a hardlink) or that was left group-writable.
+      if (!(await isTrustworthy(file, 'agent file'))) continue;
       let mod;
       try {
         mod = await import(pathToFileURL(file).href);

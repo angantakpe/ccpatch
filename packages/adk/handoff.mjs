@@ -101,8 +101,27 @@ const SwapCoordinator = {
    */
   lockOwner: null,
 
-  /** One-shot guard so the out-of-order restore warning fires at most once. */
-  restoreSkipWarned: false,
+  /**
+   * The single live swap token currently issued for `lockOwner`, or null when the
+   * lock is free. SOUNDNESS: a same-scope re-acquire must return THIS exact token,
+   * not a fresh independent one — because there is one non-refcounted `lockOwner`,
+   * a fresh token sharing the same lock state would let releasing EITHER token free
+   * the lock while the OTHER token still believes it owns it, letting a different
+   * scope acquire while the first can still swap(). Memoizing one token per owning
+   * scope makes ownership idempotent. Cleared on release().
+   * @type {object|null}
+   */
+  liveToken: null,
+
+  /**
+   * Per-(topOwner, requestedBy) pair set of out-of-order-restore warnings already
+   * emitted. Replaces the old process-global one-shot latch: one benign skip used
+   * to permanently mute ALL later (including dangerous) cross-scope warnings.
+   * Rate-limiting per scope pair instead lets each distinct dangerous case warn
+   * exactly once. The bus event still fires every time regardless.
+   * @type {Set<string>}
+   */
+  restoreSkipWarnedPairs: new Set(),
 
   /**
    * Number of stack entries owned by `scopeId` (that instance's current swap
@@ -174,16 +193,21 @@ const SwapCoordinator = {
     if (!this.stack.length) return false;
     const top = this.top();
     if (!top || top.owner !== scopeId) {
+      const topOwner = top ? top.owner : null;
       busEmit('handoff.restore.skipped', {
-        owner: top ? top.owner : null,
+        owner: topOwner,
         requestedBy: scopeId,
         depth: this.stack.length,
       });
-      if (!this.restoreSkipWarned) {
-        this.restoreSkipWarned = true;
+      // Warn once PER (topOwner, requestedBy) pair, not once per process. A single
+      // benign out-of-order restore must not permanently mute every later (incl.
+      // dangerous) cross-scope warning; each distinct pair still warns once.
+      const pairKey = `${topOwner} ${scopeId}`;
+      if (!this.restoreSkipWarnedPairs.has(pairKey)) {
+        this.restoreSkipWarnedPairs.add(pairKey);
         try {
           console.warn(
-            `[adk:handoff] restore skipped — top of the global swap stack is owned by "${top ? top.owner : null}", not "${scopeId}" (out-of-order restore across ADK instances)`,
+            `[adk:handoff] restore skipped — top of the global swap stack is owned by "${topOwner}", not "${scopeId}" (out-of-order restore across ADK instances)`,
           );
         } catch (_) {}
       }
@@ -191,9 +215,17 @@ const SwapCoordinator = {
     }
     const setSP = host.setSystemPromptFn();
     if (typeof setSP !== 'function') return false;
-    // Pop only after we know the writer exists and the top is ours.
+    // Attempt the (fallible) restore WRITE first, BEFORE mutating the stack. If
+    // the host writer throws, the entry MUST stay on the stack — popping first
+    // would corrupt state on a write failure: the persona would NOT be restored,
+    // restoreLiveTools(top.removedTools) below would never run (tools stranded
+    // hidden), and depth would be wrongly decremented. Skip the drift contract
+    // check on this path: `top.prev` is a previously-LIVE, already-validated
+    // prompt, so a contract that drifted mid-session must never wedge the
+    // back-out path (the forward swap-in write in push() keeps the check).
+    try { setLiveSystemPrompt(top.prev, { skipContractCheck: true }); } catch (_) { return false; }
+    // Write succeeded and the top is ours → NOW pop (write-before-pop ordering).
     this.stack.pop();
-    try { setLiveSystemPrompt(top.prev); } catch (_) { return false; }
     // Re-add any tools this swap hid (LIFO-correct: each entry restores exactly
     // what IT removed from the live surface at its swap time).
     restoreLiveTools(top.removedTools);
@@ -230,9 +262,15 @@ const SwapCoordinator = {
     return true;
   },
 
-  /** Release the exclusive lock IFF `scopeId` currently holds it. */
+  /**
+   * Release the exclusive lock IFF `scopeId` currently holds it. Also drops the
+   * memoized live token for that scope so a later acquire issues a fresh one.
+   */
   releaseLock(scopeId) {
-    if (this.lockOwner === scopeId) this.lockOwner = null;
+    if (this.lockOwner === scopeId) {
+      this.lockOwner = null;
+      this.liveToken = null;
+    }
   },
 };
 
@@ -368,10 +406,19 @@ function assertSystemPromptContract() {
  *
  * Before touching the raw global we run assertSystemPromptContract():
  * a registered-but-drifted 'systemPrompt' contract refuses the write by throwing.
+ *
+ * `opts.skipContractCheck` bypasses that drift guard. It is used ONLY on the
+ * restore-to-prior path (SwapCoordinator.restore), where `value` is a prompt
+ * that was already live (hence already validated) before the swap. Reverting to
+ * a known-good prior persona must never be blocked by a contract that drifted
+ * mid-session, or the back-out path would wedge. The FORWARD swap-in write keeps
+ * the check (default skipContractCheck=false) — that is the privilege-escalation
+ * surface the drift guard exists to protect.
  * @param {string|null} value
+ * @param {{ skipContractCheck?: boolean }} [opts]
  */
-function setLiveSystemPrompt(value) {
-  assertSystemPromptContract();
+function setLiveSystemPrompt(value, opts) {
+  if (!opts || !opts.skipContractCheck) assertSystemPromptContract();
   const getNonce = host.getSystemPromptNonceFn();
   const setSP = host.setSystemPromptFn();
   if (typeof getNonce === 'function') {
@@ -518,7 +565,13 @@ export function restoreSystemPromptIn(scope) {
  * opt-in. Returns a swap TOKEN when no OTHER scope currently holds the lock; else
  * returns null (the caller can then detect contention up front instead of finding
  * out at out-of-order-restore time). Re-acquiring from the SAME scope that already
- * holds the lock returns a fresh token bound to it (idempotent ownership).
+ * holds the lock returns the SAME memoized token object (idempotent ownership) —
+ * NOT a fresh independent one. SOUNDNESS: there is one non-refcounted `lockOwner`;
+ * a fresh token sharing that single lock state would be unsound — releasing one
+ * token frees the lock while the other token still believes it owns it, letting a
+ * DIFFERENT scope acquire while the first can still swap(). Returning the one live
+ * token makes ownership truly idempotent: there is a single `released` flag and a
+ * single object governing the lock for the life of one acquisition.
  *
  * The token operates on the same SHARED SwapCoordinator stack as the legacy LIFO
  * path — it is a coordination layer, not a private stack:
@@ -540,6 +593,11 @@ export function tryAcquireSwap(scope) {
   if (!scope || typeof scope.id !== 'string') return null;
   // Contended: a DIFFERENT scope holds the exclusive lock → refuse.
   if (!SwapCoordinator.acquireLock(scope.id)) return null;
+
+  // Same-scope re-acquire: hand back the EXISTING live token rather than minting a
+  // fresh one over the shared lock state. A second independent token would let
+  // releasing either one free the lock while the other still thinks it owns it.
+  if (SwapCoordinator.liveToken) return SwapCoordinator.liveToken;
 
   let released = false;
   busEmit('handoff.swap.acquire', { owner: scope.id });
@@ -569,6 +627,8 @@ export function tryAcquireSwap(scope) {
       busEmit('handoff.swap.release', { owner: scope.id });
     },
   };
+  // Memoize so a same-scope re-acquire returns THIS token (idempotent ownership).
+  SwapCoordinator.liveToken = token;
   return token;
 }
 

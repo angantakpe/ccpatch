@@ -26,6 +26,7 @@ import {
   toolStatusesIn,
   disposeToolScope,
   __resetDriftGuardForTests,
+  __resetSchemaWarnDedupeForTests,
 } from '../tool-registry.mjs';
 
 // ── shared global hygiene ─────────────────────────────────────────────────────
@@ -369,32 +370,96 @@ test('createToolRegistry exposes a scope-bound listTools()', () => {
 
 // ── load-bearing drift guard refuses a drifted gated path ─────────────────────
 
-test('proven toolDispatch contract drift refuses injection through the gated registrar', () => {
+test('a drift-refused tool stays QUEUED across poll ticks then recovers when the contract heals (non-latching, finding #1)', async () => {
+  // REWRITTEN (finding #1): the old test asserted 'queued' ONLY synchronously,
+  // before any poll tick — so it could not distinguish the BROKEN sticky-latch
+  // behavior (refused → instantly 'failed' within ~50ms, poller torn down,
+  // recovery impossible) from the INTENDED non-latching design (refused → stays
+  // queued, bounded poll keeps retrying, a RECOVERED host injects on a later
+  // tick). This version makes the intent real: it lets several real poll ticks
+  // pass with the tool still QUEUED, then heals the contract and asserts the tool
+  // actually injects — only possible if drift does NOT latch and the poller lives.
   const restore = isolateGlobals();
   __resetDriftGuardForTests();
   try {
     const raw = installGatedRegistrar('NONCE-XYZ');
-    // A registered 'toolDispatch' contract whose shape probe THROWS (proven drift):
-    // __ccpRequire must throw when asked for shape ['registerTool'].
-    globalThis.__ccpInspectContracts = () => [{ name: 'toolDispatch', version: 1, shape: ['somethingElse'] }];
+    let drifted = true; // flipped to heal the contract mid-test.
+    globalThis.__ccpInspectContracts = () => [
+      drifted
+        ? { name: 'toolDispatch', version: 1, shape: ['somethingElse'] }
+        : { name: 'toolDispatch', version: 2, shape: ['registerTool'] },
+    ];
     globalThis.__ccpRequire = (name, opts) => {
       assert.equal(name, 'toolDispatch');
       assert.equal(opts.consumer, 'adk:tools');
       assert.deepEqual(opts.shape, ['registerTool']);
-      throw new Error('contract "toolDispatch" missing required path "registerTool"');
+      if (drifted) throw new Error('contract "toolDispatch" missing required path "registerTool"');
+      return globalThis.__ccpRegisterTool; // healed: a valid value
     };
 
     const scope = createToolScope();
     const h = defineToolIn(scope, {
       name: 'drifted', inputSchema: { type: 'object' }, execute: async () => 'x',
     });
-    // Injection refused: the drifted global was NOT called, tool is not live, and
-    // it is queued (awaiting a registry that drift-guard will keep refusing).
+    // Refused synchronously: the drifted global was NOT called, not live, queued.
     assert.equal(raw.some((t) => t.name === 'drifted'), false, 'drifted registrar was NOT called');
     assert.deepEqual(listToolsIn(scope), [], 'refused tool is not reported live');
     assert.equal(toolStatusesIn(scope).find((s) => s.name === 'drifted')?.status, 'queued');
+
+    // Let SEVERAL real 50ms poll ticks elapse — under the broken sticky latch the
+    // tool would already be 'failed' and the poller gone. It must still be queued.
+    await new Promise((r) => setTimeout(r, 250));
+    assert.equal(toolStatusesIn(scope).find((s) => s.name === 'drifted')?.status, 'queued',
+      'a drift-refused tool stays queued across poll ticks (NOT latched to failed)');
+    assert.equal(raw.some((t) => t.name === 'drifted'), false, 'still not injected while drifted');
+
+    // Heal the contract; the still-alive non-latching poller must inject it.
+    __resetDriftGuardForTests();
+    drifted = false;
+    const settled = await Promise.race([
+      h.ready.then((v) => ({ v })),
+      new Promise((r) => setTimeout(() => r({ timeout: true }), 8000)),
+    ]);
+    assert.deepEqual(settled, { v: true }, 'recovered contract → poller injects → ready=true');
+    assert.equal(toolStatusesIn(scope).find((s) => s.name === 'drifted')?.status, 'live',
+      'tool went live after the contract recovered (proves drift did not latch)');
+    assert.ok(raw.some((t) => t.name === 'drifted'), 'tool landed once the contract healed');
     h.dispose();
   } finally {
+    restore();
+    __resetDriftGuardForTests();
+  }
+});
+
+test('a PERMANENTLY drifted contract settles the tool to failed at the bounded poll limit (finding #1, ~5s)', async () => {
+  // The flip side of recovery: if the host never heals, the non-latching poll must
+  // still bound out at ~5s and settle the tool 'failed' — it must not spin forever.
+  const restore = isolateGlobals();
+  __resetDriftGuardForTests();
+  const realWarn = console.warn;
+  console.warn = () => {};
+  try {
+    const raw = installGatedRegistrar('NONCE-XYZ');
+    globalThis.__ccpInspectContracts = () => [{ name: 'toolDispatch', version: 1, shape: ['somethingElse'] }];
+    globalThis.__ccpRequire = () => { throw new Error('contract "toolDispatch" missing required path "registerTool"'); };
+
+    const scope = createToolScope();
+    const h = defineToolIn(scope, {
+      name: 'perma-drift', inputSchema: { type: 'object' }, execute: async () => 'x',
+    });
+    assert.equal(toolStatusesIn(scope).find((s) => s.name === 'perma-drift')?.status, 'queued');
+
+    const settled = await Promise.race([
+      h.ready.then((v) => ({ v })),
+      new Promise((r) => setTimeout(() => r({ timeout: true }), 8000)),
+    ]);
+    assert.deepEqual(settled, { v: false }, 'bounded poll settles ready=false — never spins forever');
+    assert.equal(toolStatusesIn(scope).find((s) => s.name === 'perma-drift')?.status, 'failed',
+      'permanently-drifted tool eventually settles to failed');
+    assert.equal(raw.some((t) => t.name === 'perma-drift'), false, 'never injected through the drifted path');
+    assert.equal(scope.pollHandle, null, 'poller torn down after the bounded limit');
+  } finally {
+    console.warn = realWarn;
     restore();
     __resetDriftGuardForTests();
   }
@@ -671,5 +736,195 @@ test('disposeToolScope removes live tools, resolves pending false, and is idempo
     }
   } finally {
     restore();
+  }
+});
+
+// ── finding #2: name collision must NOT clobber a pre-existing non-ADK tool ────
+
+test('defineTool refuses to overwrite a pre-existing non-ADK tool of the same name (fallback path)', async () => {
+  const restore = isolateGlobals();
+  try {
+    // A bare array (fallback path) ALREADY containing a "built-in" the ADK never
+    // registered — e.g. the CLI's real Bash. defineTool({name:'Bash'}) must NOT
+    // replace it; __ccpRawTools is the same array the CLI dispatches built-ins
+    // from, so clobbering it would silently break the real tool.
+    const realBash = { name: 'Bash', call: async () => [{ type: 'text', text: 'REAL BASH' }] };
+    globalThis.__ccpRawTools = [realBash];
+
+    const scope = createToolScope();
+    const h = defineToolIn(scope, {
+      name: 'Bash',
+      inputSchema: { type: 'object' },
+      execute: async () => 'ADK IMPOSTER',
+    });
+
+    // The original built-in is untouched and the ADK tool did NOT take its slot.
+    const entries = globalThis.__ccpRawTools.filter((t) => t.name === 'Bash');
+    assert.equal(entries.length, 1, 'still exactly one Bash entry');
+    assert.equal(entries[0], realBash, 'the pre-existing non-ADK Bash was NOT overwritten');
+    // It is reported as a FAILURE, not silently live.
+    assert.deepEqual(listToolsIn(scope), [], 'collided tool is not reported live');
+    assert.equal(toolStatusesIn(scope).find((s) => s.name === 'Bash')?.status, 'failed',
+      'collision reports status failed');
+    // .ready resolves false (terminal, immediate) — verify it does not hang.
+    assert.equal(await h.ready, false, '.ready resolves false on a name collision');
+  } finally {
+    restore();
+  }
+});
+
+test('a tool the ADK itself registered CAN be re-upserted (ownership) — only NON-owned names are protected', () => {
+  const restore = isolateGlobals();
+  try {
+    globalThis.__ccpRawTools = [];
+    const scope = createToolScope();
+    // First define: ADK owns 'mine'.
+    const h1 = defineToolIn(scope, { name: 'mine', inputSchema: { type: 'object' }, execute: async () => 'v1' });
+    assert.deepEqual(listToolsIn(scope), ['mine']);
+    // Re-define the SAME owned name → allowed upsert (not a collision).
+    const h2 = defineToolIn(scope, { name: 'mine', inputSchema: { type: 'object' }, execute: async () => 'v2' });
+    assert.equal(globalThis.__ccpRawTools.filter((t) => t.name === 'mine').length, 1, 'still one entry, upserted');
+    assert.equal(toolStatusesIn(scope).find((s) => s.name === 'mine')?.status, 'live', 'owned re-upsert stays live');
+    void h1; void h2;
+  } finally {
+    restore();
+  }
+});
+
+// ── finding #3: schema foot-gun warning fires UNCONDITIONALLY (no CLAUDE_DEBUG) ─
+
+test('the schema foot-gun warning fires WITHOUT CLAUDE_DEBUG / __ccpDebug, once per tool (finding #3)', () => {
+  const restore = isolateGlobals();
+  __resetSchemaWarnDedupeForTests();
+  const realWarn = console.warn;
+  const savedEnv = process.env.CLAUDE_DEBUG;
+  const warnings = [];
+  console.warn = (...a) => warnings.push(a.join(' '));
+  try {
+    // Debug is explicitly OFF — neither the env switch nor the global is set.
+    delete process.env.CLAUDE_DEBUG;
+    delete globalThis.__ccpDebug;
+    globalThis.__ccpRawTools = []; // live array → no "queued" noise
+    const scope = createToolScope();
+
+    const schemaWarn = (name) => warnings.filter((w) => w.includes(`tool "${name}"`) && w.includes('does NOT enforce'));
+
+    // A schema with un-enforceable keywords and NO validate hook → must warn even
+    // though debug is off (it's a one-time authoring signal, not debug noise).
+    defineToolIn(scope, {
+      name: 'unenforced-prod',
+      inputSchema: { type: 'object', properties: { age: { type: 'number', minimum: 0 } } },
+      execute: async () => 'x',
+    });
+    assert.equal(schemaWarn('unenforced-prod').length, 1, 'warning fired with debug OFF');
+    assert.ok(schemaWarn('unenforced-prod')[0].includes('properties.age.minimum'), 'names the unenforced keyword');
+
+    // Re-defining the SAME tool name must NOT warn again (dedupe → once per tool).
+    defineToolIn(scope, {
+      name: 'unenforced-prod',
+      inputSchema: { type: 'object', properties: { age: { type: 'number', minimum: 0 } } },
+      execute: async () => 'x',
+    });
+    assert.equal(schemaWarn('unenforced-prod').length, 1, 'second define of the same tool does NOT re-warn (deduped)');
+
+    // A validate() hook still suppresses the warning entirely.
+    defineToolIn(scope, {
+      name: 'hooked-prod',
+      inputSchema: { type: 'object', properties: { age: { type: 'number', minimum: 0 } } },
+      validate: () => null,
+      execute: async () => 'x',
+    });
+    assert.equal(schemaWarn('hooked-prod').length, 0, 'no warning when a validate hook is supplied');
+  } finally {
+    console.warn = realWarn;
+    if (savedEnv === undefined) delete process.env.CLAUDE_DEBUG; else process.env.CLAUDE_DEBUG = savedEnv;
+    __resetSchemaWarnDedupeForTests();
+    restore();
+  }
+});
+
+// ── finding #4: a throwing gated registrar during DRAIN must not crash ─────────
+
+test('a throwing gated registrar during drain does NOT crash and the tool settles to failed (finding #4)', async () => {
+  // The gated registrar throws on an invalid/rotated nonce. During the bounded
+  // drain (driven by the shared setInterval), that throw must be caught and
+  // treated as a failed-this-attempt — never escape as a process uncaughtException.
+  const restore = isolateGlobals();
+  __resetDriftGuardForTests();
+  const realWarn = console.warn;
+  console.warn = () => {};
+  // Fail the test if ANY uncaught exception escapes the scheduler during the run.
+  let uncaught = null;
+  const onUncaught = (err) => { uncaught = err; };
+  process.on('uncaughtException', onUncaught);
+  try {
+    // Registrar AND array ABSENT at define time → the tool QUEUES (the synchronous
+    // define-time path is intentionally not the one under test here; we want the
+    // throw to happen inside the shared-scheduler drain).
+    delete globalThis.__ccpRawTools;
+    delete globalThis.__ccpRegisterTool;
+    globalThis.__ccpGetDispatchNonce = () => 'CURRENT';
+
+    const scope = createToolScope();
+    const h = defineToolIn(scope, {
+      name: 'throws-on-inject', inputSchema: { type: 'object' }, execute: async () => 'x',
+    });
+    assert.equal(toolStatusesIn(scope).find((s) => s.name === 'throws-on-inject')?.status, 'queued');
+
+    // Now install a registrar that ALWAYS throws (as if the nonce rotated) AND the
+    // array, so the NEXT poll tick attempts a gated drain → registrar throws on
+    // every attempt → caught in drainQueue → re-queued until the bounded limit →
+    // settle failed, all WITHOUT escaping the setInterval as an uncaughtException.
+    setTimeout(() => {
+      globalThis.__ccpRegisterTool = () => {
+        throw new Error('__ccpRegisterTool: invalid nonce. Call __ccpGetDispatchNonce() at startup.');
+      };
+      globalThis.__ccpRawTools = [];
+    }, 60);
+
+    const settled = await Promise.race([
+      h.ready.then((v) => ({ v })),
+      new Promise((r) => setTimeout(() => r({ timeout: true }), 8000)),
+    ]);
+    assert.deepEqual(settled, { v: false }, 'throwing registrar → bounded poll settles ready=false');
+    assert.equal(toolStatusesIn(scope).find((s) => s.name === 'throws-on-inject')?.status, 'failed',
+      'tool settled to failed without crashing');
+    assert.equal(scope.pollHandle, null, 'poller torn down after the bounded limit');
+    assert.equal(uncaught, null, 'NO uncaught exception escaped the shared scheduler');
+  } finally {
+    process.removeListener('uncaughtException', onUncaught);
+    console.warn = realWarn;
+    restore();
+    __resetDriftGuardForTests();
+  }
+});
+
+test('removeFromRaw via a throwing gated unregistrar returns false instead of throwing (finding #4)', () => {
+  const restore = isolateGlobals();
+  __resetDriftGuardForTests();
+  try {
+    // A working register path so the tool goes live and dispose() routes through
+    // the gated unregistrar — which throws (e.g. rotated nonce).
+    const raw = [];
+    globalThis.__ccpRawTools = raw;
+    globalThis.__ccpGetDispatchNonce = () => 'CURRENT';
+    globalThis.__ccpRegisterTool = (n, toolObj) => { raw.push(toolObj); return true; };
+    globalThis.__ccpUnregisterTool = () => {
+      throw new Error('__ccpUnregisterTool: invalid nonce. Call __ccpGetDispatchNonce() at startup.');
+    };
+
+    const scope = createToolScope();
+    const h = defineToolIn(scope, { name: 'gated-dispose-throw', inputSchema: { type: 'object' }, execute: async () => 'x' });
+    assert.ok(raw.some((t) => t.name === 'gated-dispose-throw'), 'tool injected via gated registrar');
+
+    // dispose() must NOT throw even though the unregistrar does; it returns false.
+    let removed;
+    assert.doesNotThrow(() => { removed = h.dispose(); }, 'dispose swallows the unregistrar throw');
+    assert.equal(removed, false, 'a throwing unregistrar reports "not removed" (false)');
+    // Local scope bookkeeping is still cleaned up regardless of the host throw.
+    assert.deepEqual(listToolsIn(scope), [], 'scope no longer lists the tool after dispose');
+  } finally {
+    restore();
+    __resetDriftGuardForTests();
   }
 });

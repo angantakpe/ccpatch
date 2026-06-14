@@ -166,6 +166,9 @@ export function __resetDriftGuardForTests() {
  *   status is 'live'; toolStatusesIn() reports the full {name,status} set. (Kept
  *   the field name `live` for backward-compat with internal callers; it is now a
  *   Map of statuses rather than a Set of names.)
+ * @property {Set<string>} owned  Names the ADK registered itself; the fallback
+ *   (bare-array) path only upserts names in this set so it never clobbers a
+ *   pre-existing non-ADK tool (e.g. a built-in Bash/Read).
  */
 
 /**
@@ -175,13 +178,19 @@ export function __resetDriftGuardForTests() {
 export function createToolScope() {
   return {
     queue: [],
-    drained: false,
+    drained: false, // legacy field; no longer gates the drain (see drainQueue).
     pollHandle: null,
     pollAttempts: 0,
     pollWarned: false,
     busUnsub: null,
     pending: new Map(),
     live: new Map(), // name → 'queued' | 'live' | 'failed'
+    // Names the ADK itself registered into __ccpRawTools via the FALLBACK
+    // (bare-array) path. Used to REFUSE clobbering a pre-existing non-ADK entry of
+    // the same name (e.g. the CLI's built-in Bash/Read/...): the fallback path
+    // only upserts names the ADK owns. The gated path defers to the producer's
+    // __ccpRegisterTool, but we still record ownership there for symmetry.
+    owned: new Set(),
   };
 }
 
@@ -353,6 +362,28 @@ function unenforcedSchemaKeywords(schema) {
   return [...found].sort();
 }
 
+/**
+ * Per-tool dedupe for the one-time schema foot-gun warning. The "these keywords
+ * are not enforced; supply a validate() hook" line is a one-time AUTHORING signal
+ * on the untrusted-input boundary, so it fires UNCONDITIONALLY (NOT debug-gated —
+ * production authoring still needs to learn its schema isn't being enforced), but
+ * only ONCE per tool name so re-defining the same tool doesn't spam it.
+ * Module-level so it dedupes across scopes (the message names the tool, not the
+ * scope).
+ * @type {Set<string>}
+ */
+const _schemaWarnedTools = new Set();
+
+/**
+ * TEST SEAM ONLY. Clears the per-tool schema-warning dedupe so a test can assert
+ * the unconditional once-per-tool firing deterministically within one process.
+ * Not part of the public ADK surface — do not surface in index.mjs / index.d.ts.
+ * @returns {void}
+ */
+export function __resetSchemaWarnDedupeForTests() {
+  _schemaWarnedTools.clear();
+}
+
 /** Build a tool_result error block (no execute() call happened). */
 function errorResult(text) {
   return [{ type: 'text', text }];
@@ -446,15 +477,41 @@ function buildToolObj(toolDef) {
 }
 
 /**
- * Attempt to inject `toolDef` into the live tool registry. Returns true on success.
+ * @typedef {'ok'|'refused'|'absent'|'collision'} InjectOutcome
+ *   - 'ok'        — the tool is now live in the registry.
+ *   - 'refused'   — a TRANSIENT, recoverable refusal: proven toolDispatch drift.
+ *     A drifted host may RECOVER, so the caller should keep polling within the
+ *     bounded limit (and only fail when the attempts are exhausted), NOT latch.
+ *   - 'absent'    — the registry array / gated registrar isn't present yet. Also
+ *     TRANSIENT: a late-binding host may populate it within the poll window.
+ *   - 'collision' — TERMINAL refusal: the fallback path found a same-named entry
+ *     the ADK does NOT own (a built-in like Bash/Read). This will never resolve by
+ *     polling, so the caller fails it immediately with a clear error rather than
+ *     burning the whole poll window.
+ *
+ * Tri(quad)-state (was boolean) so the drain/poll loop can DISTINGUISH a
+ * transient refusal (re-queue and keep polling within the bounded limit) from a
+ * terminal give-up (failInject when attempts exhaust, or immediately on a
+ * collision), instead of latching every refusal straight to 'failed'.
+ */
+
+/**
+ * Attempt to inject `toolDef` into the live tool registry.
  * GATED PATH: if the patch's nonce-gated __ccpRegisterTool exists, route through
  * it with the (lazily re-read) dispatch nonce. FALLBACK: when that registrar is
  * absent (e.g. a unit test stubbing a bare `__ccpRawTools = []`), mutate the raw
- * array directly so the bare-array path keeps working.
+ * array directly so the bare-array path keeps working — but REFUSE to overwrite a
+ * name the ADK does not own (collision with a built-in like Bash/Read).
+ *
+ * MAY THROW: the gated registrar throws on an invalid/rotated nonce. Callers in
+ * the shared scheduler MUST wrap this in try/catch (fail-open-at-runtime rule) —
+ * an escaped throw would surface as a process-level uncaughtException.
+ *
+ * @param {ToolScope} scope  scope whose ownership set guards fallback upserts.
  * @param {ToolDef} toolDef
- * @returns {boolean}
+ * @returns {InjectOutcome}
  */
-function tryInject(toolDef) {
+function tryInject(scope, toolDef) {
   const toolObj = buildToolObj(toolDef);
 
   // Gated path — the real patch always provides this registrar.
@@ -462,19 +519,37 @@ function tryInject(toolDef) {
     // Drift guard (call-site half): before trusting the gated global, consult the
     // typed contract registry. If the 'toolDispatch' contract is registered and
     // its shape no longer matches (proven drift), refuse rather than call the
-    // drifted global. Memoized — runs at most once per process.
-    if (!gatedPathTrusted()) return false;
+    // drifted global. NOT latched on drift — a recovered host re-checks, so this
+    // is a TRANSIENT 'refused' (the drain keeps polling), not a terminal failure.
+    if (!gatedPathTrusted()) return 'refused';
     const nonce = getDispatchNonce();
-    return host.callRegisterTool(nonce, toolObj) === true;
+    // May throw (invalid nonce) — the caller's try/catch turns that into a
+    // failed-this-attempt, never an uncaught exception.
+    const ok = host.callRegisterTool(nonce, toolObj) === true;
+    if (ok) scope.owned.add(toolDef.name);
+    return ok ? 'ok' : 'refused';
   }
 
   // Fallback — direct array mutation when no registrar is present.
   const getRaw = host.rawTools();
-  if (!Array.isArray(getRaw)) return false;
+  if (!Array.isArray(getRaw)) return 'absent';
   const existing = getRaw.findIndex((t) => t && t.name === toolDef.name);
-  if (existing >= 0) getRaw[existing] = toolObj;
-  else getRaw.push(toolObj);
-  return true;
+  if (existing >= 0) {
+    // A same-named entry already exists. __ccpRawTools is the SAME array the CLI
+    // dispatches built-ins (Bash/Read/...) from, so overwriting a name the ADK
+    // did NOT register would silently clobber a real built-in. Only upsert names
+    // the ADK owns; refuse (terminally, surfaced via the .ready/.injected path)
+    // for anything else.
+    if (!scope.owned.has(toolDef.name)) {
+      debug(`[adk:tools] refusing to overwrite pre-existing non-ADK tool "${toolDef.name}"`);
+      return 'collision';
+    }
+    getRaw[existing] = toolObj;
+  } else {
+    getRaw.push(toolObj);
+  }
+  scope.owned.add(toolDef.name);
+  return 'ok';
 }
 
 /**
@@ -493,13 +568,17 @@ function settleReady(scope, name, value) {
 }
 
 /**
- * Settle a tool that timed out before injection: .ready resolves false, the
- * onInjectFail callback fires (best effort), and .injected either rejects
- * (throwOnInjectFail) or resolves false.
+ * Settle a tool that will never inject: .ready resolves false, the onInjectFail
+ * callback fires (best effort), and .injected either rejects (throwOnInjectFail)
+ * or resolves false. Terminal — used both on bounded-poll exhaustion and on an
+ * immediately-terminal refusal (e.g. a name collision).
  * @param {ToolScope} scope
  * @param {ToolDef} def
+ * @param {string} [reason]  Human-readable cause; defaults to the poll-timeout
+ *   message. Threaded into the debug line and the throwOnInjectFail rejection.
  */
-function failInject(scope, def) {
+function failInject(scope, def, reason) {
+  const why = reason || 'was never injected (poll timed out)';
   const p = scope.pending.get(def.name);
   if (p) scope.pending.delete(def.name);
   // Never injected → mark 'failed' (observable) rather than dropping it from the
@@ -508,35 +587,77 @@ function failInject(scope, def) {
   scope.live.set(def.name, 'failed');
   // Louder ONLY on the debug switch (the once-only hard-timeout console.warn in
   // scheduleDrain stays as-is for the no-array case).
-  debug(`[adk:tools] tool "${def.name}" was never injected (poll timed out) — status=failed`);
+  debug(`[adk:tools] tool "${def.name}" ${why} — status=failed`);
   if (typeof def.onInjectFail === 'function') {
     try { def.onInjectFail(def.name); } catch (_) {}
   }
   if (p) {
     p.resolve(false);
     if (def.throwOnInjectFail) {
-      p.rejectInjected(new Error(`adk:tools: tool "${def.name}" was never injected (poll timed out)`));
+      p.rejectInjected(new Error(`adk:tools: tool "${def.name}" ${why}`));
     } else {
       p.resolveInjected(false);
     }
   }
 }
 
-/** Flush every queued tool into __ccpRawTools. Idempotent per drain cycle. */
+/** Error text surfaced when the fallback path refuses to clobber a non-ADK tool. */
+const COLLISION_REASON = 'name collides with a pre-existing non-ADK tool — refusing to overwrite it';
+
+/**
+ * Flush the CURRENT queue into __ccpRawTools.
+ *
+ * NON-LATCHING (this is the core of the drift-recovery fix): the old version
+ * early-returned on a sticky `scope.drained` boolean and sent any refused tool
+ * STRAIGHT to a terminal 'failed' with no re-queue — which permanently failed a
+ * tool within ~50ms and tore the poller down, so a host that later RECOVERED a
+ * drifted contract could never inject it. Instead we splice the current queue and
+ * branch per tool on tryInject's tri-state:
+ *   - 'ok'        → live + settle .ready(true);
+ *   - 'collision' → TERMINAL failInject now (polling can never resolve it);
+ *   - 'refused'/'absent' → TRANSIENT: re-queue (keep polling) while bounded poll
+ *     attempts remain; only fail when the ceiling is exhausted (pollOnce drives
+ *     that). A permanently-drifted host therefore still settles to 'failed' at
+ *     ~5s — it just isn't latched after the first ~50ms.
+ *
+ * Each inject is wrapped in try/catch: the gated registrar throws on an
+ * invalid/rotated nonce, and that throw must NOT escape the shared setInterval as
+ * an uncaughtException (fail-open-at-runtime rule). A throw is treated as a
+ * transient failed-this-attempt (re-queued like 'refused').
+ *
+ * @param {ToolScope} scope
+ */
 function drainQueue(scope) {
-  if (scope.drained) return;
-  scope.drained = true;
-  for (const def of scope.queue) {
-    if (tryInject(def)) {
+  // Splice the current batch; refusals are re-queued onto scope.queue below so a
+  // later tick (within the bounded poll) retries them — no sticky latch.
+  const batch = scope.queue.splice(0, scope.queue.length);
+  const exhausted = scope.pollAttempts >= (scope.pollLimit || POLL_LIMIT);
+  for (const def of batch) {
+    let outcome;
+    try {
+      outcome = tryInject(scope, def);
+    } catch (err) {
+      // Gated registrar threw (e.g. invalid/rotated nonce). Fail open: treat as a
+      // transient failed-this-attempt rather than crashing the scheduler.
+      debug(`[adk:tools] inject threw for "${def.name}": ${(err && err.message) || err}`);
+      outcome = 'refused';
+    }
+
+    if (outcome === 'ok') {
       scope.live.set(def.name, 'live');
       settleReady(scope, def.name, true);
+    } else if (outcome === 'collision') {
+      // Terminal: a polling retry can never clear a non-ADK name collision.
+      failInject(scope, def, COLLISION_REASON);
+    } else if (exhausted) {
+      // Transient refusal/absence, but the bounded poll is spent — settle failed
+      // so a permanently-drifted host doesn't leave tools queued forever.
+      failInject(scope, def, 'was never injected (poll timed out / contract drift)');
     } else {
-      // Drain ran but injection still refused (e.g. proven drift / removed array)
-      // — surface as a failed inject so it never masquerades as live.
-      failInject(scope, def);
+      // Transient: keep it queued and let the bounded poll retry on a later tick.
+      scope.queue.push(def);
     }
   }
-  scope.queue.length = 0;
 }
 
 /** Tear down poller registration + bus subscription once drained or given up. */
@@ -598,21 +719,46 @@ function tickAll() {
 
 /**
  * Advance a single scope by one base tick. Honors the scope's own interval (only
- * counts an attempt every interval/base ticks) and per-scope give-up limit.
+ * counts an attempt every interval/base ticks) and per-scope give-up ceiling.
+ *
+ * Two reasons a tool can still be waiting after the array appears:
+ *   - the array is genuinely absent (host not ready), OR
+ *   - the array is present but the gated path is refusing (proven drift) — the
+ *     drift guard does NOT latch, so a RECOVERED host can still inject on a later
+ *     tick. drainQueue re-queues such transient refusals.
+ * So we ALWAYS advance the bounded attempt counter on the scope's cadence (not
+ * just when the array is absent), attempt a drain, and only tear the watchers
+ * down once the queue is empty (drained) or the bounded ceiling is reached. This
+ * keeps the ~5s timeout intact for a permanently-drifted host while letting a
+ * recovered one settle.
  */
 function pollOnce(scope) {
-  if (host.hasRawTools()) {
-    drainQueue(scope);
-    stopWatchers(scope);
-    return;
-  }
   // Count base ticks; only advance the attempt counter on the scope's cadence.
   scope.pollBaseTicks = (scope.pollBaseTicks || 0) + 1;
-  const ticksPerAttempt = Math.max(1, Math.round(scope.pollInterval / POLL_INTERVAL_MS));
+  const ticksPerAttempt = Math.max(1, Math.round((scope.pollInterval || POLL_INTERVAL_MS) / POLL_INTERVAL_MS));
   if (scope.pollBaseTicks < ticksPerAttempt) return;
   scope.pollBaseTicks = 0;
 
-  if (++scope.pollAttempts >= scope.pollLimit) {
+  const reachedCeiling = ++scope.pollAttempts >= (scope.pollLimit || POLL_LIMIT);
+
+  // Attempt a drain whenever the array is present. drainQueue is non-latching: it
+  // settles 'ok'/'collision' tools and re-queues transient refusals (drift /
+  // absent). On the LAST attempt (reachedCeiling) it fails any still-refusing
+  // tools terminally instead of re-queuing them (see drainQueue's `exhausted`).
+  if (host.hasRawTools()) {
+    // Wrapped: although drainQueue catches per-tool inject throws internally, keep
+    // a belt-and-braces guard so nothing escapes the shared setInterval.
+    try { drainQueue(scope); } catch (_) {}
+    if (scope.queue.length === 0) {
+      // Everything settled (live or terminally failed) — stop watching.
+      stopWatchers(scope);
+      return;
+    }
+    // Still-refusing tools remain queued; fall through to the ceiling check so a
+    // permanently-drifted host still tears down at ~5s.
+  }
+
+  if (reachedCeiling) {
     stopWatchers(scope);
     if (!scope.pollWarned) {
       scope.pollWarned = true;
@@ -623,10 +769,12 @@ function pollOnce(scope) {
         );
       } catch (_) {}
     }
-    // Surface the silent failure to every waiting consumer: .ready=false,
-    // onInjectFail callback, and .injected rejection (throwOnInjectFail).
-    for (const def of scope.queue) failInject(scope, def);
-    scope.queue.length = 0;
+    // Surface the silent failure to every still-waiting consumer: .ready=false,
+    // onInjectFail callback, and .injected rejection (throwOnInjectFail). Catch so
+    // a failInject side effect can't escape the shared scheduler either.
+    for (const def of scope.queue.splice(0, scope.queue.length)) {
+      try { failInject(scope, def); } catch (_) {}
+    }
   }
 }
 
@@ -654,8 +802,11 @@ function scheduleDrain(scope) {
     if (bus && typeof bus.on === 'function') {
       const onReady = () => {
         if (host.hasRawTools()) {
-          drainQueue(scope);
-          stopWatchers(scope);
+          // Non-latching drain: settles 'ok'/'collision' tools and re-queues
+          // transient refusals (drift). Only stop watching once the queue is
+          // empty — otherwise the bounded poll keeps retrying drift recovery.
+          try { drainQueue(scope); } catch (_) {}
+          if (scope.queue.length === 0) stopWatchers(scope);
         }
       };
       try {
@@ -686,7 +837,16 @@ function scheduleDrain(scope) {
  */
 function removeFromRaw(name) {
   if (host.hasUnregisterTool()) {
-    return host.callUnregisterTool(getDispatchNonce(), name) === true;
+    // The gated unregistrar throws on an invalid/rotated nonce, exactly like the
+    // registrar. dispose()/disposeToolScope() must NOT let that escape (some run
+    // from finalizers / teardown where a throw would crash the caller), so treat a
+    // throw as "not removed" — fail open, consistent with the inject paths.
+    try {
+      return host.callUnregisterTool(getDispatchNonce(), name) === true;
+    } catch (err) {
+      debug(`[adk:tools] unregister threw for "${name}": ${(err && err.message) || err}`);
+      return false;
+    }
   }
   const getRaw = host.rawTools();
   if (!Array.isArray(getRaw)) return false;
@@ -720,16 +880,26 @@ export function defineToolIn(scope, { name, description, inputSchema, execute, o
   // Schema — keywords it cannot interpret (numeric bounds, pattern, nested
   // shapes, combinators, …) are silently accepted. An author who wrote such a
   // schema likely THINKS it validates. When no pluggable `validate` hook was
-  // supplied (the documented escape hatch), warn (debug-gated) naming exactly the
-  // keywords that will NOT be enforced, so the gap is observable at definition
-  // time instead of silent at call time.
-  if (typeof validate !== 'function') {
+  // supplied (the documented escape hatch), warn naming exactly the keywords that
+  // will NOT be enforced, so the gap is observable at definition time instead of
+  // silent at call time.
+  //
+  // This is a one-time AUTHORING signal on the untrusted-input boundary, so it
+  // fires UNCONDITIONALLY (NOT debug-gated — a production author still needs to
+  // learn their schema isn't being enforced) but only ONCE per tool name (dedupe)
+  // so re-defining the same tool can't turn it into per-call noise. The detailed
+  // keyword breakdown stays on the same line; finer per-keyword preview detail can
+  // remain debug-gated below.
+  if (typeof validate !== 'function' && !_schemaWarnedTools.has(name)) {
     const unenforced = unenforcedSchemaKeywords(inputSchema);
     if (unenforced.length) {
-      debug(
-        `[adk:tools] tool "${name}": inputSchema contains keyword(s) the built-in validateInput does NOT enforce: ${unenforced.join(', ')}. ` +
-        'Pass a validate(input)=>string|null hook (ajv/zod/etc.) to deep-check them.',
-      );
+      _schemaWarnedTools.add(name);
+      try {
+        console.warn(
+          `[adk:tools] tool "${name}": inputSchema contains keyword(s) the built-in validateInput does NOT enforce: ${unenforced.join(', ')}. ` +
+          'Pass a validate(input)=>string|null hook (ajv/zod/etc.) to deep-check them.',
+        );
+      } catch (_) { /* warning must never break defineTool */ }
     }
   }
 
@@ -748,11 +918,24 @@ export function defineToolIn(scope, { name, description, inputSchema, execute, o
   // callers that care attach their own handler.
   injected.catch(() => {});
 
-  if (tryInject(def)) {
+  // Synchronous first attempt. tryInject may THROW (gated registrar, invalid
+  // nonce) — that is a PROGRAMMER/host error surfaced to the defineTool caller, so
+  // it is intentionally NOT caught here (the scheduler paths catch their own).
+  const outcome = tryInject(scope, def);
+  if (outcome === 'ok') {
     scope.live.set(name, 'live');
     resolveReady(true);
     resolveInjected(true);
+  } else if (outcome === 'collision') {
+    // Terminal: the name collides with a pre-existing non-ADK tool (e.g. a
+    // built-in). Polling can never clear it — fail loudly NOW via .ready/.injected
+    // so the author sees it instead of waiting out the whole poll window.
+    scope.pending.set(name, { resolve: resolveReady, resolveInjected, rejectInjected });
+    scope.live.set(name, 'queued'); // failInject flips this to 'failed'
+    failInject(scope, def, COLLISION_REASON);
   } else {
+    // 'refused' (transient drift) / 'absent' — queue and let the bounded poll
+    // retry. A recovered host (or a late-binding array) injects on a later tick.
     scope.pending.set(name, { resolve: resolveReady, resolveInjected, rejectInjected });
     scope.queue.push(def);
     // Queued tools are tracked as 'queued' — NOT reported by listToolsIn() until
@@ -760,7 +943,7 @@ export function defineToolIn(scope, { name, description, inputSchema, execute, o
     scope.live.set(name, 'queued');
     // Silent-by-default queueing — escalate to a warning only when the debug
     // switch is on, so authors can see a tool that did not inject immediately.
-    debug(`[adk:tools] tool "${name}" queued (registry not ready) — awaiting injection`);
+    debug(`[adk:tools] tool "${name}" queued (registry not ready / contract drift) — awaiting injection`);
     scheduleDrain(scope);
   }
 
@@ -775,6 +958,7 @@ export function defineToolIn(scope, { name, description, inputSchema, execute, o
       p.resolveInjected(false);
     }
     scope.live.delete(name);
+    scope.owned.delete(name); // relinquish ownership so a later re-define can re-upsert.
     const removed = removeFromRaw(name);
     // If nothing is left waiting, tear the poller down so it doesn't outlive use.
     if (scope.queue.length === 0) stopWatchers(scope);
@@ -833,6 +1017,7 @@ export function disposeToolScope(scope) {
   // Clear queue + status map; reset drain bookkeeping for reuse.
   scope.queue.length = 0;
   scope.live.clear();
+  scope.owned.clear();
   scope.drained = false;
   scope.pollHandle = null;
   scope.pollAttempts = 0;

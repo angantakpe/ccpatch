@@ -1,12 +1,16 @@
 import {
   readFileSync,
-  writeFileSync,
   appendFileSync,
   mkdirSync,
   statSync,
   renameSync,
   chmodSync,
   rmSync,
+  realpathSync,
+  openSync,
+  writeSync,
+  fsyncSync,
+  closeSync,
 } from 'node:fs';
 import { dirname, resolve, relative, isAbsolute } from 'node:path';
 import { cwd, pid } from 'node:process';
@@ -30,6 +34,56 @@ const MAX_COALESCE_MS = 1000; // 1 s
 // Owner-only perms for the persisted store (rw-------). The store can hold
 // secrets, so it must never be world/group readable on disk.
 const FILE_MODE = 0o600;
+// How old a lockfile may be before we treat it as STALE (left behind by a crashed
+// writer) and steal it. Long enough to never race a healthy writer's brief
+// read-merge-write critical section, short enough that a crash doesn't wedge the
+// store for long.
+const LOCK_STALE_MS = 10_000; // 10 s
+
+// ── durable write helpers ─────────────────────────────────────────────────────
+// DURABILITY: a bare writeFileSync(tmp) followed by renameSync gives ATOMICITY
+// (the rename swaps inodes atomically) but NOT durability — the file's data may
+// still be sitting in the page cache when the rename's directory entry hits disk.
+// A power/OS crash in that window can leave a renamed-but-zero-length / garbage
+// file, contradicting the crash-safety claim. To actually be crash-safe we must
+// fsync the file's data BEFORE the rename, and fsync the DIRECTORY after it so the
+// rename itself is durable.
+
+/**
+ * Write `bytes` to `tmpPath` and fsync the file data to disk before returning.
+ * openSync→writeSync→fsyncSync→closeSync (close in a finally so the fd never
+ * leaks even if write/fsync throws). Throws on failure (caller cleans up tmp).
+ * @param {string} tmpPath
+ * @param {string} bytes
+ */
+function writeFileDurable(tmpPath, bytes) {
+  const fd = openSync(tmpPath, 'w', FILE_MODE);
+  try {
+    writeSync(fd, bytes);
+    fsyncSync(fd); // flush the file's data+metadata to stable storage.
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Best-effort fsync of a directory so a rename INTO it is durable. Wrapped so it
+ * never throws: some platforms/filesystems reject opening a dir for fsync, and a
+ * failure here only weakens durability — it must never break a successful write.
+ * @param {string} dirPath
+ */
+function fsyncDir(dirPath) {
+  try {
+    const dfd = openSync(dirPath, 'r');
+    try {
+      fsyncSync(dfd);
+    } finally {
+      closeSync(dfd);
+    }
+  } catch {
+    /* directory fsync unsupported / failed — non-fatal, durability best-effort */
+  }
+}
 
 // ── module-level exit registry ────────────────────────────────────────────────
 // Every createMemory() instance must flush its pending write on process exit,
@@ -106,13 +160,73 @@ export function createMemory({ path: filePath, transform, maxBytes, appendLog = 
   // Sibling delta-log path (append-log mode only).
   const logPath = `${resolved}.log`;
 
-  // PATH SANDBOX: the resolved path must live within the project root.
-  // relative(root, resolved) starting with '..' (or being absolute on its own)
-  // means the target escaped the root via traversal or an outside absolute path.
+  // PATH SANDBOX (lexical pre-filter): the resolved path must live within the
+  // project root. relative(root, resolved) starting with '..' (or being absolute
+  // on its own) means the target escaped the root via traversal or an outside
+  // absolute path. This is a FAST string-only check — it does NOT follow
+  // symlinks, so it is only the first of two gates.
   const rel = relative(root, resolved);
   if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) {
     throw new Error(
       `createMemory: path escapes project root: ${resolved} is not within ${root}`,
+    );
+  }
+
+  // PATH SANDBOX (canonical / symlink check): the lexical check above operates on
+  // the resolved STRING and is blind to symlinks. A symlinked `.claude/` (or any
+  // ancestor directory) would let every read/write follow the link OUT of the
+  // sandbox while still passing the lexical gate. So we canonicalize with
+  // realpathSync and re-verify containment against the canonical root.
+  //
+  // realpathSync throws if ANY path component does not exist, and the target file
+  // legitimately may not exist yet (it is created lazily on first flush). So we
+  // canonicalize the DEEPEST EXISTING ANCESTOR of `resolved` (walking up until a
+  // realpathSync succeeds — at worst the root, which always exists), then re-attach
+  // the non-existent tail lexically. The resulting canonical path is what the fs
+  // would actually touch, with every existing symlink resolved.
+  function canonicalizeWithinRoot(target) {
+    // Resolve the root itself canonically (the root always exists). If the root
+    // is itself reached through a symlink, every contained path must be compared
+    // against the canonical root, not the lexical one.
+    let canonicalRoot;
+    try {
+      canonicalRoot = realpathSync(root);
+    } catch {
+      // Can't canonicalize the root (extraordinarily unlikely); fall back to the
+      // lexical root so we still perform a containment check rather than skipping.
+      canonicalRoot = root;
+    }
+
+    // Walk up from `target` to the nearest existing ancestor, collecting the
+    // non-existent tail segments so we can re-append them after realpathSync.
+    const tail = [];
+    let probe = target;
+    for (;;) {
+      try {
+        const realProbe = realpathSync(probe);
+        // Re-attach any non-existent tail segments (lexically; they can't be
+        // symlinks because they don't exist yet).
+        const canonical = tail.length ? resolve(realProbe, ...tail) : realProbe;
+        return { canonical, canonicalRoot };
+      } catch {
+        const parent = dirname(probe);
+        if (parent === probe) {
+          // Reached the filesystem root without finding an existing ancestor
+          // (should be impossible since `root` exists); give up canonicalizing.
+          return { canonical: target, canonicalRoot };
+        }
+        tail.unshift(probe.slice(parent.length + 1)); // the basename segment
+        probe = parent;
+      }
+    }
+  }
+
+  const { canonical, canonicalRoot } = canonicalizeWithinRoot(resolved);
+  const canonRel = relative(canonicalRoot, canonical);
+  if (canonRel === '' || canonRel.startsWith('..') || isAbsolute(canonRel)) {
+    throw new Error(
+      `createMemory: path escapes project root (after resolving symlinks): ` +
+        `${canonical} is not within ${canonicalRoot}`,
     );
   }
 
@@ -125,6 +239,40 @@ export function createMemory({ path: filePath, transform, maxBytes, appendLog = 
     typeof transform?.onWrite === 'function' ? transform.onWrite : (s) => s;
   const onRead =
     typeof transform?.onRead === 'function' ? transform.onRead : (s) => s;
+
+  // ROUND-TRIP PROBE: a non-inverse onRead/onWrite pair silently corrupts the
+  // store — onWrite encodes bytes nothing can decode back, so every reload
+  // returns {} and the next write erases the data. The contract says onRead MUST
+  // be the inverse of onWrite, so when a transform is supplied we ASSERT it here
+  // at construction (cheap, one-time) instead of discovering the corruption at
+  // the next process start. We probe with a representative JSON sentinel that
+  // exercises strings/numbers/arrays/nested objects/unicode. A throwing transform
+  // is also a failure (caught and re-reported). Identity transforms (no custom
+  // onWrite/onRead) trivially round-trip and need no probe.
+  if (typeof transform?.onWrite === 'function' || typeof transform?.onRead === 'function') {
+    const sentinel = JSON.stringify({
+      __ccpProbe: 'round-trip',
+      n: 42,
+      list: [1, 2, 3],
+      nested: { ok: true, s: 'héllo/\\"☃' },
+    });
+    let roundTripped;
+    try {
+      roundTripped = onRead(onWrite(sentinel));
+    } catch (err) {
+      throw new Error(
+        `createMemory: transform onRead(onWrite(x)) threw — onRead must be the ` +
+          `inverse of onWrite: ${err?.message ?? err}`,
+      );
+    }
+    if (roundTripped !== sentinel) {
+      throw new Error(
+        `createMemory: transform is not a round-trip — onRead(onWrite(x)) !== x. ` +
+          `onRead must be the exact inverse of onWrite or the store will be ` +
+          `silently corrupted on the next reload.`,
+      );
+    }
+  }
 
   /** @type {Record<string, any> | null} cached store; null until first load. */
   let cache = null;
@@ -242,8 +390,12 @@ export function createMemory({ path: filePath, transform, maxBytes, appendLog = 
     mkdirSync(dirname(logPath), { recursive: true });
     const tmp = `${logPath}.${pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
     try {
-      writeFileSync(tmp, onWrite(JSON.stringify({ snap: cache })) + '\n', { mode: FILE_MODE, encoding: 'utf8' });
+      // Durable temp write (fsync data) before the atomic rename, then fsync the
+      // directory so the rename survives a crash — same crash-safety contract as
+      // writeToDisk (see writeFileDurable's header).
+      writeFileDurable(tmp, onWrite(JSON.stringify({ snap: cache })) + '\n');
       renameSync(tmp, logPath);
+      fsyncDir(dirname(logPath));
       chmodSync(logPath, FILE_MODE);
     } catch (err) {
       try { rmSync(tmp, { force: true }); } catch { /* ignore cleanup failure */ }
@@ -296,8 +448,49 @@ export function createMemory({ path: filePath, transform, maxBytes, appendLog = 
         return {};
       }
       return parsed;
-    } catch {
-      // Missing/corrupt file → empty store (matches prior behaviour).
+    } catch (err) {
+      // DISTINGUISH "missing" FROM "corrupt". Collapsing both to a silent {} is
+      // dangerous: a parse/read failure of an EXISTING file looks identical to a
+      // fresh start, so the very next write erases the (possibly recoverable)
+      // bytes. ENOENT genuinely means "no file yet" → silent {}. Anything else
+      // (parse error, decode/onRead throw, EACCES, …) on a file that exists is a
+      // corruption signal: quarantine the bad bytes to a sidecar before we lose
+      // them, warn UNCONDITIONALLY (not debug-gated), and emit a telemetry event.
+      if (err && err.code === 'ENOENT') {
+        return {}; // no file yet → empty store, silently (the normal first-run path).
+      }
+      // Best-effort: only quarantine if the file actually exists (a non-ENOENT
+      // error could also be e.g. a transient stat race; statSync guards that).
+      let existed = false;
+      try {
+        statSync(resolved);
+        existed = true;
+      } catch {
+        /* file vanished between read and here → nothing to quarantine */
+      }
+      if (existed) {
+        const quarantine = `${resolved}.corrupt-${Date.now()}`;
+        try {
+          renameSync(resolved, quarantine);
+          console.warn(
+            `createMemory: ${resolved} is unreadable/corrupt (${err?.message ?? err}); ` +
+              `quarantined to ${quarantine} and starting from an empty store.`,
+          );
+        } catch (qErr) {
+          // Couldn't move it aside (perms?). Still warn loudly — the next write
+          // may clobber it, but we must not throw out of a load.
+          console.warn(
+            `createMemory: ${resolved} is unreadable/corrupt (${err?.message ?? err}) ` +
+              `and could NOT be quarantined (${qErr?.message ?? qErr}); starting from an empty store.`,
+          );
+        }
+      } else {
+        console.warn(
+          `createMemory: ${resolved} could not be read (${err?.message ?? err}); ` +
+            `starting from an empty store.`,
+        );
+      }
+      host.emit('memory.corrupt', { path: resolved });
       return {};
     }
   }
@@ -319,9 +512,71 @@ export function createMemory({ path: filePath, transform, maxBytes, appendLog = 
   // that outgrows that cap should pass { appendLog: true } to createMemory(),
   // which persists O(delta) NDJSON records (see appendDelta/compactLog below) and
   // only pays the O(store) rewrite at compaction time.
+  // CROSS-PROCESS MUTUAL EXCLUSION for the read-merge-write critical section.
+  //
+  // The merge below has a TOCTOU window: we stat → maybe re-read+merge → rename.
+  // A concurrent process whose write lands inside that window (including the
+  // brand-new foreign keys the merge promises to preserve) would be silently
+  // clobbered, because we re-read the disk state ONCE and then rename over
+  // whatever is there at the end. An exclusive lockfile around the whole section
+  // serializes writers so each one sees a stable disk state for the duration of
+  // its merge.
+  //
+  // Lock = openSync(path + '.lock', 'wx') (O_CREAT|O_EXCL → fails with EEXIST if
+  // it already exists). On EEXIST we treat a lock older than LOCK_STALE_MS as a
+  // crashed-writer leftover: remove it and retry ONCE. If we still can't get it,
+  // we fall back to the (best-effort, unlocked) write rather than hanging or
+  // throwing — correctness degrades to the prior behaviour, never a deadlock.
+  const lockPath = `${resolved}.lock`;
+
+  /** @returns {number|null} an open fd for the held lock, or null if not acquired. */
+  function acquireLock() {
+    try {
+      return openSync(lockPath, 'wx', FILE_MODE);
+    } catch (err) {
+      if (!err || err.code !== 'EEXIST') return null; // unexpected → no lock.
+      // Lock exists: steal it only if it is stale (older than LOCK_STALE_MS).
+      try {
+        const lockStat = statSync(lockPath);
+        if (Date.now() - lockStat.mtimeMs > LOCK_STALE_MS) {
+          rmSync(lockPath, { force: true });
+          // Retry exactly once after removing the stale lock.
+          return openSync(lockPath, 'wx', FILE_MODE);
+        }
+      } catch {
+        /* stat/rm/retry race lost to another writer → treat as not acquired */
+      }
+      return null;
+    }
+  }
+
+  /** Release the lock: close the fd and remove the lockfile, both best-effort. */
+  function releaseLock(fd) {
+    try { closeSync(fd); } catch { /* ignore */ }
+    try { rmSync(lockPath, { force: true }); } catch { /* ignore */ }
+  }
+
   function writeToDisk() {
     mkdirSync(dirname(resolved), { recursive: true });
 
+    // Acquire the cross-process lock for the read-merge-write critical section.
+    // If we can't get it (a healthy concurrent writer holds it), fall back to an
+    // unlocked best-effort write — we log the contention but never hang/throw.
+    const lockFd = acquireLock();
+    if (lockFd === null) {
+      host.emit('memory.lock.contended', { path: resolved });
+    }
+    try {
+      writeToDiskLocked();
+    } finally {
+      if (lockFd !== null) releaseLock(lockFd);
+    }
+  }
+
+  // The actual read-merge-write body. Runs under the lockfile when one could be
+  // acquired (the common case); otherwise it still runs (best-effort) so a write
+  // is never simply dropped.
+  function writeToDiskLocked() {
     // CROSS-PROCESS LOST-WRITE SAFETY. If the on-disk file's mtime is NEWER than
     // what we loaded, another process wrote it after us. Blindly writing our cache
     // would drop their keys, so we re-read the fresher disk store and merge.
@@ -383,12 +638,14 @@ export function createMemory({ path: filePath, transform, maxBytes, appendLog = 
     const tmp = `${resolved}.${pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
     try {
       // onWrite maps the serialized JSON to the bytes actually persisted
-      // (identity by default → plaintext JSON).
-      writeFileSync(tmp, onWrite(JSON.stringify(cache, null, 2)), {
-        mode: FILE_MODE,
-        encoding: 'utf8',
-      });
+      // (identity by default → plaintext JSON). writeFileDurable fsyncs the temp
+      // file's data to stable storage BEFORE we rename it over the target, so a
+      // crash can't leave a renamed-but-empty/garbage file (atomicity alone does
+      // not give durability — see writeFileDurable's header).
+      writeFileDurable(tmp, onWrite(JSON.stringify(cache, null, 2)));
       renameSync(tmp, resolved);
+      // fsync the directory so the rename itself is durable across a crash.
+      fsyncDir(dirname(resolved));
       // Defensive: ensure the live file is 0600 regardless of any prior perms.
       chmodSync(resolved, FILE_MODE);
       // Record the mtime we just produced as our new "loaded" baseline so a

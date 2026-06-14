@@ -629,8 +629,12 @@ test('tryAcquireSwap grants a token, refuses a second scope, releases the lock',
 
   // While A holds the lock, B is refused.
   assert.equal(tryAcquireSwap(scopeB), null, 'second scope refused while A holds the lock');
-  // Re-acquire from the SAME scope is allowed (idempotent ownership).
-  assert.ok(tryAcquireSwap(scopeA), 'same scope can re-acquire');
+  // Re-acquire from the SAME scope returns the SAME memoized token (idempotent
+  // ownership), NOT a fresh independent one. SOUNDNESS FIX: there is a single
+  // non-refcounted lockOwner; a fresh token over that shared lock state is unsound
+  // — releasing one token would free the lock while the other still believes it
+  // owns it, letting a different scope acquire while the first can still swap().
+  assert.equal(tryAcquireSwap(scopeA), tokA, 'same scope re-acquire returns the SAME token');
 
   tokA.swap('PERSONA_A');
   assert.equal(globalThis.__ccpSystemPromptOverride, 'PERSONA_A');
@@ -645,6 +649,37 @@ test('tryAcquireSwap grants a token, refuses a second scope, releases the lock',
   // Now B can acquire.
   const tokB = tryAcquireSwap(scopeB);
   assert.ok(tokB, 'B acquires after A released');
+  tokB.release();
+});
+
+// FIX #2 regression: a same-scope re-acquire must NOT mint a fresh independent
+// token over the single non-refcounted lock. Acquire twice (same scope), release
+// ONCE — the lock must remain held (no other scope can acquire) as long as a live
+// token exists, and only an actual release frees it.
+test('tryAcquireSwap re-acquire is idempotent — releasing one view does not leak the lock', async () => {
+  resetGlobals();
+  captureBus();
+  globalThis.__ccpSystemPromptOverride = 'BASE';
+  globalThis.__ccpSetSystemPrompt = (s) => { globalThis.__ccpSystemPromptOverride = s; };
+  globalThis.__ccpGetSystemPrompt = () => globalThis.__ccpSystemPromptOverride ?? null;
+
+  const scopeA = createHandoffScope();
+  const scopeB = createHandoffScope();
+
+  const tok1 = tryAcquireSwap(scopeA);
+  const tok2 = tryAcquireSwap(scopeA); // same scope re-acquire
+  assert.equal(tok1, tok2, 're-acquire returns the SAME token object (idempotent ownership)');
+
+  // Releasing the (single) token frees the lock exactly once — there is no second
+  // independent token whose release could have prematurely freed it while the
+  // other still believed it owned the slot.
+  tok1.release();
+  assert.equal(tok1.owned, false, 'token no longer owns the lock after release');
+  assert.equal(tok2.owned, false, 'the aliased view reflects the same released state');
+
+  // Now — and only now — a DIFFERENT scope can acquire.
+  const tokB = tryAcquireSwap(scopeB);
+  assert.ok(tokB, 'lock acquirable by another scope only after the live token released');
   tokB.release();
 });
 
@@ -740,6 +775,52 @@ test('swap restricts the live tool surface to the agent tools allowlist and rest
   assert.equal(restoreSystemPromptIn(scope), true);
   assert.equal(globalThis.__ccpSystemPromptOverride, 'BASE', 'persona reverted');
   assert.ok(names().includes('Bash'), 'hidden tool re-added on revert');
+});
+
+// FIX #1 regression: restore() must attempt the (fallible) write BEFORE popping.
+// If the host writer throws on the restore write, the stack entry, the hidden
+// tools, and the depth must all be INTACT (no partial corruption) and restore()
+// must return false. A pop-before-write ordering would strand the tools hidden
+// and wrongly decrement depth while leaving the persona NOT restored.
+test('restore() leaves stack/tools/depth intact when the restore write throws', async () => {
+  resetGlobals();
+  captureBus();
+  // Live slot writer: succeeds for the swap-IN value, but THROWS when asked to
+  // write back the prior 'BASE' prompt (simulates a wedged host on the restore
+  // write specifically).
+  globalThis.__ccpSystemPromptOverride = 'BASE';
+  globalThis.__ccpSetSystemPrompt = (s) => {
+    if (s === 'BASE') throw new Error('writer wedged on restore');
+    globalThis.__ccpSystemPromptOverride = s;
+  };
+  globalThis.__ccpGetSystemPrompt = () => globalThis.__ccpSystemPromptOverride ?? null;
+  // Seed a host tool the swap will hide so we can prove tools are NOT stranded.
+  globalThis.__ccpRawTools.push({ name: 'Bash', call: async () => [] });
+
+  const reg = createAgentScope();
+  defineAgentIn(reg, { name: 'rdr', systemPrompt: 'RDR', tools: ['Read'] });
+  const scope = createHandoffScope();
+  const define = createDefineHandoff({ scope, getAgent: (n) => getAgentIn(reg, n), defineTool });
+
+  await define({ target: 'rdr', mode: 'swap' }).execute({ task: 'go' });
+  assert.equal(globalThis.__ccpSystemPromptOverride, 'RDR', 'persona swapped in');
+  assert.equal(swapDepthIn(scope), 1, 'one owned entry after swap');
+  const names = () => globalThis.__ccpRawTools.map((t) => t.name);
+  assert.ok(!names().includes('Bash'), 'Bash hidden by the swap');
+
+  // The restore write throws → restore() returns false WITHOUT mutating state.
+  const ok = restoreSystemPromptIn(scope);
+  assert.equal(ok, false, 'restore returns false when the writer throws');
+  assert.equal(swapDepthIn(scope), 1, 'depth NOT decremented on a failed restore');
+  assert.ok(!names().includes('Bash'), 'hidden tool NOT stranded-restored — entry intact');
+  assert.equal(globalThis.__ccpSystemPromptOverride, 'RDR', 'persona unchanged (write never landed)');
+
+  // Heal the host and prove the SAME entry can still be reverted (no corruption).
+  globalThis.__ccpSetSystemPrompt = (s) => { globalThis.__ccpSystemPromptOverride = s; };
+  assert.equal(restoreSystemPromptIn(scope), true, 'restore succeeds once the writer recovers');
+  assert.equal(swapDepthIn(scope), 0, 'entry popped only after the write landed');
+  assert.equal(globalThis.__ccpSystemPromptOverride, 'BASE', 'persona reverted to BASE');
+  assert.ok(names().includes('Bash'), 'hidden tool re-added on the successful revert');
 });
 
 test('swap with a wildcard / empty tools allowlist does NOT restrict the live surface', async () => {
@@ -943,6 +1024,97 @@ test('drift guard honors a contract registry that populates AFTER the first swap
   const res2 = await handle.execute({ task: 'x' });
   assert.match(res2, /failed:.*v1 < required v2/, 'late-registered drift is enforced');
   assert.equal(globalThis.__ccpSystemPromptOverride, 'ORIGINAL', 'drifted write refused — slot untouched');
+});
+
+// FIX #3 regression: the drift guard must NOT run on the restore-to-prior write.
+// Swap succeeds (contract clean), THEN the contract drifts mid-session; reverting
+// to the already-validated prior persona must still succeed — a newly-drifted
+// contract must never wedge the back-out path. The forward swap-in write keeps
+// the check (covered by the drift tests above).
+test('restore succeeds even when the systemPrompt contract drifts AFTER a successful swap', async () => {
+  resetGlobals();
+  __resetSystemPromptDriftGuardForTests();
+  captureBus();
+  globalThis.__ccpSystemPromptOverride = 'BASE';
+  globalThis.__ccpSetSystemPrompt = (s) => { globalThis.__ccpSystemPromptOverride = s; };
+  globalThis.__ccpGetSystemPrompt = () => globalThis.__ccpSystemPromptOverride ?? null;
+
+  const reg = createAgentScope();
+  defineAgentIn(reg, { name: 'drifter', systemPrompt: 'DRIFTER' });
+  const scope = createHandoffScope();
+  const define = createDefineHandoff({ scope, getAgent: (n) => getAgentIn(reg, n), defineTool });
+
+  // Forward swap-in: contract clean (unregistered → fail-open) → succeeds.
+  const res = await define({ target: 'drifter', mode: 'swap' }).execute({ task: 'x' });
+  assert.match(res, /persona swapped/i);
+  assert.equal(globalThis.__ccpSystemPromptOverride, 'DRIFTER', 'persona swapped in');
+
+  // Now the contract DRIFTS mid-session. A forward write would be refused; the
+  // restore-to-prior write must NOT be (skipContractCheck on the back-out path).
+  globalThis.__ccpInspectContracts = () => [{ name: 'systemPrompt', version: 1, producer: 'p', shape: [] }];
+  globalThis.__ccpRequire = (name) => {
+    if (name === 'systemPrompt') throw new Error('[ccp:contract] systemPrompt v1 < required v2');
+    return undefined;
+  };
+
+  assert.equal(restoreSystemPromptIn(scope), true, 'restore is not blocked by a freshly-drifted contract');
+  assert.equal(globalThis.__ccpSystemPromptOverride, 'BASE', 'reverted to the prior known-good persona');
+  assert.equal(swapDepthIn(scope), 0, 'entry popped after the successful restore');
+});
+
+// FIX #4 regression: the out-of-order-restore warning is rate-limited PER scope
+// pair, not muted process-wide by a one-shot latch. A benign skip for one pair
+// must NOT silence a later, distinct (dangerous) pair — each warns once, and the
+// bus event fires every time regardless.
+test('out-of-order restore warns once per scope pair, not once per process', async () => {
+  resetGlobals();
+  const events = captureBus();
+  globalThis.__ccpSystemPromptOverride = 'BASE';
+  globalThis.__ccpSetSystemPrompt = (s) => { globalThis.__ccpSystemPromptOverride = s; };
+  globalThis.__ccpGetSystemPrompt = () => globalThis.__ccpSystemPromptOverride ?? null;
+
+  const regA = createAgentScope();
+  const regB = createAgentScope();
+  const regC = createAgentScope();
+  defineAgentIn(regA, { name: 'pa', systemPrompt: 'PA' });
+  defineAgentIn(regB, { name: 'pb', systemPrompt: 'PB' });
+  defineAgentIn(regC, { name: 'pc', systemPrompt: 'PC' });
+  const scopeA = createHandoffScope();
+  const scopeB = createHandoffScope();
+  const scopeC = createHandoffScope();
+  const defA = createDefineHandoff({ scope: scopeA, getAgent: (n) => getAgentIn(regA, n), defineTool });
+  const defB = createDefineHandoff({ scope: scopeB, getAgent: (n) => getAgentIn(regB, n), defineTool });
+  const defC = createDefineHandoff({ scope: scopeC, getAgent: (n) => getAgentIn(regC, n), defineTool });
+
+  // A, then B, then C swap (C on top).
+  await defA({ target: 'pa', mode: 'swap' }).execute({ task: 't' });
+  await defB({ target: 'pb', mode: 'swap' }).execute({ task: 't' });
+  await defC({ target: 'pc', mode: 'swap' }).execute({ task: 't' });
+
+  const warnings = [];
+  const realWarn = console.warn;
+  console.warn = (msg) => { warnings.push(msg); };
+  try {
+    // Pair (C, A): out-of-order. Warns once for this pair; repeat is rate-limited.
+    assert.equal(restoreSystemPromptIn(scopeA), false);
+    assert.equal(restoreSystemPromptIn(scopeA), false);
+    // A DIFFERENT dangerous pair (C, B) must STILL warn — not muted by the first.
+    assert.equal(restoreSystemPromptIn(scopeB), false);
+  } finally {
+    console.warn = realWarn;
+  }
+
+  assert.equal(warnings.length, 2, 'one warning per distinct scope pair (not 1, not 3)');
+  // The bus event fires for EVERY skipped restore (3 calls), unconditionally.
+  assert.equal(topics(events).filter((t) => t === 'handoff.restore.skipped').length, 3,
+    'restore.skipped bus event fires on every out-of-order restore');
+
+  // Clean up the stack (LIFO).
+  console.warn = () => {};
+  restoreSystemPromptIn(scopeC);
+  restoreSystemPromptIn(scopeB);
+  restoreSystemPromptIn(scopeA);
+  console.warn = realWarn;
 });
 
 // ── disposeHandoffScope tears down swap footprint, idempotent ─────────────────
