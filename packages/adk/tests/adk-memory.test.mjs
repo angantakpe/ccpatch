@@ -34,7 +34,8 @@ import {
 } from 'node:fs';
 import { join, relative } from 'node:path';
 import { tmpdir } from 'node:os';
-import { cwd, platform } from 'node:process';
+import { cwd, platform, execPath } from 'node:process';
+import { spawn } from 'node:child_process';
 
 import { createMemory } from '../memory.mjs';
 
@@ -856,4 +857,73 @@ test('an existing file failing with an OS access code (EACCES) is NOT quarantine
     warnings.some((w) => /not corruption/i.test(w)),
     'warned that the file was left in place (not corruption)',
   );
+});
+
+// ── cross-process concurrent writers (lock + merge) ───────────────────────────
+
+// A standalone writer process: open the SAME store, write `rounds` batches of
+// `perRound` keys (flushing between rounds so writers genuinely interleave and
+// contend on the lockfile), then exit. Imports the package memory.mjs by URL.
+const WRITER_SRC = `
+const [, , modUrl, file, prefix, roundsStr, perRoundStr] = process.argv;
+const rounds = Number(roundsStr), perRound = Number(perRoundStr);
+const { createMemory } = await import(modUrl);
+const mem = createMemory({ path: file });
+for (let r = 0; r < rounds; r++) {
+  for (let i = 0; i < perRound; i++) mem.set(prefix + '-' + r + '-' + i, { p: prefix, r, i });
+  await mem.flush();
+}
+`;
+
+function runWriter(workerPath, modUrl, file, prefix, rounds, perRound, root) {
+  return new Promise((res, rej) => {
+    const cp = spawn(
+      execPath,
+      [workerPath, modUrl, file, prefix, String(rounds), String(perRound)],
+      { cwd: root, stdio: ['ignore', 'ignore', 'pipe'] }, // child cwd = project root for the path sandbox
+    );
+    let errOut = '';
+    cp.stderr.on('data', (d) => { errOut += d; });
+    cp.on('error', rej);
+    cp.on('exit', (code) =>
+      code === 0 ? res() : rej(new Error(`writer ${prefix} exited ${code}: ${errOut}`)));
+  });
+}
+
+test('concurrent writers across processes preserve every key (lockfile + merge)', async () => {
+  const dir = freshDir();
+  const file = join(dir, 'concurrent.json');
+  const workerPath = join(dir, 'writer.mjs');
+  writeFileSync(workerPath, WRITER_SRC, 'utf8');
+  const modUrl = new URL('../memory.mjs', import.meta.url).href;
+
+  const WRITERS = 5;
+  const ROUNDS = 5;
+  const PER_ROUND = 8; // 40 keys per writer
+
+  // Spawn all writers concurrently so they actually contend on the lock.
+  await Promise.all(
+    Array.from({ length: WRITERS }, (_, w) =>
+      runWriter(workerPath, modUrl, file, `w${w}`, ROUNDS, PER_ROUND, cwd())),
+  );
+
+  // EVERY key written by EVERY process must survive — the lock + merge must not
+  // let one writer's atomic rename clobber another's keys.
+  const final = JSON.parse(readFileSync(file, 'utf8'));
+  const missing = [];
+  for (let w = 0; w < WRITERS; w++) {
+    for (let r = 0; r < ROUNDS; r++) {
+      for (let i = 0; i < PER_ROUND; i++) {
+        const k = `w${w}-${r}-${i}`;
+        if (!Object.prototype.hasOwnProperty.call(final, k)) missing.push(k);
+      }
+    }
+  }
+  assert.deepEqual(missing, [], `no keys clobbered across ${WRITERS} concurrent writers`);
+  assert.equal(
+    Object.keys(final).length, WRITERS * ROUNDS * PER_ROUND,
+    'exactly every writer\'s keys present — none lost, none invented',
+  );
+  // The lockfile must be released (not left wedging the store).
+  assert.equal(existsSync(`${file}.lock`), false, 'lockfile released after all writers finished');
 });
