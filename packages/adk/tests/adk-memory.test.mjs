@@ -541,6 +541,63 @@ test('local clear() drops keys we knew but preserves a concurrent writer\'s fore
   assert.ok(!('alsoOurs' in onDisk), 'every key we knew about is wiped by the clear');
 });
 
+test("local clear() emits 'memory.clear.conflict' carrying the dropped key on a concurrent same-name write", async () => {
+  const dir = freshDir();
+  const file = join(dir, 'clear-conflict.json');
+  // Initial on-disk state this instance loads (and thus "knows about").
+  writeFileSync(file, JSON.stringify({ ours: 'v0', alsoOurs: 'v0' }, null, 2), 'utf8');
+
+  const mem = createMemory({ path: file });
+  assert.equal(mem.get('ours'), 'v0', 'loaded initial state (these keys are now known)');
+
+  mem.clear();
+  mem.set('reborn', 'fresh'); // a post-clear re-set: NOT a dropped foreign write.
+
+  // A concurrent process re-creates `ours` (a name we knew, so the clear drops
+  // it) and adds a brand-new foreign key `theirs` (survives the clear). Bump
+  // mtime so writeToDisk() takes the merge path.
+  writeFileSync(
+    file,
+    JSON.stringify({ ours: 'theirValue', theirs: 'external' }, null, 2),
+    'utf8',
+  );
+  const future = Date.now() / 1000 + 60;
+  utimesSync(file, future, future);
+
+  // Stub the host event bus (host.emit reads globalThis.__ccpBus live per call).
+  const events = [];
+  const prevBus = globalThis.__ccpBus;
+  globalThis.__ccpBus = { emit: (topic, payload) => events.push({ topic, payload }) };
+  try {
+    await mem.flush();
+  } finally {
+    globalThis.__ccpBus = prevBus;
+  }
+
+  // The conflict is surfaced (not silently dropped) and names the dropped key.
+  const conflicts = events.filter((e) => e.topic === 'memory.clear.conflict');
+  const droppedKeys = conflicts.map((e) => e.payload?.key);
+  assert.ok(
+    droppedKeys.includes('ours'),
+    "emitted 'memory.clear.conflict' carrying the dropped key 'ours'",
+  );
+  assert.ok(
+    conflicts.every((e) => e.payload?.path === file),
+    'every conflict event carries the store path',
+  );
+  // A foreign key the writer introduced is NOT a conflict (it survives the clear).
+  assert.ok(!droppedKeys.includes('theirs'), 'a surviving foreign key is not reported as a conflict');
+  // A post-clear re-set of a known name is NOT a dropped write (it lands), so it
+  // must not be reported as a conflict.
+  assert.ok(!droppedKeys.includes('reborn'), 'a post-clear re-set() is not reported as a conflict');
+
+  // Drop semantics are unchanged: the known key is still wiped on disk.
+  const onDisk = JSON.parse(readFileSync(file, 'utf8'));
+  assert.ok(!('ours' in onDisk), 'drop semantics preserved: the known key is still wiped');
+  assert.equal(onDisk.theirs, 'external', 'the foreign key still survives');
+  assert.equal(onDisk.reborn, 'fresh', 'the post-clear set() still lands');
+});
+
 // ── optional encryption/redaction transform hook ──────────────────────────────
 
 test('transform { onWrite, onRead } round-trips through disk (base64)', async () => {
