@@ -459,33 +459,79 @@ function restrictLiveTools(allow) {
   if (!Array.isArray(raw)) return null;
   const permit = new Set(allow);
   for (const k of SWAP_TOOL_KEEP) permit.add(k);
-  const removed = [];
-  // Walk back-to-front so splices don't disturb not-yet-visited indices.
-  for (let i = raw.length - 1; i >= 0; i--) {
-    const t = raw[i];
-    if (t && typeof t.name === 'string' && !permit.has(t.name)) {
-      removed.push(t);
-      raw.splice(i, 1);
+  // Collect in a read-only pass FIRST so removal (which may go through the gated
+  // registrar and mutate the array) can't disturb the walk.
+  const removed = raw.filter((t) => t && typeof t.name === 'string' && !permit.has(t.name));
+  if (!removed.length) return null;
+  for (const t of removed) removeLiveTool(raw, t.name);
+  return removed;
+}
+
+/**
+ * Remove a tool from the LIVE surface via the nonce-gated unregistrar when the
+ * host exposes it — the SAME sanctioned route the tool-registry uses — falling
+ * back to a direct array splice only for bare-array hosts / test stubs. This
+ * keeps swap's tool hiding consistent with the ADK's nonce-gating discipline
+ * instead of always splicing __ccpRawTools directly.
+ * @param {Array<object>} raw  the live tool array (fallback splice target).
+ * @param {string} name
+ */
+function removeLiveTool(raw, name) {
+  if (host.hasUnregisterTool()) {
+    try {
+      // A defined (non-false) return means the gated registrar honored it.
+      if (host.callUnregisterTool(host.getDispatchNonce(), name) !== false) return;
+    } catch (_) {
+      /* gated path threw (e.g. rotated nonce) → fall back to a direct splice */
     }
   }
-  return removed.length ? removed : null;
+  const i = raw.findIndex((t) => t && t.name === name);
+  if (i >= 0) raw.splice(i, 1);
 }
 
 /**
  * Re-add tool objects previously hidden by restrictLiveTools() (the restore
- * half). Idempotent per name — never double-adds a tool that re-appeared
- * meanwhile. No-op for a null/empty list or an absent live array.
+ * half), through the gated registrar when present (mirrors removeLiveTool).
+ * Idempotent per name — never double-adds a tool that re-appeared meanwhile.
+ * No-op for a null/empty list; if the live array vanished between swap and
+ * restore the hidden tools cannot be re-added — that desync is made OBSERVABLE
+ * via a bus event rather than silently stranding them.
  * @param {Array<object>|null|undefined} removed
  */
 function restoreLiveTools(removed) {
   if (!Array.isArray(removed) || !removed.length) return;
   const raw = host.rawTools();
-  if (!Array.isArray(raw)) return;
+  if (!Array.isArray(raw)) {
+    busEmit('handoff.tools.restore.skipped', {
+      count: removed.length,
+      names: removed.map((t) => (t && t.name) || null),
+      reason: 'live tool array unavailable at restore time',
+    });
+    return;
+  }
   for (const t of removed) {
     if (t && typeof t.name === 'string' && !raw.some((x) => x && x.name === t.name)) {
-      raw.push(t);
+      addLiveTool(raw, t);
     }
   }
+}
+
+/**
+ * Re-register a previously-hidden tool through the nonce-gated registrar when the
+ * host exposes it, falling back to a direct array push for bare-array stubs.
+ * Caller has already checked the tool is not currently present.
+ * @param {Array<object>} raw  the live tool array (fallback push target).
+ * @param {object} t
+ */
+function addLiveTool(raw, t) {
+  if (host.hasRegisterTool()) {
+    try {
+      if (host.callRegisterTool(host.getDispatchNonce(), t) !== false) return;
+    } catch (_) {
+      /* gated path threw → fall back to a direct push */
+    }
+  }
+  raw.push(t);
 }
 
 /**

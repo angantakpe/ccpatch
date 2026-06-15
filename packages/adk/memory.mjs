@@ -51,6 +51,19 @@ const LOCK_HARD_STALE_MS = 60_000; // 60 s
 const LOCK_RETRY_MS = 25;
 const LOCK_RETRY_ATTEMPTS = 40;
 
+// Keys that, when assigned via `obj[key] = value` (bracket assignment), would
+// mutate object internals instead of storing data — `obj['__proto__'] = {...}`
+// invokes the prototype setter and corrupts the target. The snapshot/JSON.parse
+// paths produce these as own DATA properties (harmless), but the delta-replay and
+// cross-process merge paths use bracket assignment from UNTRUSTED-at-rest file
+// content, so we filter these keys uniformly for defence-in-depth on a store that
+// may hold secrets and is shared cross-process by path.
+const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+/** @returns {boolean} true when `k` is a string safe to use as a store key. */
+function isSafeKey(k) {
+  return typeof k === 'string' && !UNSAFE_KEYS.has(k);
+}
+
 // ── durable write helpers ─────────────────────────────────────────────────────
 // DURABILITY: a bare writeFileSync(tmp) followed by renameSync gives ATOMICITY
 // (the rename swaps inodes atomically) but NOT durability — the file's data may
@@ -241,6 +254,24 @@ export function createMemory({ path: filePath, transform, maxBytes, appendLog = 
     );
   }
 
+  // MODE-DIVERGENCE GUARD: the two modes persist to DIFFERENT files for the same
+  // logical store — default mode to `<path>` (atomic rewrite), append-log mode to
+  // `<path>.log` (NDJSON deltas) — with no cross-mode merge. Opening a path in one
+  // mode while the OTHER mode's file already exists silently ignores that data.
+  // Warn once at construction so the divergence is observable, not a silent loss.
+  const exists = (p) => { try { statSync(p); return true; } catch { return false; } };
+  if (appendLog && exists(resolved)) {
+    console.warn(
+      `createMemory: opened ${resolved} in append-log mode, but a default-mode ` +
+        `store exists at ${resolved} — its contents will be IGNORED (modes don't merge).`,
+    );
+  } else if (!appendLog && exists(logPath)) {
+    console.warn(
+      `createMemory: opened ${resolved} in default mode, but an append-log store ` +
+        `exists at ${logPath} — its contents will be IGNORED (modes don't merge).`,
+    );
+  }
+
   // ENCRYPTION/REDACTION HOOK: callers may plug in a reversible
   // transform to map the serialized JSON to/from on-disk bytes (e.g. encrypt,
   // base64, redact). Default is identity → plaintext JSON (backward compatible).
@@ -362,9 +393,9 @@ export function createMemory({ path: filePath, transform, maxBytes, appendLog = 
       if (!rec || typeof rec !== 'object') continue;
       if (rec.snap && typeof rec.snap === 'object' && !Array.isArray(rec.snap)) {
         store = rec.snap; // a checkpoint replaces everything before it
-      } else if (rec.op === 'set' && typeof rec.key === 'string') {
+      } else if (rec.op === 'set' && isSafeKey(rec.key)) {
         store[rec.key] = rec.value;
-      } else if (rec.op === 'del' && typeof rec.key === 'string') {
+      } else if (rec.op === 'del' && isSafeKey(rec.key)) {
         delete store[rec.key];
       } else if (rec.op === 'clear') {
         store = {};
@@ -381,11 +412,27 @@ export function createMemory({ path: filePath, transform, maxBytes, appendLog = 
       mkdirSync(dirname(logPath), { recursive: true });
       let size = 0;
       try { size = statSync(logPath).size; } catch { /* no log yet */ }
-      if (size > capBytes) {
+      const line = onWrite(JSON.stringify(rec)) + '\n';
+      const recordBytes = Buffer.byteLength(line, 'utf8');
+      // Compact BEFORE appending if THIS record would push the log past the cap —
+      // previously the check was `size > capBytes`, which let the log overshoot by
+      // one whole record (and a single oversized value bypassed the cap entirely).
+      // compactLog() snapshots the live cache (which already reflects this
+      // mutation — set() updates cache before persist()), so no data is lost.
+      if (size + recordBytes > capBytes) {
+        // A single record larger than the whole cap can't be helped by compaction
+        // (the snapshot still contains the value) — the log will compact on every
+        // subsequent write. Make that observable rather than a silent cap-bypass.
+        if (recordBytes > capBytes && host.debug()) {
+          console.warn(
+            `createMemory: a single delta (${recordBytes}B) exceeds the ${capBytes}B cap — ` +
+              `the log will compact on every write for this store`,
+          );
+        }
         compactLog();
         return;
       }
-      appendFileSync(logPath, onWrite(JSON.stringify(rec)) + '\n', { mode: FILE_MODE, encoding: 'utf8' });
+      appendFileSync(logPath, line, { mode: FILE_MODE, encoding: 'utf8' });
       try { chmodSync(logPath, FILE_MODE); } catch { /* belt-and-suspenders */ }
       dirty = false;
       firstDirtyAt = -1;
@@ -407,7 +454,9 @@ export function createMemory({ path: filePath, transform, maxBytes, appendLog = 
       writeFileDurable(tmp, onWrite(JSON.stringify({ snap: cache })) + '\n');
       renameSync(tmp, logPath);
       fsyncDir(dirname(logPath));
-      chmodSync(logPath, FILE_MODE);
+      // Data already landed atomically — tolerate a post-rename chmod failure
+      // rather than reporting the write as failed (see writeToDisk).
+      try { chmodSync(logPath, FILE_MODE); } catch { /* perms best-effort post-rename */ }
     } catch (err) {
       try { rmSync(tmp, { force: true }); } catch { /* ignore cleanup failure */ }
       throw err;
@@ -704,7 +753,7 @@ export function createMemory({ path: filePath, transform, maxBytes, appendLog = 
             // cache (any post-clear re-set()s, which are also in dirtyKeys).
             const merged = {};
             for (const k of Object.keys(diskRaw)) {
-              if (!knownKeys.has(k)) merged[k] = diskRaw[k];
+              if (isSafeKey(k) && !knownKeys.has(k)) merged[k] = diskRaw[k];
             }
             for (const k of dirtyKeys) {
               if (Object.prototype.hasOwnProperty.call(cache, k)) merged[k] = cache[k];
@@ -745,7 +794,11 @@ export function createMemory({ path: filePath, transform, maxBytes, appendLog = 
       // fsync the directory so the rename itself is durable across a crash.
       fsyncDir(dirname(resolved));
       // Defensive: ensure the live file is 0600 regardless of any prior perms.
-      chmodSync(resolved, FILE_MODE);
+      // The data has ALREADY landed atomically (rename succeeded); a chmod failure
+      // (e.g. EPERM on a foreign-owned file) must NOT report the write as failed
+      // and trigger tmp cleanup of an already-renamed file. Tolerate it (the temp
+      // was created 0600, so the new inode is already owner-only).
+      try { chmodSync(resolved, FILE_MODE); } catch { /* perms best-effort post-rename */ }
       // Record the mtime we just produced as our new "loaded" baseline so a
       // subsequent same-instance write doesn't see its OWN write as concurrent.
       try {
@@ -877,6 +930,11 @@ export function createMemory({ path: filePath, transform, maxBytes, appendLog = 
     },
     set(key, value) {
       ensureLoaded();
+      // Reject keys that would mutate the cache object's internals (prototype
+      // pollution) instead of storing data — see UNSAFE_KEYS.
+      if (!isSafeKey(key)) {
+        throw new TypeError(`createMemory.set: refusing unsafe key "${key}" (reserved/prototype key).`);
+      }
       // Validate JSON-serializability SYNCHRONOUSLY, at the call site. The actual
       // persist happens later (debounced rewrite / append delta) where it
       // serializes the WHOLE cache — so a non-serializable value (cycle, BigInt,

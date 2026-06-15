@@ -927,3 +927,109 @@ test('concurrent writers across processes preserve every key (lockfile + merge)'
   // The lockfile must be released (not left wedging the store).
   assert.equal(existsSync(`${file}.lock`), false, 'lockfile released after all writers finished');
 });
+
+// ── append-log cap: no overshoot, single-huge value handled ───────────────────
+
+test('appendLog never overshoots the cap by a whole record (compacts before crossing)', async () => {
+  const dir = freshDir();
+  const file = join(dir, 'cap.json');
+  const CAP = 200;
+  const mem = createMemory({ path: file, appendLog: true, maxBytes: CAP });
+  // Re-set a SMALL fixed key set many times: the snapshot stays well under CAP
+  // while the delta log keeps growing, exercising the compaction threshold. The
+  // old `size > cap` check let the log overshoot to ~cap + one record; the fixed
+  // `size + recordBytes > cap` check compacts BEFORE crossing, so when the
+  // snapshot fits under the cap the log size never exceeds it.
+  for (let r = 0; r < 40; r++) {
+    for (const k of ['k0', 'k1', 'k2']) mem.set(k, 'v'.repeat(10) + r);
+  }
+  await mem.flush();
+
+  const logSize = statSync(`${file}.log`).size;
+  assert.ok(logSize <= CAP, `log never overshot the cap (${logSize}B <= ${CAP}B)`);
+
+  const reloaded = createMemory({ path: file, appendLog: true, maxBytes: CAP });
+  assert.equal(reloaded.keys().length, 3, 'keys replay correctly after cap-bounded compaction');
+  assert.equal(reloaded.get('k2'), 'v'.repeat(10) + 39, 'last write wins on replay');
+});
+
+test('appendLog handles a single value larger than the cap without losing it', async () => {
+  const dir = freshDir();
+  const file = join(dir, 'huge.json');
+  const CAP = 200;
+  const mem = createMemory({ path: file, appendLog: true, maxBytes: CAP });
+  const big = 'z'.repeat(CAP * 4); // one value several times the cap
+  mem.set('huge', big);
+  await mem.flush();
+
+  // The value is NOT dropped — it lives in a compacted snapshot checkpoint.
+  const reloaded = createMemory({ path: file, appendLog: true, maxBytes: CAP });
+  assert.equal(reloaded.get('huge'), big, 'oversized single value preserved via snapshot');
+});
+
+test('opening a path in the OTHER persistence mode warns about ignored data', async () => {
+  const dir = freshDir();
+  const file = join(dir, 'modes.json');
+
+  // 1) default-mode store on disk, then opened in append-log mode → warn.
+  const d = createMemory({ path: file });
+  d.set('a', 1);
+  await d.flush();
+
+  let realWarn = console.warn;
+  let warnings = [];
+  console.warn = (m) => warnings.push(String(m));
+  try {
+    createMemory({ path: file, appendLog: true });
+  } finally {
+    console.warn = realWarn;
+  }
+  assert.ok(warnings.some((w) => /append-log mode.*will be IGNORED/i.test(w)), 'warned on default→append-log');
+
+  // 2) append-log store on disk, then opened in default mode → warn.
+  const file2 = join(dir, 'modes2.json');
+  const a = createMemory({ path: file2, appendLog: true });
+  a.set('b', 2);
+  await a.flush();
+
+  warnings = [];
+  realWarn = console.warn;
+  console.warn = (m) => warnings.push(String(m));
+  try {
+    createMemory({ path: file2 });
+  } finally {
+    console.warn = realWarn;
+  }
+  assert.ok(warnings.some((w) => /default mode.*will be IGNORED/i.test(w)), 'warned on append-log→default');
+});
+
+// ── prototype-pollution hardening (untrusted file/log + user API) ─────────────
+
+test('set() refuses prototype-polluting keys', () => {
+  const dir = freshDir();
+  const mem = createMemory({ path: join(dir, 'proto.json') });
+  for (const k of ['__proto__', 'constructor', 'prototype']) {
+    assert.throws(() => mem.set(k, { polluted: true }), /unsafe key/, `set("${k}") rejected`);
+  }
+  // A normal key still works and nothing leaked onto Object.prototype.
+  mem.set('ok', 1);
+  assert.equal(mem.get('ok'), 1);
+  assert.equal({}.polluted, undefined, 'Object.prototype not polluted');
+});
+
+test('a crafted delta log with a __proto__ set op does not pollute the replayed store', () => {
+  const dir = freshDir();
+  const file = join(dir, 'evil.json');
+  // Hand-craft a delta log: a legit key plus a malicious __proto__ set op.
+  const log =
+    JSON.stringify({ op: 'set', key: 'safe', value: 1 }) + '\n' +
+    JSON.stringify({ op: 'set', key: '__proto__', value: { polluted: true } }) + '\n';
+  writeFileSync(`${file}.log`, log, 'utf8');
+
+  const mem = createMemory({ path: file, appendLog: true });
+  assert.equal(mem.get('safe'), 1, 'legit key replayed');
+  assert.equal(mem.get('polluted'), undefined, 'no leaked prototype key');
+  assert.equal({}.polluted, undefined, 'Object.prototype not polluted by replay');
+  // The store object itself must not have had its prototype swapped.
+  assert.equal(Object.getPrototypeOf(mem.snapshot()), Object.prototype, 'store prototype intact');
+});
