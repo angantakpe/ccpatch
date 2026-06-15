@@ -31,13 +31,16 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
 import { capabilities, useAgentBus } from '../index.mjs';
-import { ADK_CONTRACT_REQUIREMENTS, checkContract } from '../contracts.mjs';
+import {
+  ADK_CONTRACT_REQUIREMENTS, checkContract,
+  contractVerdict, __resetContractVerdictsForTests,
+} from '../contracts.mjs';
 import {
   defineToolIn, createToolScope, listToolsIn, toolStatusesIn,
-  defineTool, __resetDriftGuardForTests,
+  defineTool,
 } from '../tool-registry.mjs';
 import {
-  createHandoffScope, createDefineHandoff, __resetSystemPromptDriftGuardForTests,
+  createHandoffScope, createDefineHandoff,
 } from '../handoff.mjs';
 import { createAgentScope, defineAgentIn, getAgentIn } from '../agent.mjs';
 
@@ -64,15 +67,13 @@ function isolateGlobals() {
   const saved = {};
   for (const k of CCP_KEYS) saved[k] = globalThis[k];
   for (const k of CCP_KEYS) delete globalThis[k];
-  __resetDriftGuardForTests();
-  __resetSystemPromptDriftGuardForTests();
+  __resetContractVerdictsForTests(); // clears all central latches in one place
   return () => {
     for (const k of CCP_KEYS) {
       if (saved[k] === undefined) delete globalThis[k];
       else globalThis[k] = saved[k];
     }
-    __resetDriftGuardForTests();
-    __resetSystemPromptDriftGuardForTests();
+    __resetContractVerdictsForTests();
   };
 }
 
@@ -362,5 +363,128 @@ test('ADK contract pins match the in-repo producer registrations (drift fails CI
         `advertises [${shape.join(', ')}] — update the producer or the pin in packages/adk/contracts.mjs`,
       );
     }
+  }
+});
+
+// ── 5. centralized verdict: the single "drift → action" + latch policy ─────────
+//
+// REVIEW.md #3: the "latch only when proven via require, re-check otherwise"
+// rule used to live in two consumers (tool-registry.gatedPathTrusted +
+// handoff.assertSystemPromptContract). It now lives once in contractVerdict().
+// These tests pin that one policy directly so the consumers can stay thin.
+
+test('contractVerdict latches a require-proven ok ("trusted") and re-checks an unproven path ("proceed")', () => {
+  const restore = isolateGlobals();
+  try {
+    installRealRegistry();
+    provideCurrentContracts();
+
+    // First call: registered + require-proven → 'trusted', latched.
+    const first = contractVerdict('toolDispatch');
+    assert.equal(first.decision, 'trusted');
+    assert.equal(first.check.via, 'require', 'proven through __ccpRequire');
+
+    // Now BREAK the live contract (downgrade to v1). Because the prior call
+    // latched a require-proven verdict, the latch short-circuits and the broken
+    // contract is NOT re-detected — this is the intended "proven-good contract
+    // is fixed, stop re-probing" optimization.
+    globalThis.__ccpProvide('toolDispatch', {
+      version: 1, producer: 'expose_tool_dispatch',
+      shape: ['registerTool'], value: { registerTool: () => true },
+    });
+    assert.equal(contractVerdict('toolDispatch').decision, 'trusted',
+      'latched verdict short-circuits — a fixed proven-good contract is not re-probed');
+
+    // Reset the latch for THIS contract only → the now-stale contract is caught.
+    __resetContractVerdictsForTests('toolDispatch');
+    const after = contractVerdict('toolDispatch');
+    assert.equal(after.decision, 'refuse', 'post-reset, the downgraded contract is proven drift');
+    assert.match(after.reason, /v1 < required v2/);
+  } finally {
+    restore();
+  }
+});
+
+test('contractVerdict refuses proven drift WITHOUT latching — a recovered host re-checks', () => {
+  const restore = isolateGlobals();
+  try {
+    installRealRegistry();
+    globalThis.__ccpSetSystemPrompt = () => {};
+    // Stale v1 contract registered → proven drift.
+    globalThis.__ccpProvide('systemPrompt', {
+      version: 1, producer: 'expose_system_prompt',
+      shape: ['set', 'get', 'getNonce'],
+      value: { set: () => {}, get: () => null, getNonce: () => 'N' },
+    });
+    assert.equal(contractVerdict('systemPrompt').decision, 'refuse', 'drift refused');
+    // Drift is NOT latched: heal the contract (v2) and the next verdict trusts it.
+    globalThis.__ccpProvide('systemPrompt', {
+      version: 2, producer: 'expose_system_prompt',
+      shape: ['set', 'get', 'getNonce'],
+      value: { set: () => {}, get: () => null, getNonce: () => 'N' },
+    });
+    assert.equal(contractVerdict('systemPrompt').decision, 'trusted',
+      'a recovered host re-checks (drift was never latched) and now trusts');
+  } finally {
+    restore();
+  }
+});
+
+test('contractVerdict on an unregistered contract is "proceed" (fail-open) and is NOT latched', () => {
+  const restore = isolateGlobals();
+  try {
+    installRealRegistry(); // registry live, nothing provided
+    const before = contractVerdict('bus');
+    assert.equal(before.decision, 'proceed', 'nothing to prove → fail-open proceed');
+    assert.equal(before.check.status, 'unchecked');
+
+    // Because 'proceed' is never latched, registering a STALE contract afterward
+    // is still caught on the next verdict — a late-populating registry is honored.
+    // Advertise a non-empty shape that is MISSING the required 'emit' key (a
+    // reliable drift trigger via advertised metadata; note the registry coerces
+    // version 0 → 1, so version can't be used to force the gap here).
+    globalThis.__ccpBus = { on: () => {} };
+    globalThis.__ccpProvide('bus', {
+      version: 1, producer: 'event_bus', shape: ['on', 'topics'], value: { on: () => {} },
+    });
+    const drifted = contractVerdict('bus');
+    assert.equal(drifted.decision, 'refuse',
+      'a contract registered after a fail-open proceed is still evaluated');
+    assert.match(drifted.reason, /shape missing emit/);
+  } finally {
+    restore();
+  }
+});
+
+test('the two back-compat reset seams clear their own contract latch independently', () => {
+  // The per-module reset names still exist (tests import them); each maps to one
+  // contract in the central set, so resetting one must not clear the other.
+  const restore = isolateGlobals();
+  try {
+    installRealRegistry();
+    provideCurrentContracts();
+
+    // Latch both.
+    assert.equal(contractVerdict('toolDispatch').decision, 'trusted');
+    assert.equal(contractVerdict('systemPrompt').decision, 'trusted');
+
+    // Reset ONLY toolDispatch via the central seam.
+    __resetContractVerdictsForTests('toolDispatch');
+
+    // Break BOTH contracts at the source.
+    for (const name of ['toolDispatch', 'systemPrompt']) {
+      const producer = name === 'toolDispatch' ? 'expose_tool_dispatch' : 'expose_system_prompt';
+      const shape = name === 'toolDispatch' ? ['registerTool'] : ['set', 'get', 'getNonce'];
+      const value = name === 'toolDispatch'
+        ? { registerTool: () => true }
+        : { set: () => {}, get: () => null, getNonce: () => 'N' };
+      globalThis.__ccpProvide(name, { version: 1, producer, shape, value });
+    }
+
+    // toolDispatch was un-latched → drift caught; systemPrompt still latched → trusted.
+    assert.equal(contractVerdict('toolDispatch').decision, 'refuse', 'reset contract re-checks → drift');
+    assert.equal(contractVerdict('systemPrompt').decision, 'trusted', 'un-reset contract stays latched');
+  } finally {
+    restore();
   }
 });

@@ -17,7 +17,7 @@
  * forever.
  */
 
-import { checkContract } from './contracts.mjs';
+import { contractVerdict, __resetContractVerdictsForTests } from './contracts.mjs';
 import { host } from './host.mjs';
 
 /**
@@ -59,63 +59,44 @@ function debug(msg) {
 /**
  * Load-bearing drift guard for the gated injection path (call-site half). When
  * the typed contract registry is present AND advertises a 'toolDispatch'
- * contract, we positively re-validate it via checkContract('toolDispatch')
- * (contracts.mjs — the ADK's centralized pin table; v>=2, shape
- * ['registerTool'], routed through __ccpRequire when the helper is live)
- * BEFORE routing an injection through the (possibly drifted) __ccpRegisterTool
- * global. Proven drift → tryInject() fails closed.
+ * contract, the centralized verdict positively re-validates it (contracts.mjs —
+ * the ADK's pin table; v>=2, shape ['registerTool'], routed through
+ * __ccpRequire when the helper is live) BEFORE routing an injection through the
+ * (possibly drifted) __ccpRegisterTool global. Proven drift → tryInject() fails
+ * closed.
  *
- * Memoization is ASYMMETRIC ON PURPOSE (mirrors handoff.mjs's
- * assertSystemPromptContract): we latch `_driftChecked = true` ONLY once a
- * REGISTERED contract has positively validated — after that the gated path is
- * proven safe and re-consulting a fixed contract is pure overhead. The fail-OPEN
- * branches (no require/inspect helper, or no 'toolDispatch' contract registered
- * yet) are NOT latched, so a contract registry that populates AFTER the first
- * injection is still honored on a later one — previously a fail-open first call
- * latched the gated path trusted forever and a late-registered drifted contract
- * went undetected. Proven drift returns false WITHOUT latching, so a recovered
- * host re-checks. Fail-open keeps the bare-array / fake-registrar test stubs
- * working — they never register a contract.
+ * The "latch only when proven via require, re-check otherwise" memoization rule
+ * (previously duplicated here and in handoff.mjs's assertSystemPromptContract)
+ * now lives once in `contractVerdict()`. This site keeps only its *reaction*:
+ * 'refuse' → false; everything else ('trusted'/'proceed') → true. The fail-OPEN
+ * 'proceed' branch (no require/inspect helper, or no 'toolDispatch' contract
+ * registered yet) is the centralized non-latched path, so a registry that
+ * populates AFTER the first injection is still honored on a later one; proven
+ * drift is likewise non-latched so a recovered host re-checks. Fail-open keeps
+ * the bare-array / fake-registrar test stubs working — they never register a
+ * contract.
  *
  * @returns {boolean} true if the gated path is SAFE to use; false if drift proven.
  */
-let _driftChecked = false; // latched true ONLY after a registered contract validates.
 function gatedPathTrusted() {
-  if (_driftChecked) return true;
-
-  // Centralized pin: contracts.mjs requires 'toolDispatch' v>=2 with shape
-  // ['registerTool'] through __ccpRequire when the helper is live, falling back
-  // to the registry's advertised metadata otherwise.
-  const res = checkContract('toolDispatch');
-
-  // Nothing to prove → fail open, NOT latched (a late contract registry must
-  // still be honored on a later injection). Preserves bare-array / stub paths.
-  if (res.status === 'unchecked') return true;
-
-  if (res.status === 'drift') {
+  const v = contractVerdict('toolDispatch');
+  if (v.decision === 'refuse') {
     // Proven drift: the registered contract does NOT satisfy the ADK's pin.
-    // Refuse, but do NOT latch — a recovered host re-checks on the next inject.
-    debug(`[adk:tools] refusing injection — toolDispatch contract drift: ${res.reason}`);
+    debug(`[adk:tools] refusing injection — toolDispatch contract drift: ${v.reason}`);
     return false;
   }
-
-  // Positively validated a registered contract. Memoize ONLY when the actual
-  // value paths were probed through __ccpRequire — an advertised-metadata-only
-  // 'ok' (no __ccpRequire on the host) stays unlatched so a later-appearing
-  // require helper is still consulted.
-  if (res.via === 'require') _driftChecked = true;
-  return true;
+  return true; // 'trusted' (require-proven) or 'proceed' (nothing to prove / advertised-only)
 }
 
 /**
- * TEST SEAM ONLY. The drift guard above memoizes once a registered contract
- * validates; tests that exercise distinct contract-registry configurations
- * within one process need to clear that latch between cases. Not part of the
- * public ADK surface — do not surface in index.mjs / index.d.ts.
+ * TEST SEAM ONLY. Back-compat alias for the now-central
+ * __resetContractVerdictsForTests; clears the toolDispatch latch specifically so
+ * existing tests that import this name from the tool-registry keep working. Not
+ * part of the public ADK surface — do not surface in index.mjs / index.d.ts.
  * @returns {void}
  */
 export function __resetDriftGuardForTests() {
-  _driftChecked = false;
+  __resetContractVerdictsForTests('toolDispatch');
 }
 
 /**

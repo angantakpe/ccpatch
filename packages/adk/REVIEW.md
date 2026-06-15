@@ -49,18 +49,29 @@ guarded fire-and-forget emit that several modules hand-rolled. Covered by
 
 ## Known debt (not yet addressed)
 
-### 3. Contract-drift handling is centralized in data but duplicated in behavior
+### 3. Contract-drift handling is centralized in data but duplicated in behavior — ADDRESSED
 `contracts.mjs` made the *pins* single-source (`ADK_CONTRACT_REQUIREMENTS`), but
-each consumer re-implements the *reaction* differently and with a subtle,
+each consumer re-implemented the *reaction* differently and with a subtle,
 divergent memoization asymmetry:
 - `capabilities()` downgrades a boolean (`index.mjs`)
-- tool-registry latches `_driftChecked` only on the `via:'require'` path
-- handoff throws at the write site, with its **own** `_driftChecked` latch
+- tool-registry latched `_driftChecked` only on the `via:'require'` path
+- handoff threw at the write site, with its **own** `_driftChecked` latch
 
-The "latch only when proven via require, re-check otherwise" rule is correct but
-non-obvious and now lives in two places that can drift apart. **Direction:** move
-the latch + "drift → action" policy into `checkContract` (or the host port) so
-consumers branch on a single decided verdict.
+The "latch only when proven via require, re-check otherwise" rule was correct but
+non-obvious and lived in two places that could drift apart.
+
+**Fix applied:** the latch + "drift → action" decision moved into
+`contractVerdict(name)` in `contracts.mjs`, which returns one decided verdict —
+`'trusted'` (require-proven, latched in a single process-global `_trusted` set),
+`'refuse'` (proven drift, not latched), or `'proceed'` (nothing to prove /
+advertised-only, not latched). `gatedPathTrusted()` (tool-registry) and
+`assertSystemPromptContract()` (handoff) now hold only their *reaction* — false
+vs. throw on `'refuse'`, proceed otherwise — and no longer carry their own latch
+state. The two per-module reset seams (`__resetDriftGuardForTests`,
+`__resetSystemPromptDriftGuardForTests`) are kept as back-compat aliases over the
+central `__resetContractVerdictsForTests`. `capabilities()` / `useAgentBus()`
+intentionally keep calling raw `checkContract` (they re-probe every call and must
+never memoize). Covered by `tests/adk-contracts.test.mjs` §5.
 
 ### 4. Defensiveness is swallowing signal
 17 catch blocks in `memory.mjs`, ~12 in handoff, ~11 in tool-registry — much of it
