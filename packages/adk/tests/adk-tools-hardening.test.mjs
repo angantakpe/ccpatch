@@ -1297,3 +1297,54 @@ test('normalized collision applies ONLY to non-owned names: two ADK-owned tools 
     restore();
   }
 });
+
+// ── reserved-prefix namespace guard (COD-11) ──────────────────────────────────
+
+test('defineTool rejects a name in the reserved __ccp* host namespace at DEFINITION time (COD-11)', () => {
+  const restore = isolateGlobals();
+  try {
+    const raw = [];
+    globalThis.__ccpRawTools = raw; // a live registry so the throw is purely the name guard
+    const scope = createToolScope();
+
+    // A tool named into the __ccp* namespace could shadow an internal global.
+    assert.throws(
+      () => defineToolIn(scope, {
+        name: '__ccpRawTools', inputSchema: { type: 'object' }, execute: async () => 'x',
+      }),
+      /reserved tool name.*__ccp/,
+      'a __ccp*-prefixed tool name throws synchronously at define time',
+    );
+    // The throw is loud AND inert: nothing was injected.
+    assert.equal(raw.length, 0, 'a reserved-name define injected nothing');
+
+    // Prototype-pollution names are likewise reserved.
+    assert.throws(
+      () => defineToolIn(scope, { name: '__proto__', inputSchema: { type: 'object' }, execute: async () => 'x' }),
+      /reserved tool name/,
+      'a prototype-pollution tool name is rejected',
+    );
+  } finally {
+    restore();
+  }
+});
+
+test('defineTool accepts an ordinary name that merely contains (but does not start with) a reserved token (COD-11)', () => {
+  const restore = isolateGlobals();
+  try {
+    globalThis.__ccpRawTools = [];
+    const scope = createToolScope();
+    // Guard is prefix/exact-anchored: a normal name is unaffected even if "ccp"
+    // appears mid-string. This must NOT regress to a substring match.
+    let h;
+    assert.doesNotThrow(() => {
+      h = defineToolIn(scope, {
+        name: 'my__ccp_helper', inputSchema: { type: 'object' }, execute: async () => 'ok',
+      });
+    }, 'a name that only contains "__ccp" mid-string is allowed');
+    assert.ok(globalThis.__ccpRawTools.some((t) => t.name === 'my__ccp_helper'), 'the normal tool injected');
+    assert.equal(h.dispose(), true, 'and disposes cleanly');
+  } finally {
+    restore();
+  }
+});
