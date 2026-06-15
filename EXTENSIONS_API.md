@@ -69,15 +69,17 @@ tool/code-execution surface") for why the default is deny-all.
 
 ## policy_gate: host-driven behavior gate
 
-> **Status: ships disabled, no bundled consumer.** `policy_gate` is `enabled: false`
-> in `ccpatch.yml` and provides only the gate *mechanism* — it is policy-free and
-> inert until a host wires a consumer module. ccpatch does **not** bundle a
-> consumer; the gate is a platform-tier building block for downstream hosts that
-> own their own policy logic. The keep-vs-remove question (should ccpatch ship a
-> consumer-less gate at all?) is an **owner decision tracked in COD-15** — this
-> entry documents the gate so the decision is explicit rather than implicit. Do
-> not remove this patch without owner sign-off; it is a security-relevant
-> enforcement primitive.
+> **Status: ships disabled, opt-in via env (KEPT — COD-15).** `policy_gate` is
+> `enabled: false` in `ccpatch.yml` and provides only the gate *mechanism* — it is
+> policy-free and inert until a host wires a consumer module. The owner decision
+> (COD-15) is to **keep** the gate and ship a **canonical reference consumer** at
+> [`consumers/policy_gate.reference.cjs`](consumers/policy_gate.reference.cjs) —
+> a small, documented example you copy and edit, exercised end-to-end by
+> `tests/policy_gate_consumer.test.mjs`. The gate stays disabled-by-default
+> because loading a host module runs **arbitrary code** in the CLI process
+> (capability `exec`), so arming a policy is always an explicit operator opt-in via
+> `CCP_POLICY_GATE_MODULE`. Do not remove this patch without owner sign-off; it is
+> a security-relevant enforcement primitive.
 
 The `policy_gate` extension enforces two host-supplied checks **inside** the CLI
 process, on every surface (interactive and headless), so a host's server-side
@@ -92,8 +94,17 @@ policy engine can reach a raw `claude` session it otherwise couldn't:
 
 ### Wiring a consumer
 
+The fastest path is to **copy the shipped reference consumer** and edit its
+rules: [`consumers/policy_gate.reference.cjs`](consumers/policy_gate.reference.cjs)
+implements all three members with a minimal, heavily-commented default policy
+(a house-rules `steer()` overlay; an `inspectRequest()` that allows by default,
+demonstrates one `scrub` rule — redacting a sample `sk-…` secret from the
+outgoing body — and one `block` rule — refusing a disallowed host; and an
+`onStreamEvent()` that aborts on a banned token). It is the canonical example.
+
 1. Write a host policy module exporting any subset of the contract
-   (`steer`, `inspectRequest`, `onStreamEvent` — all optional, feature-detected):
+   (`steer`, `inspectRequest`, `onStreamEvent` — all optional, feature-detected).
+   The shape, abbreviated from the reference consumer:
 
    ```js
    module.exports = {
