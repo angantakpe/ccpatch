@@ -121,6 +121,11 @@ export function tryAcquireSwap() {
  * @property {boolean} swap      __ccpSetSystemPrompt is callable (expose_system_prompt).
  * @property {boolean} router    __ccpSubmitInput is callable (drives AgentRouter).
  * @property {boolean} bus       __ccpBus is present (event_bus / fetch_interceptor).
+ *   NOTE (fail-open probe): with NO registered `bus` contract this is a presence
+ *   check only — a host that sets `__ccpBus = {}` (no `emit`) still reports
+ *   `bus: true`. A registered contract (shape ['emit']) downgrades it on drift;
+ *   absent one, the direct probe stays authoritative by design. useAgentBus()
+ *   runs the same check, so the two never disagree.
  * @property {CapabilityDetailMap} detail  Per-capability remediation detail:
  *   `{ live, patch, reason? }`. `live` mirrors the boolean; `patch` names the
  *   providing patch; `reason` is present only when the contract handshake

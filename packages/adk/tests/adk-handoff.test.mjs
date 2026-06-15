@@ -1178,3 +1178,83 @@ test('disposeHandoffScope leaves another instance’s entry untouched (single sl
   assert.equal(globalThis.__ccpSystemPromptOverride, 'PB', 'B live persona untouched');
   assert.equal(swapDepthIn(scopeA), 1, 'A entry preserved beneath B (cannot pop out of order)');
 });
+
+// ── swap tool hide/restore routes through the nonce-gated registrar ────────────
+
+test('swap hides/restores tools THROUGH the gated registrar when the host exposes it', async () => {
+  resetGlobals();
+  captureBus();
+  globalThis.__ccpSystemPromptOverride = 'BASE';
+  globalThis.__ccpSetSystemPrompt = (s) => { globalThis.__ccpSystemPromptOverride = s; };
+  globalThis.__ccpGetSystemPrompt = () => globalThis.__ccpSystemPromptOverride ?? null;
+
+  const raw = globalThis.__ccpRawTools;
+  raw.push({ name: 'Bash', call: async () => [] }, { name: 'Read', call: async () => [] });
+
+  // Install a nonce-gated registrar/unregistrar over the live array, recording
+  // which names flow through each gated call.
+  const NONCE = 'N1';
+  const unregistered = [];
+  const registered = [];
+  globalThis.__ccpGetDispatchNonce = () => NONCE;
+  globalThis.__ccpRegisterTool = (n, toolObj) => {
+    if (n !== NONCE) throw new Error('bad nonce');
+    registered.push(toolObj.name);
+    if (!raw.some((t) => t && t.name === toolObj.name)) raw.push(toolObj);
+    return true;
+  };
+  globalThis.__ccpUnregisterTool = (n, name) => {
+    if (n !== NONCE) throw new Error('bad nonce');
+    unregistered.push(name);
+    const i = raw.findIndex((t) => t && t.name === name);
+    if (i < 0) return false;
+    raw.splice(i, 1);
+    return true;
+  };
+
+  const reg = createAgentScope();
+  defineAgentIn(reg, { name: 'reader', systemPrompt: 'READER', tools: ['Read'] });
+  const scope = createHandoffScope();
+  const define = createDefineHandoff({ scope, getAgent: (n) => getAgentIn(reg, n), defineTool });
+
+  try {
+    await define({ target: 'reader', mode: 'swap' }).execute({ task: 'go' });
+    assert.ok(unregistered.includes('Bash'), 'tool hide routed through __ccpUnregisterTool (not a raw splice)');
+    assert.ok(!raw.some((t) => t.name === 'Bash'), 'Bash hidden from the live surface');
+
+    assert.equal(restoreSystemPromptIn(scope), true, 'revert succeeds');
+    assert.ok(registered.includes('Bash'), 'tool restore routed through __ccpRegisterTool');
+    assert.ok(raw.some((t) => t.name === 'Bash'), 'Bash restored to the live surface');
+  } finally {
+    delete globalThis.__ccpGetDispatchNonce;
+    delete globalThis.__ccpRegisterTool;
+    delete globalThis.__ccpUnregisterTool;
+  }
+});
+
+// FIX (handoff #2): a restore whose live tool surface vanished must make the
+// desync OBSERVABLE (bus event) rather than silently stranding the hidden tools.
+test('restore emits handoff.tools.restore.skipped when the live array vanished', async () => {
+  resetGlobals();
+  const events = captureBus();
+  globalThis.__ccpSystemPromptOverride = 'BASE';
+  globalThis.__ccpSetSystemPrompt = (s) => { globalThis.__ccpSystemPromptOverride = s; };
+  globalThis.__ccpGetSystemPrompt = () => globalThis.__ccpSystemPromptOverride ?? null;
+  globalThis.__ccpRawTools.push({ name: 'Bash', call: async () => [] });
+
+  const reg = createAgentScope();
+  defineAgentIn(reg, { name: 'reader', systemPrompt: 'READER', tools: ['Read'] });
+  const scope = createHandoffScope();
+  const define = createDefineHandoff({ scope, getAgent: (n) => getAgentIn(reg, n), defineTool });
+
+  await define({ target: 'reader', mode: 'swap' }).execute({ task: 'go' });
+  assert.ok(!globalThis.__ccpRawTools.some((t) => t.name === 'Bash'), 'Bash hidden by swap');
+
+  // The live surface disappears before revert (e.g. host teardown).
+  delete globalThis.__ccpRawTools;
+  assert.equal(restoreSystemPromptIn(scope), true, 'persona still restored despite missing array');
+
+  const skipped = payloadOf(events, 'handoff.tools.restore.skipped');
+  assert.ok(skipped, 'emitted handoff.tools.restore.skipped');
+  assert.ok(skipped.names.includes('Bash'), 'event names the stranded tool');
+});

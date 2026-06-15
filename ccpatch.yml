@@ -86,6 +86,9 @@ ack:
   # adk_user_agents runs arbitrary user-authored ADK modules from ~/.ccpatch/agents/
   # — those modules inject tools (tools) and may swap personas (prompt).
   adk_user_agents: [tools, prompt]
+  # adk_handoff_demo is the end-to-end ADK reference consumer: it injects
+  # transfer_to_* tools (tools) and a swap may overlay a persona (prompt).
+  adk_handoff_demo: [tools, prompt]
   # adk profile additions (delegate + router capabilities for the full ADK
   # surface). prime_agent_tool_on_boot primes the native AgentTool so delegate
   # handoffs resolve; expose_submit_input drives the input bar for AgentRouter.
@@ -215,6 +218,7 @@ patches:
   # event bus add event_bus.
   adk_hello_agent: true           # register a hello agent + adk_ping tool via the ADK
   adk_user_agents: false          # load user-authored ADK modules from ~/.ccpatch/agents/*.mjs (opt-in)
+  adk_handoff_demo: false         # end-to-end consumer: defineHandoff (delegate+swap) + AgentRouter + createMemory (opt-in)
 
   # ── Verticals (composed on top of the horizontals above) ────────────────────
   event_bus: false                # typed pub/sub (__ccpBus) — shared by orchestrator/bridge
@@ -312,7 +316,9 @@ profiles:
   # adk — standard + the full Agent Development Kit surface. Loads
   # @codehornets/adk into the session (adk_hello_agent's boot block) with EVERY
   # ccpatch primitive the ADK can consume wired up, so capabilities() reports all
-  # five live: tools (expose_tool_dispatch — already in standard), swap
+  # five live, and ships adk_handoff_demo — the end-to-end reference consumer that
+  # actually drives defineHandoff (delegate+swap) + AgentRouter + createMemory
+  # through those primitives: tools (expose_tool_dispatch — already in standard), swap
   # (expose_system_prompt — already in standard), delegate (expose_agent_tool +
   # prime_agent_tool_on_boot), router (expose_submit_input), and bus (event_bus).
   #
@@ -333,6 +339,7 @@ profiles:
       - event_bus
       - adk_hello_agent
       - adk_user_agents
+      - adk_handoff_demo
 
   # power lists everything explicitly -- no extends
   power:
