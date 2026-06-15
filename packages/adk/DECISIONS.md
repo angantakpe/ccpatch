@@ -27,9 +27,17 @@ All access to the ccpatch-exposed globals (`__ccpRawTools`, `__ccpSetSystemPromp
 `__ccpBus`, `__ccpRequire`, …) now routes through `host.mjs` instead of each
 module reaching into `globalThis` directly. The port reads `globalThis` **live**
 on every call (never snapshots at import) so bare-global test stubs and
-late-binding hosts both keep working. This collapses ~40 duplicated guard sites
-into one place and makes the coupling to the bundle explicit and swappable. See
-REVIEW.md §2.
+late-binding hosts both keep working. Accessors are pure probes — side-effect-free,
+never throw, falsy/`null`/`undefined` on an absent global; the lone guarded helper
+is `host.emit()`, which centralizes the fire-and-forget bus emit (no-op without a
+bus, swallows a throwing observer) that several modules hand-rolled. The port
+answers only "is the primitive present and callable now"; the typed version/shape
+handshake stays in `contracts.mjs` (which consumes `host.inspectContracts()` /
+`host.requireFn()`). `host.mjs` imports nothing from the rest of the ADK, so any
+module — including the standalone `memory.mjs` subpath export — can depend on it
+without a cycle. This collapses ~40 duplicated guard sites into one place and makes
+the coupling to the bundle explicit and swappable. Covered by
+`tests/adk-host.test.mjs`. See REVIEW.md §2.
 
 ### Isolation contract — instance-local vs. process-global, stated per method
 `createAdk()` previously implied uniform isolation. The boundary is now documented

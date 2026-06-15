@@ -41,6 +41,16 @@ mutates the running CC session in place. Because each exposed primitive comes fr
 a separate patch, the live surface is variable — always call `capabilities()` to
 preflight which primitives are actually wired before you depend on them.
 
+No ADK module touches `globalThis.__ccp*` directly: every read routes through a
+single host port, `host.mjs`. The port reads `globalThis` **live** on each call
+(it never snapshots a primitive at import), so bare-global test stubs and
+late-binding hosts both keep working, and its accessors are pure probes — a
+missing primitive yields `null`/`undefined`/`false`, never an exception. It
+answers only "is this primitive present and callable right now"; the typed
+version/shape handshake lives in `contracts.mjs`. Centralizing the coupling here
+means a change to how a primitive is probed lands in one place rather than across
+five files.
+
 > Examples below import from the published package specifier
 > **`@codehornets/adk`** (`main: index.mjs`), with the subpaths
 > `@codehornets/adk/memory` and `@codehornets/adk/tool-registry` where relevant —
@@ -239,9 +249,29 @@ at rest; `0600` limits who can read it, it is not encrypted.
 
 The top-level exports (`defineAgent`, `defineTool`, `defineHandoff`,
 `AgentRouter`, `restoreSystemPrompt`, …) bind to a single process-global DEFAULT
-instance. `createAdk()` returns the **same API** backed by an isolated scope: two
-instances never share agent / tool / handoff registries. Use it for per-test or
-per-session isolation.
+instance. `createAdk()` returns the **same API** backed by an isolated scope, plus
+a stable per-instance `id` (`adk-<n>`, introspection only): two instances never
+share agent / tool / handoff registries. Use it for per-test or per-session
+isolation.
+
+**The isolation boundary is NOT uniform**, because some primitives the ADK sits
+on are irreducibly process-global — scoping those would be theatre. Each method is
+one of:
+
+- **INSTANCE-LOCAL** — two instances never share it: `defineAgent` / `getAgent` /
+  `listAgents`, `defineTool` / `listTools` / `toolStatuses` (each instance owns its
+  own queue/lifecycle bookkeeping even though the live `__ccpRawTools` sink is the
+  one shared array), `defineHandoff` / `restoreSystemPrompt` / `swapDepth` /
+  `tryAcquireSwap` (per-instance swap-stack *footprint* + exclusive-lock
+  ownership), `AgentRouter`, and `dispose()`.
+- **PROCESS-GLOBAL** — shared by every instance and the DEFAULT exports alike,
+  because the underlying primitive is a single global slot: `capabilities()`
+  (probes the same process globals for everyone), `useAgentBus()` (returns the one
+  `__ccpBus`), and `createMemory()` (keyed by **file path**, not by instance — two
+  instances opening the same path share that store on purpose; pass distinct
+  `path:` to separate them). `currentPersona()` is likewise the one live persona
+  slot — `swapDepth()` is per-instance but the persona it reflects is global, which
+  is why an out-of-order cross-instance restore fails safely (see below).
 
 ```js
 import { createAdk } from '@codehornets/adk';
@@ -266,9 +296,11 @@ other.listAgents();        // [] — does not see 'planner'
 adk.dispose();             // tear the instance down — see below
 ```
 
-Note: `createMemory`, `capabilities`, and `useAgentBus` are intentionally
-instance-agnostic — they probe process-global `__ccp*` state / the filesystem, not
-per-instance registries, so the same function is reused on every instance.
+Note: per the PROCESS-GLOBAL row above, `createMemory`, `capabilities`, and
+`useAgentBus` are handed back as the **same function references** the DEFAULT
+exports use — they are deliberately not re-scoped, since they front the
+filesystem / a single global probe / the one bus rather than per-instance
+registries.
 
 ### `adk.dispose()` — tear an instance down
 

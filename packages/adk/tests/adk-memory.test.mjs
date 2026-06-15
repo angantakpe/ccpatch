@@ -892,6 +892,114 @@ test('M2(c): a LIVE pid with a FRESH mtime is NOT stolen (the lock is respected)
   assert.equal(JSON.parse(readFileSync(file, 'utf8')).x, 2, 'the degraded write still persisted the value');
 });
 
+// ── cross-process lock: release-after-takeover + unknown-holder fuse ───────────
+
+test('M3: release-after-takeover — a writer whose lock was STOLEN and re-created by another holder does NOT delete the new owner\'s lock', async () => {
+  // FIX #1 (ownership-checked release). createMemory stamps a UNIQUE token
+  // (pid:nonce) into the lockfile on acquire. If holder A's lock gets stolen and
+  // a different holder B re-creates the lockfile (a different token), A's
+  // releaseLock() must re-read the on-disk content and, seeing B's token, SKIP the
+  // rmSync — otherwise A would delete a lock B currently holds, putting two writers
+  // in the critical section.
+  //
+  // We drive this directly through the lock primitives the way the M-series tests
+  // do: build A's instance, take A's lock, simulate the takeover by overwriting the
+  // lockfile content with B's distinct token, then prove A's flush/release leaves
+  // B's lock intact.
+  const dir = freshDir();
+  const file = join(dir, 'takeover.json');
+
+  const memA = createMemory({ path: file });
+  memA.set('x', 1);
+  await memA.flush(); // creates + releases cleanly; no lock left behind.
+
+  const lockPath = `${file}.lock`;
+  // Simulate the post-takeover world: B now owns the lockfile with B's OWN token,
+  // distinct from anything A would mint. A's next write will find this fresh,
+  // live-pid (us), within-ceiling lock and degrade around it WITHOUT stealing — and
+  // critically, A must never delete it.
+  const bToken = `${process.pid}:B-OWNS-THIS:${Math.random().toString(36).slice(2)}`;
+  writeFileSync(lockPath, bToken, 'utf8');
+
+  let topics;
+  try {
+    memA.set('x', 2);
+    topics = await withBusCapture(() => memA.flush());
+    assert.equal(existsSync(lockPath), true, 'B\'s lock still exists — A did not delete a lock it does not own');
+    assert.equal(readFileSync(lockPath, 'utf8'), bToken, 'B\'s token is intact — A neither stole nor released it');
+  } finally {
+    rmSync(lockPath, { force: true });
+  }
+  assert.ok(
+    topics.includes('memory.lock.contended'),
+    'A degraded around B\'s live lock (could not acquire) rather than stealing/deleting it',
+  );
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).x, 2, 'A\'s degraded write still persisted its value');
+});
+
+test('M4: an EMPTY/unknown-content lock with a FRESH-but-soft-stale mtime is RESPECTED, not stolen at the soft fuse', async () => {
+  // FIX #2 (failed-stamp must not be soft-stealable). If a live writer's pid stamp
+  // fails to land (ENOSPC/EIO), the lockfile has EMPTY content → readLockPid()
+  // returns null (unknown holder). The old policy stole an unknown holder once the
+  // lock crossed the ~10s soft fuse, which would rob a healthy live writer. The new
+  // policy treats an unknown holder as LIVE until the HARD ceiling (60s): a lock
+  // aged between the old soft fuse and the hard ceiling must NOT be stolen.
+  const dir = freshDir();
+  const file = join(dir, 'empty-soft.json');
+  const mem = createMemory({ path: file });
+  mem.set('x', 1);
+  await mem.flush();
+
+  const lockPath = `${file}.lock`;
+  const fd = openSync(lockPath, 'w'); // EMPTY content — no pid/token stamp landed.
+  closeSync(fd);
+  // Age it to 30s: well past the old 10s soft fuse, but well within the 60s hard
+  // ceiling. An unknown holder here must be respected (treated as live).
+  const old = Date.now() / 1000 - 30;
+  utimesSync(lockPath, old, old);
+
+  let topics;
+  try {
+    mem.set('x', 2);
+    topics = await withBusCapture(() => mem.flush());
+    assert.equal(
+      existsSync(lockPath), true,
+      'an empty/unknown lock within the hard ceiling is NOT soft-stolen — it survives the write',
+    );
+  } finally {
+    rmSync(lockPath, { force: true });
+  }
+  assert.ok(
+    topics.includes('memory.lock.contended'),
+    'the writer degraded around the respected unknown-holder lock instead of stealing it',
+  );
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).x, 2, 'the degraded write still persisted the value');
+});
+
+test('M4(b): an EMPTY/unknown-content lock PAST the hard ceiling IS stolen (never-stamped crash backstop)', async () => {
+  // Complement of M4: the hard ceiling is the ONLY thing that reclaims an unknown
+  // holder. A never-stamped lock older than LOCK_HARD_STALE_MS (60s) is a crashed
+  // writer whose stamp never landed — it must be stolen so the store can't wedge.
+  const dir = freshDir();
+  const file = join(dir, 'empty-hard.json');
+  const mem = createMemory({ path: file });
+  mem.set('x', 1);
+  await mem.flush();
+
+  const lockPath = `${file}.lock`;
+  const fd = openSync(lockPath, 'w'); // EMPTY content
+  closeSync(fd);
+  const old = Date.now() / 1000 - 120; // 2 min — past the 60s hard ceiling.
+  utimesSync(lockPath, old, old);
+
+  mem.set('x', 2);
+  const topics = await withBusCapture(() => mem.flush());
+
+  assert.equal(existsSync(lockPath), false, 'an empty lock past the hard ceiling was stolen and released');
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).x, 2, 'write completed under the re-acquired lock');
+  assert.equal(topics.includes('memory.lock.contended'), false, 'steal succeeded → no contended degrade');
+});
+
 // ── transform round-trip verification at construction ─────────────────────────
 
 test('createMemory THROWS when the transform is not a round-trip (onRead != inverse of onWrite)', () => {
