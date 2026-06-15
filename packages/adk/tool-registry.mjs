@@ -36,6 +36,34 @@ const POLL_LIMIT_BUS = 20;
 const MAX_INPUT_BYTES = 256 * 1024;
 
 /**
+ * Reserved tool-name namespace guard. The ccpatch host exposes every internal
+ * helper/global under the `__ccp` prefix (`__ccpRawTools`, `__ccpRegisterTool`,
+ * `__ccpGetDispatchNonce`, …); a tool named into that namespace could shadow a
+ * `__ccp*`-adjacent global. We also reject the prototype-pollution names the
+ * memory store already treats as unsafe (UNSAFE_KEYS in memory.mjs) so a tool
+ * can't be named to clobber an object internal. This is a DEFINITION-time
+ * programmer-error check — reject loudly, never silently rename.
+ */
+const RESERVED_NAME_PREFIXES = ['__ccp'];
+const RESERVED_NAMES = new Set(['__proto__', 'constructor', 'prototype']);
+
+/**
+ * @param {string} name  already known to be a non-empty string at the call site.
+ * @returns {string|null}  a human-readable reason when `name` is reserved, else null.
+ */
+function reservedNameReason(name) {
+  for (const prefix of RESERVED_NAME_PREFIXES) {
+    if (name.startsWith(prefix)) {
+      return `it is in the reserved "${prefix}" host namespace (would shadow a ${prefix}* global)`;
+    }
+  }
+  if (RESERVED_NAMES.has(name)) {
+    return 'it is a reserved prototype/object-internal name';
+  }
+  return null;
+}
+
+/**
  * Lazily-acquired dispatch nonce. The expose_tool_dispatch patch may load AFTER
  * this module, so we (re-)read it at injection time rather than only at load.
  * @returns {string|undefined}
@@ -944,6 +972,13 @@ function removeFromRaw(name) {
 export function defineToolIn(scope, { name, description, inputSchema, execute, onInjectFail, throwOnInjectFail, validate } = {}) {
   if (typeof name !== 'string' || !name) {
     throw new Error('defineTool: `name` must be a non-empty string'); // PROGRAMMER error
+  }
+  // Namespace guard: a tool named into the reserved `__ccp*` host namespace (or a
+  // prototype-pollution name) could shadow an internal global once injected.
+  // Reject at DEFINITION time — loud programmer error, before any injection.
+  const reserved = reservedNameReason(name);
+  if (reserved) {
+    throw new Error(`defineTool("${name}"): reserved tool name — ${reserved}`); // PROGRAMMER error
   }
   if (typeof execute !== 'function') {
     throw new Error(`defineTool("${name}"): \`execute\` must be a function`); // PROGRAMMER error
