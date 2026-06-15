@@ -113,16 +113,49 @@ unbounded. **Direction:** anchor the sandbox to an explicit root (e.g.
 `host.path()` / a project-root helper) rather than live `cwd()`; make the
 append-log strategy an opt-in subpath import so the common path stays small.
 
-### 7. Surface area has run ahead of consumption
+### 7. Surface area has run ahead of consumption — MARKED PROVISIONAL (COD-12)
 The shipped `adk` profile only exercises the hello-agent → tools path;
 `defineHandoff` / `swap` / `AgentRouter` / `createMemory` / `useAgentBus` are
-wired at the capability level but **no shipped patch consumes them**. That is a
-lot of security-sensitive machinery (TOCTOU pins, swap locks, cross-process
-merge) validated only by its own unit tests. **Direction (highest strategic
-lever):** build one reference consumer patch that exercises handoff + router +
-memory end-to-end through a real patched session, or explicitly mark the
+wired at the capability level but **no enabled-by-default patch consumes them**.
+That is a lot of security-sensitive machinery (TOCTOU pins, swap locks,
+cross-process merge) validated only by its own unit tests. **Direction (highest
+strategic lever):** build one reference consumer patch that exercises handoff +
+router + memory end-to-end through a real patched session, or explicitly mark the
 unconsumed surface as provisional and resist hardening it further until a
 consumer exists.
+
+**Decision (COD-12): marked PROVISIONAL — the docs path, not the consumer
+path.** Of the two directions above, this issue takes the second. These surfaces
+are now **explicitly provisional**: wired at the capability level, validated by
+their own `tests/adk-*.test.mjs` suites, but **not consumed by any
+enabled-by-default shipped patch**. The README banner and the per-surface notes
+below say so in the same words, so the API docs no longer imply a consumption
+guarantee the build does not make.
+
+Rationale for choosing docs over a shipped consumer here:
+- `extensions/adk_handoff_demo.mjs` already exists as the *opt-in* reference
+  consumer (listed in the `adk` profile, but `enabled: false` — it does not ship
+  in the default `make patch-claude-code` build). Promoting it to an
+  enabled-by-default consumer is a build/security change, not a docs change: it
+  composes the same tools/prompt capability surface the `daemon` profile gates,
+  and enabling it blind risks a boot regression in a real patched session.
+- Turning that demo into a *validated, enabled* consumer is its own scoped work
+  and is tracked as the follow-up **COD-13** (intentionally not shipped in this
+  run). Doing it here would pre-empt that issue and widen this change's blast
+  radius past docs.
+- Until COD-13 lands, the honest statement is "provisional, not yet consumed by
+  an enabled-by-default patch" — which is what this change records, and it
+  unblocks the §7 decision without hardening the unconsumed surface further.
+
+**Status of the listed surfaces (until COD-13):**
+- `defineHandoff` (delegate + swap) — PROVISIONAL.
+- `swap` (persona overlay / `allowSwapTargets` / TOCTOU pins) — PROVISIONAL.
+- `AgentRouter` — PROVISIONAL.
+- `createMemory` (cross-process merge store) — PROVISIONAL.
+- `useAgentBus` — PROVISIONAL.
+
+The `tools` path (`defineAgent` + `defineTool`) is **not** provisional: it is the
+one surface `adk_hello_agent` consumes in the shipped `adk` profile.
 
 ### Smaller items
 - `depthOf()` is O(n) per swap push/restore (`handoff.mjs`) — fine at depth 64,

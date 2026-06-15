@@ -14,14 +14,23 @@
 > that other patches expose (see `core/contracts.mjs` and
 > `extensions/expose_system_prompt.mjs`).
 >
-> **What the shipped profile actually exercises is a subset of the API.** The
-> built-in `adk_hello_agent` registers a persona + injects one tool (the `tools`
-> capability only). `defineHandoff` / `swap` / `AgentRouter` / `createMemory` /
-> `useAgentBus` are wired at the *capability* level (the globals are exposed and
-> `capabilities()` reports them live under `--profile adk`) but no shipped patch
-> consumes them — they are reachable today only through your own
-> `~/.ccpatch/agents/*.mjs` modules or the test suites. Treat anything beyond the
-> hello-agent path as evolving; always call `capabilities()` to preflight.
+> **What the shipped profile actually exercises is a subset of the API. The rest
+> is PROVISIONAL (COD-12).** The built-in `adk_hello_agent` registers a persona +
+> injects one tool (the `tools` capability only). `defineHandoff` / `swap` /
+> `AgentRouter` / `createMemory` / `useAgentBus` are wired at the *capability*
+> level (the globals are exposed and `capabilities()` reports them live under
+> `--profile adk`) but **no enabled-by-default patch consumes them**, so they are
+> explicitly **PROVISIONAL**: validated by this package's own unit tests, and
+> reachable today only through your own `~/.ccpatch/agents/*.mjs` modules, those
+> test suites, or the *opt-in* `extensions/adk_handoff_demo.mjs` reference
+> consumer (listed in the `adk` profile but `enabled: false` — it does not ship
+> in the default build). Treat anything beyond the hello-agent path as
+> provisional and subject to change; always call `capabilities()` to preflight.
+>
+> Promoting `adk_handoff_demo` to a *validated, enabled-by-default* consumer is
+> tracked separately as **COD-13**; this status banner is the COD-12 decision to
+> mark the surface provisional rather than ship that consumer blind. Tighten this
+> banner (and drop "PROVISIONAL") once COD-13 lands an enabled consumer.
 >
 > The in-repo test consumers are this package's own `tests/adk-*.test.mjs`
 > suites (run via `npm test -w @codehornets/adk` or the root `npm run test:adk`).
