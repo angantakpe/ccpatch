@@ -22,6 +22,20 @@ import { host } from './host.mjs';
 // mode it is the compaction threshold (the delta log is rewritten to a fresh
 // snapshot once it grows past this).
 const MAX_FILE_BYTES = 5 * 1024 * 1024; // 5 MB
+// Ceiling on the append-log READ. A HEALTHY log holds at most one snapshot
+// checkpoint plus the deltas accumulated since the last compaction; appendDelta()
+// compacts before the deltas would cross capBytes, so the delta tail is bounded by
+// capBytes. The SNAPSHOT, however, is bounded by STORE size — which in append-log
+// mode is intentionally allowed to exceed capBytes (capBytes is the delta
+// COMPACTION THRESHOLD here, not a store-size cap). So the read ceiling must give
+// the snapshot generous absolute room while still bounding the delta tail:
+//   ceiling = LOG_READ_CAP_FACTOR × max(capBytes, MAX_FILE_BYTES)
+// This admits any legitimate compacted log (snapshot + ≤capBytes of deltas) yet
+// refuses to read/parse a log that has grown WITHOUT BOUND — a stale file from an
+// older unbounded writer, or an external appender — recovering from the base
+// snapshot instead. That is the COD-5 guarantee: a store past the cap never
+// re-reads unbounded data on load. See readFromLog.
+const LOG_READ_CAP_FACTOR = 4;
 // How long to coalesce rapid set()/delete() before hitting the disk.
 const DEBOUNCE_MS = 100;
 // HARD COALESCE CAP: the debounce above re-arms on every mutation,
@@ -45,6 +59,38 @@ const LOCK_HARD_STALE_MS = 60_000; // 60 s
 // case, only ever paid under genuine contention.
 const LOCK_RETRY_MS = 25;
 const LOCK_RETRY_ATTEMPTS = 40;
+
+// PATH-SANDBOX ANCHOR: the store's containment root is anchored to an EXPLICIT,
+// STABLE root rather than live process.cwd(). cwd() is mutable — a later
+// process.chdir() (or a handler that chdir's before constructing a store) moves
+// the goalposts and can let a path that was OUTSIDE the sandbox become "inside"
+// (or vice-versa), silently breaking containment on a store that may hold
+// secrets. We snapshot the root ONCE at module import — before any agent handler
+// has had a chance to chdir — and resolve it through resolveProjectRoot() in
+// priority order so a host can pin it explicitly instead of inheriting whatever
+// cwd happened to be at import:
+//   1. an explicit `root` passed to createMemory()        (per-instance override)
+//   2. globalThis.__ccpProjectRoot                        (host-pinned root, if any)
+//   3. ADK_ROOT — cwd() snapshotted at import             (chdir-immune fallback)
+// The resolved value is an absolute path; cwd() is never re-read after import.
+const ADK_ROOT = resolve(cwd());
+/**
+ * Resolve the sandbox root for a store. Explicit `root` wins, then a host-pinned
+ * global, then the import-time snapshot — NEVER live cwd(), so a runtime chdir()
+ * cannot relocate the sandbox.
+ * @param {string} [explicitRoot]
+ * @returns {string} an absolute, chdir-immune project root.
+ */
+function resolveProjectRoot(explicitRoot) {
+  if (typeof explicitRoot === 'string' && explicitRoot.length > 0) {
+    return resolve(explicitRoot);
+  }
+  const hostRoot = globalThis.__ccpProjectRoot;
+  if (typeof hostRoot === 'string' && hostRoot.length > 0) {
+    return resolve(hostRoot);
+  }
+  return ADK_ROOT;
+}
 
 // Keys that, when assigned via `obj[key] = value` (bracket assignment), would
 // mutate object internals instead of storing data — `obj['__proto__'] = {...}`
@@ -164,11 +210,14 @@ function registerExitListenerOnce() {
  *     cross-process key merge the rewrite path does — the last process to write
  *     a key wins (a single owning process is the intended model).
  *
- * @param {{ path?: string, transform?: MemoryTransform, maxBytes?: number, appendLog?: boolean }} [opts]
+ * @param {{ path?: string, root?: string, transform?: MemoryTransform, maxBytes?: number, appendLog?: boolean }} [opts]
  * @returns {Memory}
  */
-export function createMemory({ path: filePath, transform, maxBytes, appendLog = false } = {}) {
-  const root = resolve(cwd());
+export function createMemory({ path: filePath, root: rootOpt, transform, maxBytes, appendLog = false } = {}) {
+  // Containment root is the EXPLICIT, chdir-immune anchor (see resolveProjectRoot
+  // / ADK_ROOT above) — NOT a live cwd() read, so a later process.chdir() can't
+  // move the sandbox out from under an already-constructed store.
+  const root = resolveProjectRoot(rootOpt);
   const resolved = resolve(filePath ?? `${root}/.claude/adk-memory.json`);
   // Per-instance cap (compaction threshold in append-log mode). A non-finite or
   // non-positive override falls back to the default rather than disabling the cap.
@@ -368,14 +417,24 @@ export function createMemory({ path: filePath, transform, maxBytes, appendLog = 
     let store = base && typeof base === 'object' && !Array.isArray(base) ? base : {};
     let raw;
     try {
-      // NOTE: we intentionally do NOT cap the log read by capBytes. The log is
-      // compacted to a single {snap:…} checkpoint once its DELTA growth exceeds
-      // the cap (see appendDelta/compactLog), but that checkpoint is bounded by
-      // the STORE size, not the delta cap — a large store legitimately yields a
-      // snapshot bigger than capBytes. Bounding the read here would discard a
-      // valid compacted log. Replay is O(log) and the compactor keeps the log
-      // from growing without bound in deltas.
-      statSync(logPath); // throws → no log yet → base snapshot only (catch below)
+      // SIZE BOUND (mirrors readFromDisk): refuse to read/parse a log that has
+      // grown WITHOUT BOUND. A healthy log is one snapshot checkpoint (store-sized)
+      // plus a delta tail appendDelta() keeps under capBytes. The ceiling
+      // (LOG_READ_CAP_FACTOR × max(capBytes, MAX_FILE_BYTES); see the constant's
+      // header) gives a legitimate snapshot generous absolute room while still
+      // capping a runaway log — a stale file from an older unbounded writer or an
+      // external appender. Past the ceiling we recover from the base snapshot and
+      // let the next mutation recompact to a fresh, bounded checkpoint.
+      const st = statSync(logPath); // throws → no log yet → base snapshot only (catch below)
+      const logReadCap = LOG_READ_CAP_FACTOR * Math.max(capBytes, MAX_FILE_BYTES);
+      if (st.size > logReadCap) {
+        console.warn(
+          `createMemory: ${logPath} is ${st.size} bytes (> ${logReadCap} log-read ceiling); ` +
+            `not replaying it to avoid an unbounded read. Recovering from the base snapshot; ` +
+            `the next write will recompact the log to a bounded checkpoint.`,
+        );
+        return store;
+      }
       raw = onRead(readFileSync(logPath, 'utf8'));
     } catch {
       return store; // no log yet / unreadable → base snapshot only

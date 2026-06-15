@@ -294,6 +294,13 @@ export interface MemoryTransform {
 export interface CreateMemoryOptions {
   /** Store path; must resolve within the project root (default .claude/adk-memory.json). */
   path?: string;
+  /**
+   * Explicit, chdir-immune containment root the store path must resolve within.
+   * Overrides the default anchor (a host-pinned `globalThis.__ccpProjectRoot`,
+   * else cwd() snapshotted at module import). NEVER live cwd(), so a later
+   * process.chdir() cannot relocate the sandbox.
+   */
+  root?: string;
   /** Reversible on-disk transform (encrypt/encode/redact). Caller-supplied; no crypto bundled. */
   transform?: MemoryTransform;
   /**

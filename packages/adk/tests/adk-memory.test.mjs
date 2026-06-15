@@ -43,6 +43,11 @@ import { createMemory } from '../memory.mjs';
 // A scratch dir UNDER the project root so the path sandbox accepts it.
 const SCRATCH_ROOT = join(cwd(), '.tmp-adk-memory-tests');
 
+// Mirror of memory.mjs's internal LOG_READ_CAP_FACTOR (the append-log read
+// ceiling = factor × capBytes). Not exported, so we keep a local copy to size
+// the COD-5 oversized-log fixtures; it must track the module constant.
+const LOG_READ_CAP_FACTOR_FOR_TEST = 4;
+
 function freshDir() {
   mkdirSync(SCRATCH_ROOT, { recursive: true });
   return mkdtempSync(join(SCRATCH_ROOT, 'mem-'));
@@ -1285,4 +1290,123 @@ test('a crafted delta log with a __proto__ set op does not pollute the replayed 
   assert.equal({}.polluted, undefined, 'Object.prototype not polluted by replay');
   // The store object itself must not have had its prototype swapped.
   assert.equal(Object.getPrototypeOf(mem.snapshot()), Object.prototype, 'store prototype intact');
+});
+
+// ── path sandbox: chdir-safety (COD-5) ────────────────────────────────────────
+// The containment root is anchored to an EXPLICIT, import-time root, not live
+// process.cwd(). A process.chdir() after the snapshot must NOT move the sandbox.
+
+test('COD-5: sandbox root is chdir-immune — a later process.chdir() does not relocate it', () => {
+  // Build a store rooted at the current (import-time) project root, then chdir
+  // INTO an unrelated temp dir. The sandbox must still be anchored to the
+  // original root: a path that was in-root before the chdir is STILL accepted,
+  // and the chdir target (now cwd) does NOT silently become the new sandbox.
+  const dir = freshDir();
+  const inRootRel = relative(cwd(), join(dir, 'anchored.json'));
+  const origCwd = cwd();
+  const elsewhere = mkdtempSync(join(tmpdir(), 'adk-chdir-'));
+  try {
+    process.chdir(elsewhere);
+    // (1) A path resolved against the ORIGINAL root still passes — the anchor
+    //     did not move to the new cwd.
+    assert.doesNotThrow(
+      () => createMemory({ path: join(dir, 'anchored.json') }),
+      'an in-(original-)root absolute path is still accepted after chdir',
+    );
+    // (2) The same relative path (computed against the original root) still
+    //     resolves inside the sandbox — proof the root is not the live cwd.
+    assert.doesNotThrow(
+      () => createMemory({ path: join(origCwd, inRootRel) }),
+      'a path under the original root is accepted regardless of cwd',
+    );
+    // (3) A path under the NEW cwd (outside the original root) is rejected —
+    //     chdir did not widen the sandbox to wherever we wandered.
+    assert.throws(
+      () => createMemory({ path: join(elsewhere, 'sneaky.json') }),
+      /path escapes project root/,
+      'the chdir target is NOT silently adopted as the sandbox root',
+    );
+  } finally {
+    process.chdir(origCwd);
+    rmSync(elsewhere, { recursive: true, force: true });
+  }
+});
+
+test('COD-5: explicit { root } pins the sandbox independently of cwd', () => {
+  // An explicit root overrides both cwd and the import-time anchor. A store
+  // pinned to `dir` accepts paths under `dir` and rejects paths outside it,
+  // with no dependence on where the process is currently chdir'd.
+  const dir = realpathSync(freshDir()); // realpath: macOS /var → /private/var
+  assert.doesNotThrow(
+    () => createMemory({ path: join(dir, 'pinned.json'), root: dir }),
+    'a path inside the explicit root is accepted',
+  );
+  const sibling = realpathSync(freshDir());
+  assert.throws(
+    () => createMemory({ path: join(sibling, 'x.json'), root: dir }),
+    /path escapes project root/,
+    'a path outside the explicit root is rejected even though it is in the default sandbox',
+  );
+});
+
+// ── append-log read bound: a log past the cap is not re-read unbounded (COD-5) ─
+
+test('COD-5: an oversized append-log is NOT replayed unbounded — recovers from base snapshot', () => {
+  const dir = freshDir();
+  const file = join(dir, 'oversized.json');
+  // The read ceiling is LOG_READ_CAP_FACTOR × max(maxBytes, MAX_FILE_BYTES). To
+  // keep the fixture small we raise maxBytes ABOVE the 5 MB floor so the ceiling
+  // is driven by maxBytes alone, then craft a log just past it. This simulates a
+  // stale log an older unbounded writer (or an external appender) could leave.
+  const CAP = 6 * 1024 * 1024; // > MAX_FILE_BYTES(5MB) so the ceiling = 4×CAP.
+  const ceiling = LOG_READ_CAP_FACTOR_FOR_TEST * CAP;
+  // One leading snapshot, then a single oversized delta whose value pushes the
+  // file past the ceiling — proving the WHOLE-FILE read is refused, not parsed.
+  const filler = 'q'.repeat(ceiling + 4096);
+  const log =
+    JSON.stringify({ snap: { seed: 'base' } }) + '\n' +
+    JSON.stringify({ op: 'set', key: 'k0', value: filler }) + '\n';
+  writeFileSync(`${file}.log`, log, 'utf8');
+  assert.ok(
+    statSync(`${file}.log`).size > ceiling,
+    'precondition: crafted log exceeds the read ceiling',
+  );
+
+  const realWarn = console.warn;
+  const warnings = [];
+  console.warn = (m) => warnings.push(String(m));
+  let mem;
+  try {
+    mem = createMemory({ path: file, appendLog: true, maxBytes: CAP });
+    // Force the lazy load (and thus readFromLog) to run.
+    mem.keys();
+  } finally {
+    console.warn = realWarn;
+  }
+
+  // The oversized log is NOT replayed: none of its delta keys made it in, and we
+  // recovered from the empty base snapshot (no .json file exists → {}).
+  assert.deepEqual(mem.keys(), [], 'oversized log skipped — no unbounded replay');
+  assert.equal(mem.get('k0'), undefined, 'a delta from the oversized log was not applied');
+  assert.ok(
+    warnings.some((w) => /log-read ceiling/.test(w) && /unbounded read/.test(w)),
+    'warned that the oversized log was skipped to avoid an unbounded read',
+  );
+});
+
+test('COD-5: a log within the read ceiling still replays normally (bound does not over-reject)', async () => {
+  const dir = freshDir();
+  const file = join(dir, 'normal.json');
+  const CAP = 4096; // generous: a small log stays well under 4×CAP.
+  const mem = createMemory({ path: file, appendLog: true, maxBytes: CAP });
+  mem.set('a', 1);
+  mem.set('b', 2);
+  await mem.flush();
+
+  // The on-disk log is well within LOG_READ_CAP_FACTOR×CAP, so a fresh reader
+  // replays it in full — the bound must not discard a legitimate log.
+  assert.ok(statSync(`${file}.log`).size <= 4 * CAP, 'precondition: log is within the read ceiling');
+  const reloaded = createMemory({ path: file, appendLog: true, maxBytes: CAP });
+  assert.equal(reloaded.get('a'), 1, 'in-bound log replayed');
+  assert.equal(reloaded.get('b'), 2, 'in-bound log replayed fully');
 });
