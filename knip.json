@@ -35,8 +35,7 @@
   "ignore": [
     "tools/reconstructor/**",
     "**/fixtures/**",
-    "runner/agents-dir-builder.mjs",
-    "packages/adk/**"
+    "runner/agents-dir-builder.mjs"
   ],
   "ignoreDependencies": [
     "concurrently"

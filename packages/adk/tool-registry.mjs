@@ -1199,6 +1199,3 @@ export function listTools() {
 export function toolStatuses() {
   return toolStatusesIn(_defaultScope);
 }
-
-/** The DEFAULT tool scope — shared with the DEFAULT agent/handoff instances. */
-export const _defaultToolScope = _defaultScope;

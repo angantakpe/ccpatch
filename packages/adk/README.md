@@ -38,10 +38,21 @@
 > suites (run via `npm test -w @codehornets/adk` or the root `npm run test:adk`);
 > the shipped patched-session consumer is `extensions/adk_handoff_demo.mjs` (the
 > `adk` profile), locked by a dedicated case in
-> `tests/patch-verification.test.mjs`. `knip.json` still lists `packages/adk/**`
-> under `ignore` because the package's public exports are consumed by user
-> modules / the demo consumer / tests rather than by `core/` directly; revisit
-> that ignore if `core/` ever imports the handoff/router/memory exports.
+> `tests/patch-verification.test.mjs`. The blanket `packages/adk/**` entry was
+> **removed** from `knip.json`'s `ignore` (COD-16): `@codehornets/adk` is a knip
+> *workspace* with an `exports` map, so its public entry points are analysed as
+> entries and the configured `make lint-unused` (`bun run lint:unused` → bare
+> `knip`) stays green — the in-repo `tests/adk-*.test.mjs` suites consume the
+> internals, so removing the blanket ignore surfaces no live ADK dead code (the one
+> stale internal export it had been masking, `_defaultToolScope`, was deleted in the
+> same change). What is still NOT gated by the *default* lint is the
+> handoff/router/memory/bus public API: running knip with the non-default
+> `--include-entry-exports` flag reports those package entry exports as unused,
+> because in a default build they are reached only through user
+> `~/.ccpatch/agents/*.mjs` modules or the test suites, not by `core/`. COD-13 has
+> since shipped `adk_handoff_demo` as a real consumer (the `adk` profile, globally
+> `enabled: false`), so promoting the lint to `--include-entry-exports` — gating
+> those public exports too — can be revisited once that consumer is armed by default.
 
 The ADK is a small, dependency-free (ESM, Node 20+, no build step) toolkit for
 **defining, registering, and orchestrating agents inside a live Claude Code
