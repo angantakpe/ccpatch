@@ -241,6 +241,15 @@ export function toolStatusesIn(scope) {
 // A separate MAX_INPUT_BYTES ceiling (enforced in the call() wrapper, not here)
 // guards against oversized input independent of schema.
 
+/**
+ * Keys forbidden as OWN properties of a validated input object: the classic
+ * prototype-pollution vectors. A shallow author schema (or an absent one) can't
+ * guard these, so validateInput rejects them unconditionally at the input's top
+ * level regardless of the schema. Top-level only — matches the validator's shallow
+ * depth (it does not recurse into nested object values).
+ */
+const FORBIDDEN_INPUT_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
 const PRIMITIVE_CHECK = {
   string: (v) => typeof v === 'string',
   number: (v) => typeof v === 'number' && !Number.isNaN(v),
@@ -264,9 +273,33 @@ export function validateInput(schema, input) {
     return `expected an object input, got ${Array.isArray(input) ? 'array' : typeof input}`;
   }
 
+  // DEFENCE-IN-DEPTH (schema-independent). Reject prototype-pollution vectors that
+  // a shallow author schema can't catch, BEFORE any required/additionalProperties
+  // logic. A `__proto__` own key from `JSON.parse('{"__proto__":{...}}')` is an
+  // OWN, enumerable property (it does NOT invoke the proto setter), so merely
+  // reading it never pollutes — but an author who later spreads/assigns from this
+  // input could. We forbid these keys at the validated object's TOP LEVEL, which
+  // matches this validator's shallow depth (it does NOT recurse into nested object
+  // values — see unenforcedSchemaKeywords). Detection uses getOwnPropertyNames so
+  // it catches non-enumerable forms too, not just Object.keys. Fail-OPEN if the
+  // reflection itself throws (exotic proxy/host object): a detected key is a hard
+  // REJECT, but a thrown probe must never crash the call() boundary.
+  try {
+    for (const key of Object.getOwnPropertyNames(input)) {
+      if (FORBIDDEN_INPUT_KEYS.has(key)) {
+        return `forbidden property "${key}" (prototype-pollution vector)`;
+      }
+    }
+  } catch (_) {
+    /* unreflectable input → fall through to the normal (shallow) checks */
+  }
+
   const required = Array.isArray(schema.required) ? schema.required : [];
   for (const key of required) {
-    if (!(key in input) || input[key] === undefined) {
+    // OWN-property presence only: `key in input` would traverse the prototype
+    // chain, so e.g. required:['constructor'] would be trivially satisfied by ANY
+    // object (inherited from Object.prototype). Require the caller's OWN key.
+    if (!Object.prototype.hasOwnProperty.call(input, key) || input[key] === undefined) {
       return `missing required property "${key}"`;
     }
   }

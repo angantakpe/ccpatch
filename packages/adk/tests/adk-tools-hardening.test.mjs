@@ -1035,98 +1035,125 @@ test('a downgraded-then-restored gated registrar lets the queued tool inject thr
   }
 });
 
-// ── H2: validateInput `required` traverses the prototype chain (`key in input`) ──
+// ── H2: validateInput `required` is OWN-property only (no prototype-chain reach) ─
 
-test('validateInput required uses `key in input` (prototype-chain) — documents the inherited-key boundary behavior (finding H2)', () => {
-  // GROUNDED current behavior: `required` is checked with `key in input`, which
-  // walks the prototype chain. This is a DOCUMENTED gap, not a fix: it is shallow
-  // by design and the deep/own-only check is the author's `validate` hook's job
-  // (see defineTool's schema foot-gun warning). These assertions PIN the current
-  // behavior so a future change is a conscious decision, and prove the boundary
-  // stays SAFE (no inherited value is leaked into the validated input, no global
-  // mutation).
+test('validateInput required uses an OWN-property check — inherited / Object.prototype names do NOT satisfy it (finding H2, fixed)', () => {
+  // FIXED behavior. `required` is now checked with Object.prototype.hasOwnProperty,
+  // not `key in input`, so a key that exists only on the prototype chain no longer
+  // satisfies it. This closes the "required:['constructor'] passes against {}"
+  // bypass without changing the error-message contract.
 
-  // (a) An inherited `needed` satisfies `required:['needed']` even though the input
-  //     has NO own property of that name. (`key in input` is true via the proto.)
+  // (a) An inherited `needed` does NOT satisfy required — the input has no OWN key.
   const proto = { needed: 'fromProto' };
   const inheritedOnly = Object.create(proto);
   assert.equal(
-    validateInput({ type: 'object', required: ['needed'] }, inheritedOnly), null,
-    'an inherited property currently satisfies `required` (prototype-chain reach)',
-  );
-  assert.equal(
-    Object.prototype.hasOwnProperty.call(inheritedOnly, 'needed'), false,
-    'the input still has NO own `needed` — validateInput did not materialize one',
+    validateInput({ type: 'object', required: ['needed'] }, inheritedOnly),
+    'missing required property "needed"',
+    'an inherited-only property no longer satisfies `required`',
   );
 
-  // (b) `required:['constructor']` is trivially satisfied by ANY object because
-  //     `'constructor' in {}` is true via Object.prototype. Pin this so authors who
-  //     (mis)use an Object.prototype name as a required key know it is a no-op.
+  // (b) Object.prototype names are no longer trivially satisfied by any object.
   assert.equal(
-    validateInput({ type: 'object', required: ['constructor'] }, {}), null,
-    "'constructor' required against {} currently passes (inherited from Object.prototype)",
+    validateInput({ type: 'object', required: ['constructor'] }, {}),
+    'missing required property "constructor"',
+    "'constructor' required against {} is now REJECTED (own-property check)",
   );
   assert.equal(
-    validateInput({ type: 'object', required: ['toString'] }, {}), null,
-    "'toString' required against {} currently passes (inherited)",
+    validateInput({ type: 'object', required: ['toString'] }, {}),
+    'missing required property "toString"',
+    "'toString' required against {} is now REJECTED (own-property check)",
   );
 
-  // (c) The boundary stays SAFE: a `__proto__` payload does NOT mutate the global
-  //     prototype, and a genuinely-absent OWN required key is still rejected.
-  assert.equal(({}).polluted, undefined, 'no global prototype mutation before');
-  const call = { __proto__: { injected: 1 } };
+  // (c) A genuine OWN required key still passes (no false negative). Note: an OWN
+  //     `__proto__` key is separately forbidden (see H3), so use an ordinary name.
   assert.equal(
-    validateInput({ type: 'object', required: ['absent'] }, call),
+    validateInput({ type: 'object', required: ['needed'] }, { needed: 1 }), null,
+    'a genuine OWN required key still satisfies `required`',
+  );
+
+  // (d) The error shape for a genuinely-absent key is unchanged.
+  assert.equal(
+    validateInput({ type: 'object', required: ['absent'] }, { other: 1 }),
     'missing required property "absent"',
-    'a key that is neither own nor inherited is still rejected',
+    'absent key still rejected with the same message contract',
   );
-  assert.equal(({}).injected, undefined, 'still no global prototype mutation after');
 });
 
-// ── H3: additionalProperties:false + a JSON.parse __proto__ own key ─────────────
+// ── H3: forbidden prototype-pollution keys are rejected at the call() boundary ──
 
-test('additionalProperties:false does NOT reject a JSON.parse-produced __proto__ key, but there is NO global prototype mutation (finding H3)', () => {
-  // GROUNDED current behavior: `JSON.parse('{"__proto__":...}')` creates an OWN
-  // data property named "__proto__" (it does NOT invoke the proto setter).
-  // additionalProperties:false iterates Object.keys(input) — which DOES include
-  // "__proto__" — and tests `!(key in props)`. But `'__proto__' in props` is TRUE
-  // for EVERY object (inherited from Object.prototype), so the "__proto__" key is
-  // wrongly treated as "declared" and slips past the additionalProperties gate.
-  //
-  // SECURITY-RELEVANT part that we PROVE holds: despite the validation miss, there
-  // is NO prototype pollution — the key stays an inert own data property and
-  // ({}).x remains undefined. This test PINS both facts: the (benign-here)
-  // validation gap AND the absence of any global mutation. The fix for the gap is
-  // the author's `validate` hook / a real JSON-schema validator; the engine's job
-  // is only to never POLLUTE, which it does not.
+test('validateInput rejects an OWN __proto__ / constructor / prototype key regardless of schema, with NO prototype mutation (finding H3, fixed)', () => {
+  // FIXED behavior. `JSON.parse('{"__proto__":{...}}')` makes an OWN, enumerable
+  // "__proto__" data property (it does NOT invoke the proto setter). The validator
+  // now rejects such forbidden keys up front, schema-independent, BEFORE the
+  // required/additionalProperties logic — and it never pollutes Object.prototype.
   assert.equal(({}).x, undefined, 'baseline: no inherited x');
 
-  const input = JSON.parse('{"__proto__":{"x":1},"a":"ok"}');
+  // The exact JSON.parse __proto__ case the requirement calls out.
+  const input = JSON.parse('{"__proto__":{"x":1},"a":1}');
   assert.ok(
     Object.prototype.hasOwnProperty.call(input, '__proto__'),
     'JSON.parse produced an OWN __proto__ data property',
   );
-  assert.ok(Object.keys(input).includes('__proto__'), 'Object.keys sees the __proto__ own key');
-
-  const schema = { type: 'object', properties: { a: { type: 'string' } }, additionalProperties: false };
-  // Documented current behavior: the __proto__ own key is NOT rejected (because
-  // `'__proto__' in props` is inherited-true). If a future hardening fixes this,
-  // this assertion flips to expect an "unexpected property" message — a conscious
-  // change, not a silent regression.
-  assert.equal(
-    validateInput(schema, input), null,
-    'current behavior: additionalProperties:false misses the inherited-named __proto__ key',
+  assert.ok(
+    Object.getOwnPropertyNames(input).includes('__proto__'),
+    'getOwnPropertyNames sees the __proto__ own key',
   );
 
-  // The load-bearing safety guarantee: NO global prototype mutation occurred.
+  const schema = { type: 'object', properties: { a: { type: 'number' } }, additionalProperties: false };
+  assert.match(
+    validateInput(schema, input),
+    /forbidden property "__proto__" \(prototype-pollution vector\)/,
+    'a JSON.parse __proto__ payload is now REJECTED, not silently accepted',
+  );
   assert.equal(({}).x, undefined, 'no prototype pollution after validating a __proto__ payload');
   assert.equal(Object.prototype.x, undefined, 'Object.prototype was not touched');
 
-  // A NON-inherited unexpected key IS still rejected (the gate works in general).
-  const input2 = JSON.parse('{"a":"ok","rogue":1}');
+  // An OWN `constructor` / `prototype` key is rejected too, even with no schema props.
   assert.match(
-    validateInput(schema, input2), /unexpected property "rogue"/,
-    'a genuinely-undeclared key is still rejected by additionalProperties:false',
+    validateInput({ type: 'object' }, JSON.parse('{"constructor":1}')),
+    /forbidden property "constructor"/,
+    'an own constructor key is rejected schema-independently',
+  );
+  assert.match(
+    validateInput({ type: 'object' }, JSON.parse('{"prototype":1}')),
+    /forbidden property "prototype"/,
+    'an own prototype key is rejected schema-independently',
+  );
+
+  // The forbidden-key check fires BEFORE additionalProperties — a forbidden key
+  // wins over an "unexpected property" message even when both would apply.
+  assert.match(
+    validateInput(schema, JSON.parse('{"__proto__":{"x":1}}')),
+    /forbidden property "__proto__"/,
+    'forbidden-key rejection precedes additionalProperties',
+  );
+});
+
+test('validateInput forbidden-key guard has NO false positives: ordinary keys, schema-named fields, and nested object VALUES are unaffected (finding H3)', () => {
+  // The guard forbids the three vector NAMES only at the TOP LEVEL of the validated
+  // input — matching this validator's shallow depth (it never recurses into nested
+  // object values). Legitimate inputs must be unaffected.
+  assert.equal(({}).y, undefined, 'baseline: no inherited y');
+
+  // Ordinary own keys, including a field literally named in the schema.
+  const schema = { type: 'object', properties: { name: { type: 'string' }, age: { type: 'number' } }, additionalProperties: false };
+  assert.equal(validateInput(schema, { name: 'ok', age: 3 }), null, 'a normal input still passes');
+
+  // A nested object VALUE that itself carries __proto__ data is NOT recursed into,
+  // so it is NOT rejected — and it does not pollute. We only forbid the key at the
+  // TOP level of the validated object.
+  const nested = { data: JSON.parse('{"__proto__":{"y":1},"z":2}') };
+  assert.equal(
+    validateInput({ type: 'object', properties: { data: { type: 'object' } } }, nested), null,
+    'a __proto__ key inside a nested VALUE is not rejected (shallow depth preserved)',
+  );
+  assert.equal(({}).y, undefined, 'still no prototype pollution from the nested value');
+
+  // A field whose VALUE is the string "constructor" is fine — we forbid the KEY,
+  // never the value.
+  assert.equal(
+    validateInput({ type: 'object', properties: { role: { type: 'string' } } }, { role: 'constructor' }), null,
+    'a value equal to a forbidden name is fine — only the KEY is forbidden',
   );
 });
 
