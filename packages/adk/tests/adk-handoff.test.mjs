@@ -743,6 +743,44 @@ test('swap stack is capped at MAX_SWAP_DEPTH — a runaway swap chain is refused
   assert.equal(globalThis.__ccpSystemPromptOverride, 'BASE', 'release unwinds the whole stack');
 });
 
+// Regression for COD-10: depthOf()/swapDepthIn() is now backed by an O(1)
+// per-scope counter maintained on push/restore instead of an O(n) stack walk.
+// This pins that the counter stays EXACTLY correct across nested push/restore —
+// monotonically up on each swap, down on each LIFO restore, back to 0 on full
+// unwind (exercising the delete-at-0 path), and correct again after re-swapping.
+test('swap depth tracking stays correct across nested push/restore (COD-10)', async () => {
+  resetGlobals();
+  captureBus();
+  globalThis.__ccpSystemPromptOverride = 'BASE';
+  globalThis.__ccpSetSystemPrompt = (s) => { globalThis.__ccpSystemPromptOverride = s; };
+  globalThis.__ccpGetSystemPrompt = () => globalThis.__ccpSystemPromptOverride ?? null;
+
+  const scope = createHandoffScope();
+  const tok = tryAcquireSwap(scope);
+  assert.equal(swapDepthIn(scope), 0, 'depth starts at 0');
+
+  // Push five nested swaps — depth must increment by exactly one each time.
+  for (let i = 1; i <= 5; i++) {
+    tok.swap(`P${i}`);
+    assert.equal(swapDepthIn(scope), i, `depth is ${i} after push #${i}`);
+  }
+
+  // Pop them LIFO — depth must decrement by exactly one each time, to 0.
+  for (let i = 4; i >= 0; i--) {
+    assert.equal(tok.restore(), true, `restore #${5 - i} pops an owned entry`);
+    assert.equal(swapDepthIn(scope), i, `depth is ${i} after restore`);
+  }
+  assert.equal(globalThis.__ccpSystemPromptOverride, 'BASE', 'fully unwound to BASE');
+
+  // After a full unwind (counter key deleted at 0), a fresh swap still tracks
+  // from 1 — the counter is not stuck at a stale value.
+  tok.swap('AGAIN');
+  assert.equal(swapDepthIn(scope), 1, 'depth re-tracks from 1 after a full unwind');
+
+  tok.release();
+  assert.equal(swapDepthIn(scope), 0, 'release drains the depth back to 0');
+});
+
 // ── swap enforces the agent tools allowlist on the live tool surface ──────────
 
 test('swap restricts the live tool surface to the agent tools allowlist and restores on revert', async () => {
