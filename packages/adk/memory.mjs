@@ -34,11 +34,6 @@ const MAX_COALESCE_MS = 1000; // 1 s
 // Owner-only perms for the persisted store (rw-------). The store can hold
 // secrets, so it must never be world/group readable on disk.
 const FILE_MODE = 0o600;
-// How old a lockfile may be before we treat it as STALE (left behind by a crashed
-// writer) and steal it. Long enough to never race a healthy writer's brief
-// read-merge-write critical section, short enough that a crash doesn't wedge the
-// store for long.
-const LOCK_STALE_MS = 10_000; // 10 s
 // Absolute backstop: a lock older than this is stolen EVEN IF its holder pid still
 // looks alive. Guards against pid REUSE (a crashed holder's pid recycled by an
 // unrelated live process would otherwise wedge the store forever) and genuinely
@@ -607,6 +602,30 @@ export function createMemory({ path: filePath, transform, maxBytes, appendLog = 
   // the lock closes). Only if the bounded wait is exhausted do we fall back to a
   // best-effort unlocked write — degraded, but never a hang or a deadlock.
   const lockPath = `${resolved}.lock`;
+  // Monotonic per-instance counter so two acquisitions from THIS process (e.g. a
+  // re-acquire after a steal) still mint distinct tokens.
+  let lockTokenSeq = 0;
+
+  /**
+   * Mint a unique ownership token for one acquisition. The token is `pid:nonce`,
+   * where `nonce` is per-acquire (counter + random). releaseLock() only removes
+   * the lockfile when its on-disk content still equals the token THIS holder
+   * wrote — so a writer whose lock was stolen and re-created by someone else can
+   * never delete the new owner's lock (release-after-takeover safety).
+   */
+  function mintLockToken() {
+    return `${pid}:${++lockTokenSeq}:${Math.random().toString(36).slice(2)}`;
+  }
+
+  /** @returns {string|null} the raw lockfile content (trimmed), or null if unreadable. */
+  function readLockRaw() {
+    try {
+      const s = String(readFileSync(lockPath, 'utf8')).trim();
+      return s.length > 0 ? s : null; // empty content → unknown holder.
+    } catch {
+      return null;
+    }
+  }
 
   /** Block the current thread for ~ms WITHOUT async (writeToDisk is synchronous). */
   function sleepSync(ms) {
@@ -622,12 +641,12 @@ export function createMemory({ path: filePath, transform, maxBytes, appendLog = 
 
   /** @returns {number|null} the pid recorded in the lockfile, or null if unreadable. */
   function readLockPid() {
-    try {
-      const n = Number.parseInt(String(readFileSync(lockPath, 'utf8')).trim(), 10);
-      return Number.isInteger(n) && n > 0 ? n : null;
-    } catch {
-      return null; // empty/garbage/legacy lock with no pid → unknown holder.
-    }
+    // Content is `pid:nonce` (our token) or a bare pid (legacy lock). Parse the
+    // leading integer either way; `parseInt` stops at the ':' for the token form.
+    const raw = readLockRaw();
+    if (raw === null) return null; // empty/garbage/legacy lock with no pid → unknown holder.
+    const n = Number.parseInt(raw, 10);
+    return Number.isInteger(n) && n > 0 ? n : null;
   }
 
   /** @returns {boolean} true when pid `p` is a live process on THIS host. */
@@ -645,10 +664,15 @@ export function createMemory({ path: filePath, transform, maxBytes, appendLog = 
    * Remove the existing lock IFF it is safe to steal. A holder whose pid is still
    * ALIVE is mid-critical-section (however slow) and is NEVER stolen — this is the
    * fix for the old mtime-only rule, which would rob a healthy-but-slow writer the
-   * instant the lock crossed LOCK_STALE_MS. We steal only when the holder is
-   * provably dead, the holder is unknown AND the lock is mtime-stale (crash
-   * backstop), or the lock is older than the hard ceiling (pid-reuse / hung-writer
-   * backstop).
+   * instant the lock crossed a short staleness window. We steal only when the
+   * holder is provably DEAD (known pid + ESRCH), or ANY lock is older than the
+   * HARD ceiling (pid-reuse / hung-writer / never-stamped backstop).
+   *
+   * UNKNOWN-holder policy: an empty/garbage lock (the pid stamp never landed —
+   * ENOSPC/EIO) does NOT identify a dead holder, so it is treated as a LIVE holder
+   * and stolen only at the HARD ceiling. Otherwise a stamp that failed to write
+   * would let a contender steal a healthy live writer's lock far too soon, putting
+   * two writers in the critical section.
    * @returns {boolean} true when the stale lock was removed (caller may re-open).
    */
   function tryStealStaleLock() {
@@ -656,12 +680,20 @@ export function createMemory({ path: filePath, transform, maxBytes, appendLog = 
       const ageMs = Date.now() - statSync(lockPath).mtimeMs;
       const holderPid = readLockPid();
       const alive = holderPid !== null && isPidAlive(holderPid);
-      // A live holder within the hard ceiling owns the lock — do not steal.
-      if (alive && ageMs <= LOCK_HARD_STALE_MS) return false;
-      // Steal: dead holder, OR (unknown holder AND mtime-stale), OR past the hard
-      // ceiling (alive-but-ancient ⇒ reused pid / hung writer).
+      // Past the hard ceiling, ANY lock is stealable (alive-but-ancient ⇒ reused
+      // pid / hung writer; unknown holder ⇒ never-stamped crashed writer).
+      if (ageMs > LOCK_HARD_STALE_MS) {
+        rmSync(lockPath, { force: true });
+        return true;
+      }
+      // Within the hard ceiling: a KNOWN-DEAD holder (pid stamped + ESRCH) is
+      // provably crashed and stolen immediately, regardless of mtime. A live
+      // holder, or an UNKNOWN holder (empty/unstamped content), is respected here
+      // and only stolen at the hard ceiling above — the unknown case is treated as
+      // live, NOT soft-stealable, so a stamp that failed to write (ENOSPC/EIO)
+      // can't be mistaken for a dead holder and stolen too soon.
       const dead = holderPid !== null && !alive;
-      if (dead || ageMs > LOCK_STALE_MS || ageMs > LOCK_HARD_STALE_MS) {
+      if (dead) {
         rmSync(lockPath, { force: true });
         return true;
       }
@@ -671,15 +703,23 @@ export function createMemory({ path: filePath, transform, maxBytes, appendLog = 
     return false;
   }
 
-  /** @returns {number|null} an open fd for the held lock, or null if not acquired. */
+  /**
+   * @returns {{ fd: number, token: string }|null} the held-lock handle (open fd +
+   * the unique ownership token we stamped), or null if the lock was not acquired.
+   */
   function acquireLock() {
     for (let attempt = 0; ; attempt++) {
       try {
         const fd = openSync(lockPath, 'wx', FILE_MODE);
-        // Record our pid so a later writer can tell a live holder from a crashed
-        // one (best-effort; mtime staleness still works if this write fails).
-        try { writeSync(fd, String(pid)); } catch { /* best-effort pid stamp */ }
-        return fd;
+        // Stamp a UNIQUE ownership token (pid + per-acquire nonce). The pid lets a
+        // later writer tell a live holder from a crashed one; the nonce lets US
+        // verify on release that the lock we're about to delete is STILL the one we
+        // created (not a successor's after a steal). If this write fails the lock
+        // has empty content — treated as an unknown/live holder until the hard
+        // ceiling (see tryStealStaleLock), NOT soft-stealable.
+        const token = mintLockToken();
+        try { writeSync(fd, token); } catch { /* best-effort stamp; empty ⇒ unknown holder */ }
+        return { fd, token };
       } catch (err) {
         if (!err || err.code !== 'EEXIST') return null; // unexpected → no lock.
         // Lock is held. If it's safe to steal (crashed/dead/ancient holder),
@@ -697,10 +737,27 @@ export function createMemory({ path: filePath, transform, maxBytes, appendLog = 
     }
   }
 
-  /** Release the lock: close the fd and remove the lockfile, both best-effort. */
-  function releaseLock(fd) {
+  /**
+   * Release the lock: close the fd and remove the lockfile — but ONLY if the
+   * on-disk content still matches the token WE wrote. If it differs, our lock was
+   * stolen (soft fuse / hard ceiling) and re-created by another process that now
+   * owns it; deleting it by path would drop a lock another writer holds, putting
+   * two writers in the critical section. In that case we skip the rmSync and leave
+   * the new owner's lock intact. Fully fail-open: any error in the ownership
+   * re-check is swallowed and never thrown out of releaseLock.
+   * @param {{ fd: number, token: string }} handle
+   */
+  function releaseLock(handle) {
+    const { fd, token } = handle;
     try { closeSync(fd); } catch { /* ignore */ }
-    try { rmSync(lockPath, { force: true }); } catch { /* ignore */ }
+    try {
+      // Only delete the lockfile if it still carries OUR token. A token mismatch
+      // (or an empty/unstamped lock — which we never deliberately re-create) means
+      // someone else owns it now: leave it untouched.
+      if (readLockRaw() === token) {
+        rmSync(lockPath, { force: true });
+      }
+    } catch { /* ownership re-check / rm race lost → fail open, never throw */ }
   }
 
   function writeToDisk() {
@@ -709,14 +766,14 @@ export function createMemory({ path: filePath, transform, maxBytes, appendLog = 
     // Acquire the cross-process lock for the read-merge-write critical section.
     // If we can't get it (a healthy concurrent writer holds it), fall back to an
     // unlocked best-effort write — we log the contention but never hang/throw.
-    const lockFd = acquireLock();
-    if (lockFd === null) {
+    const lockHandle = acquireLock();
+    if (lockHandle === null) {
       host.emit('memory.lock.contended', { path: resolved });
     }
     try {
       writeToDiskLocked();
     } finally {
-      if (lockFd !== null) releaseLock(lockFd);
+      if (lockHandle !== null) releaseLock(lockHandle);
     }
   }
 
