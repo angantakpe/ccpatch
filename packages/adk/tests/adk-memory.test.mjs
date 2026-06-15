@@ -31,6 +31,7 @@ import {
   realpathSync,
   openSync,
   closeSync,
+  writeSync,
 } from 'node:fs';
 import { join, relative } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -745,6 +746,150 @@ test('writeToDisk falls back (no hang/throw) and emits memory.lock.contended whe
   );
   // The fallback write still persisted our value (degraded, but never dropped).
   assert.equal(JSON.parse(readFileSync(file, 'utf8')).x, 2, 'fallback write still persisted the value');
+});
+
+// ── cross-process lock: live-contention + pid-liveness backstops ──────────────
+// These complement the two tests above with the LIVE-pid stamped variants that
+// exercise tryStealStaleLock()/isPidAlive() directly: a live holder is NEVER
+// stolen within the hard ceiling (bounded retry → degraded write), a dead holder
+// IS stolen even with a fresh mtime, and a live-but-ancient holder is stolen by
+// the hard-stale backstop.
+
+/** A pid that is provably NOT a running process on this host (for steal tests). */
+function findDeadPid() {
+  for (let p = 99_999; p > 90_000; p--) {
+    try { process.kill(p, 0); } catch (e) { if (e && e.code === 'ESRCH') return p; }
+  }
+  return 999_999; // extremely unlikely to be live; ESRCH search above almost always wins.
+}
+
+/** Run `fn` with a stub bus capturing emitted topics; restores the prior bus. */
+async function withBusCapture(fn) {
+  const topics = [];
+  const prevBus = globalThis.__ccpBus;
+  globalThis.__ccpBus = { emit: (topic) => topics.push(topic) };
+  try {
+    await fn();
+  } finally {
+    globalThis.__ccpBus = prevBus;
+  }
+  return topics;
+}
+
+test('M1: a FRESH lock stamped with a LIVE pid is NOT stolen — bounded retry then a degraded (contended) write', async () => {
+  // LIVE contention: the lockfile holds THIS process's pid (provably alive) with a
+  // fresh mtime. tryStealStaleLock() must refuse to steal it (alive && within the
+  // hard ceiling). acquireLock() then does its bounded retry budget
+  // (LOCK_RETRY_ATTEMPTS × LOCK_RETRY_MS ≈ 1s — the same real wait the existing
+  // fresh-lock test pays) and finally degrades to a best-effort unlocked write that
+  // emits memory.lock.contended rather than HANGING or stealing.
+  const dir = freshDir();
+  const file = join(dir, 'live-contention.json');
+  const mem = createMemory({ path: file });
+  mem.set('x', 1);
+  await mem.flush();
+
+  const lockPath = `${file}.lock`;
+  const fd = openSync(lockPath, 'w'); // fresh mtime = now
+  writeSync(fd, String(process.pid)); // stamp a LIVE pid (us)
+
+  let topics;
+  try {
+    mem.set('x', 2);
+    topics = await withBusCapture(() => mem.flush()); // must not hang/throw/steal
+  } finally {
+    try { closeSync(fd); } catch { /* ignore */ }
+    rmSync(lockPath, { force: true });
+  }
+
+  assert.ok(
+    topics.includes('memory.lock.contended'),
+    'a live-held lock degrades to an unlocked write that emits memory.lock.contended',
+  );
+  assert.equal(
+    JSON.parse(readFileSync(file, 'utf8')).x, 2,
+    'the degraded write still persisted the value (never dropped, never hung)',
+  );
+});
+
+test('M2(a): a lock with a DEAD pid + fresh mtime IS stolen and the write completes under the lock', async () => {
+  // pid-liveness backstop: even with a brand-new mtime, a holder whose pid is dead
+  // (ESRCH) is provably crashed, so tryStealStaleLock() removes it and the writer
+  // re-acquires — no contended degrade, the value lands under a real lock.
+  const dir = freshDir();
+  const file = join(dir, 'dead-pid.json');
+  const mem = createMemory({ path: file });
+  mem.set('x', 1);
+  await mem.flush();
+
+  const lockPath = `${file}.lock`;
+  const fd = openSync(lockPath, 'w'); // fresh mtime
+  writeSync(fd, String(findDeadPid())); // stamp a DEAD pid
+  closeSync(fd);
+
+  mem.set('x', 2);
+  const topics = await withBusCapture(() => mem.flush());
+
+  assert.equal(existsSync(lockPath), false, 'the dead-holder lock was stolen and released');
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).x, 2, 'write completed after stealing the dead lock');
+  assert.equal(
+    topics.includes('memory.lock.contended'), false,
+    'no contended degrade — the steal succeeded so the write ran UNDER the lock',
+  );
+});
+
+test('M2(b): a LIVE pid with an mtime past the hard-stale ceiling IS stolen (pid-reuse / hung-writer backstop)', async () => {
+  // The hard-stale backstop: a live pid normally protects the lock, but a lock
+  // OLDER than LOCK_HARD_STALE_MS (60s) is stolen anyway — otherwise a reused pid
+  // (a crashed holder's number recycled by an unrelated live process) or a hung
+  // writer would wedge the store forever.
+  const dir = freshDir();
+  const file = join(dir, 'hard-stale-live.json');
+  const mem = createMemory({ path: file });
+  mem.set('x', 1);
+  await mem.flush();
+
+  const lockPath = `${file}.lock`;
+  const fd = openSync(lockPath, 'w');
+  writeSync(fd, String(process.pid)); // a LIVE pid (us)
+  closeSync(fd);
+  // Age the lock to 2 minutes — well past the 60s hard ceiling.
+  const old = Date.now() / 1000 - 120;
+  utimesSync(lockPath, old, old);
+
+  mem.set('x', 2);
+  const topics = await withBusCapture(() => mem.flush());
+
+  assert.equal(existsSync(lockPath), false, 'the live-but-ancient lock was stolen by the hard-stale backstop');
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).x, 2, 'write completed under the re-acquired lock');
+  assert.equal(topics.includes('memory.lock.contended'), false, 'steal succeeded → no contended degrade');
+});
+
+test('M2(c): a LIVE pid with a FRESH mtime is NOT stolen (the lock is respected)', async () => {
+  // The complement of (a)/(b): a healthy holder (live pid, fresh mtime) within the
+  // hard ceiling owns the lock and must NEVER be stolen — proven by the lockfile
+  // surviving the contended write. (The degrade itself is the subject of M1.)
+  const dir = freshDir();
+  const file = join(dir, 'live-fresh.json');
+  const mem = createMemory({ path: file });
+  mem.set('x', 1);
+  await mem.flush();
+
+  const lockPath = `${file}.lock`;
+  const fd = openSync(lockPath, 'w'); // fresh mtime
+  writeSync(fd, String(process.pid)); // live pid
+
+  let topics;
+  try {
+    mem.set('x', 2);
+    topics = await withBusCapture(() => mem.flush());
+    assert.equal(existsSync(lockPath), true, 'a live+fresh lock is NOT stolen — it still exists after the write');
+  } finally {
+    try { closeSync(fd); } catch { /* ignore */ }
+    rmSync(lockPath, { force: true });
+  }
+  assert.ok(topics.includes('memory.lock.contended'), 'the writer degraded around the respected lock');
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).x, 2, 'the degraded write still persisted the value');
 });
 
 // ── transform round-trip verification at construction ─────────────────────────

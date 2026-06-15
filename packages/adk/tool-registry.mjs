@@ -172,6 +172,13 @@ export function createToolScope() {
     // only upserts names the ADK owns. The gated path defers to the producer's
     // __ccpRegisterTool, but we still record ownership there for symmetry.
     owned: new Set(),
+    // Latched true the first time an injection successfully routes through the
+    // nonce-gated registrar. Once a scope has PROVEN the host runs the
+    // authenticated dispatch model, the unauthenticated fallback (direct
+    // __ccpRawTools mutation) must NOT silently take over if the registrar later
+    // disappears mid-session — that is a privilege DOWNGRADE. See tryInject's
+    // fallback arm. Recovery happens (non-latching) when the registrar returns.
+    everGated: false,
   };
 }
 
@@ -234,6 +241,15 @@ export function toolStatusesIn(scope) {
 // A separate MAX_INPUT_BYTES ceiling (enforced in the call() wrapper, not here)
 // guards against oversized input independent of schema.
 
+/**
+ * Keys forbidden as OWN properties of a validated input object: the classic
+ * prototype-pollution vectors. A shallow author schema (or an absent one) can't
+ * guard these, so validateInput rejects them unconditionally at the input's top
+ * level regardless of the schema. Top-level only — matches the validator's shallow
+ * depth (it does not recurse into nested object values).
+ */
+const FORBIDDEN_INPUT_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
 const PRIMITIVE_CHECK = {
   string: (v) => typeof v === 'string',
   number: (v) => typeof v === 'number' && !Number.isNaN(v),
@@ -257,9 +273,33 @@ export function validateInput(schema, input) {
     return `expected an object input, got ${Array.isArray(input) ? 'array' : typeof input}`;
   }
 
+  // DEFENCE-IN-DEPTH (schema-independent). Reject prototype-pollution vectors that
+  // a shallow author schema can't catch, BEFORE any required/additionalProperties
+  // logic. A `__proto__` own key from `JSON.parse('{"__proto__":{...}}')` is an
+  // OWN, enumerable property (it does NOT invoke the proto setter), so merely
+  // reading it never pollutes — but an author who later spreads/assigns from this
+  // input could. We forbid these keys at the validated object's TOP LEVEL, which
+  // matches this validator's shallow depth (it does NOT recurse into nested object
+  // values — see unenforcedSchemaKeywords). Detection uses getOwnPropertyNames so
+  // it catches non-enumerable forms too, not just Object.keys. Fail-OPEN if the
+  // reflection itself throws (exotic proxy/host object): a detected key is a hard
+  // REJECT, but a thrown probe must never crash the call() boundary.
+  try {
+    for (const key of Object.getOwnPropertyNames(input)) {
+      if (FORBIDDEN_INPUT_KEYS.has(key)) {
+        return `forbidden property "${key}" (prototype-pollution vector)`;
+      }
+    }
+  } catch (_) {
+    /* unreflectable input → fall through to the normal (shallow) checks */
+  }
+
   const required = Array.isArray(schema.required) ? schema.required : [];
   for (const key of required) {
-    if (!(key in input) || input[key] === undefined) {
+    // OWN-property presence only: `key in input` would traverse the prototype
+    // chain, so e.g. required:['constructor'] would be trivially satisfied by ANY
+    // object (inherited from Object.prototype). Require the caller's OWN key.
+    if (!Object.prototype.hasOwnProperty.call(input, key) || input[key] === undefined) {
       return `missing required property "${key}"`;
     }
   }
@@ -368,6 +408,28 @@ export function __resetSchemaWarnDedupeForTests() {
 /** Build a tool_result error block (no execute() call happened). */
 function errorResult(text) {
   return [{ type: 'text', text }];
+}
+
+/**
+ * Canonical form of a tool name for COLLISION DETECTION ONLY (never for
+ * registration — the dispatcher always sees the author's exact name). Catches
+ * confusable shadowings of an existing/built-in name: surrounding whitespace,
+ * case folding, and unicode confusables that NFKC + lower-case collapse (e.g.
+ * fullwidth/ligature forms). Fail-OPEN: any throw (exotic input, no String
+ * normalize) falls back to the raw string so a normalization hiccup can never
+ * break injection — the caller then degrades to plain exact-equality.
+ * @param {string} name
+ * @returns {string} the normalized comparison key.
+ */
+function normalizeNameForCollision(name) {
+  if (typeof name !== 'string') return name;
+  try {
+    let n = name.trim();
+    if (typeof n.normalize === 'function') n = n.normalize('NFKC');
+    return n.toLowerCase();
+  } catch (_) {
+    return name; // fail open → caller compares raw, exactly as before.
+  }
 }
 
 /**
@@ -507,28 +569,64 @@ function tryInject(scope, toolDef) {
     // May throw (invalid nonce) — the caller's try/catch turns that into a
     // failed-this-attempt, never an uncaught exception.
     const ok = host.callRegisterTool(nonce, toolObj) === true;
-    if (ok) scope.owned.add(toolDef.name);
+    if (ok) {
+      scope.owned.add(toolDef.name);
+      // Remember that this scope has a proven authenticated path. If the registrar
+      // later vanishes, the fallback arm below refuses to silently downgrade.
+      scope.everGated = true;
+    }
     return ok ? 'ok' : 'refused';
+  }
+
+  // PRIVILEGE-DOWNGRADE GUARD. If this scope EVER injected through the nonce-gated
+  // registrar but the registrar is now absent (removed mid-session) while
+  // __ccpRawTools stays live, the unauthenticated fallback must NOT silently take
+  // over — an attacker who can drop the registrar global could otherwise inject
+  // ANY tool (no nonce, no contract) straight into the live dispatch array. Refuse
+  // as a TRANSIENT drift (non-latching, like gatedPathTrusted): the bounded poll
+  // keeps retrying, so if the registrar comes back the next tick injects through
+  // the authenticated path. Fail-open is preserved for the never-gated bare-array
+  // path (everGated stays false there).
+  if (scope.everGated) {
+    debug(`[adk:tools] refusing fallback injection of "${toolDef.name}" — gated registrar disappeared mid-session (privilege downgrade)`);
+    return 'refused';
   }
 
   // Fallback — direct array mutation when no registrar is present.
   const getRaw = host.rawTools();
   if (!Array.isArray(getRaw)) return 'absent';
+
+  // CONFUSABLE-SHADOW GUARD. The collision check compares NORMALIZED names (trim +
+  // NFKC + case-fold) so a built-in like "Bash" can't be shadowed by "bash",
+  // "Bash " or a unicode-confusable that the dispatcher would route distinctly.
+  // We only refuse a normalized match against a name the ADK does NOT own — an
+  // ADK-owned name is ours to re-upsert. Registration below still uses the
+  // author's EXACT name (toolDef.name), never the normalized form.
+  const incomingNorm = normalizeNameForCollision(toolDef.name);
   const existing = getRaw.findIndex((t) => t && t.name === toolDef.name);
-  if (existing >= 0) {
-    // A same-named entry already exists. __ccpRawTools is the SAME array the CLI
-    // dispatches built-ins (Bash/Read/...) from, so overwriting a name the ADK
-    // did NOT register would silently clobber a real built-in. Only upsert names
-    // the ADK owns; refuse (terminally, surfaced via the .ready/.injected path)
-    // for anything else.
-    if (!scope.owned.has(toolDef.name)) {
-      debug(`[adk:tools] refusing to overwrite pre-existing non-ADK tool "${toolDef.name}"`);
-      return 'collision';
-    }
+  if (existing >= 0 && scope.owned.has(toolDef.name)) {
+    // Exact re-upsert of a name the ADK already owns — overwrite in place.
     getRaw[existing] = toolObj;
-  } else {
-    getRaw.push(toolObj);
+    scope.owned.add(toolDef.name);
+    return 'ok';
   }
+
+  // Any existing entry (exact OR confusable-normalized) that the ADK does NOT own
+  // is a pre-existing built-in/foreign tool. __ccpRawTools is the SAME array the
+  // CLI dispatches built-ins (Bash/Read/...) from, so pushing a confusable variant
+  // would let an author shadow a built-in name. Refuse terminally — surfaced via
+  // the .ready/.injected path, exactly like the exact-name collision.
+  const shadowed = getRaw.some((t) => {
+    if (!t || scope.owned.has(t.name)) return false;
+    return t.name === toolDef.name || normalizeNameForCollision(t.name) === incomingNorm;
+  });
+  if (shadowed) {
+    debug(`[adk:tools] refusing to shadow pre-existing non-ADK tool (incoming "${toolDef.name}")`);
+    return 'collision';
+  }
+
+  // No collision: a brand-new name we may inject.
+  getRaw.push(toolObj);
   scope.owned.add(toolDef.name);
   return 'ok';
 }
