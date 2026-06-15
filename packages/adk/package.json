@@ -17,6 +17,7 @@
     "contracts.mjs",
     "tool-registry.mjs",
     "handoff.mjs",
+    "agent-router.mjs",
     "memory.mjs",
     "README.md",
     "DECISIONS.md",
