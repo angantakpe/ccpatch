@@ -113,49 +113,54 @@ unbounded. **Direction:** anchor the sandbox to an explicit root (e.g.
 `host.path()` / a project-root helper) rather than live `cwd()`; make the
 append-log strategy an opt-in subpath import so the common path stays small.
 
-### 7. Surface area has run ahead of consumption — MARKED PROVISIONAL (COD-12)
-The shipped `adk` profile only exercises the hello-agent → tools path;
-`defineHandoff` / `swap` / `AgentRouter` / `createMemory` / `useAgentBus` are
-wired at the capability level but **no enabled-by-default patch consumes them**.
-That is a lot of security-sensitive machinery (TOCTOU pins, swap locks,
-cross-process merge) validated only by its own unit tests. **Direction (highest
-strategic lever):** build one reference consumer patch that exercises handoff +
-router + memory end-to-end through a real patched session, or explicitly mark the
-unconsumed surface as provisional and resist hardening it further until a
-consumer exists.
+### 7. Surface area has run ahead of consumption — CONSUMER SHIPPED (COD-13)
+The shipped `adk` profile originally exercised only the hello-agent → tools path;
+`defineHandoff` / `swap` / `AgentRouter` / `createMemory` / `useAgentBus` were
+wired at the capability level but consumed by **no** shipped patch. That was a
+lot of security-sensitive machinery (TOCTOU pins, swap locks, cross-process
+merge) validated only by its own unit tests. **Direction (highest strategic
+lever):** build one reference consumer patch that exercises handoff + router +
+memory end-to-end through a real patched session.
 
-**Decision (COD-12): marked PROVISIONAL — the docs path, not the consumer
-path.** Of the two directions above, this issue takes the second. These surfaces
-are now **explicitly provisional**: wired at the capability level, validated by
-their own `tests/adk-*.test.mjs` suites, but **not consumed by any
-enabled-by-default shipped patch**. The README banner and the per-surface notes
-below say so in the same words, so the API docs no longer imply a consumption
-guarantee the build does not make.
+**COD-12 (prior step): marked PROVISIONAL.** COD-12 took the docs path rather
+than ship the consumer blind, and recorded these surfaces as provisional pending
+a scoped enablement issue (this one).
 
-Rationale for choosing docs over a shipped consumer here:
-- `extensions/adk_handoff_demo.mjs` already exists as the *opt-in* reference
-  consumer (listed in the `adk` profile, but `enabled: false` — it does not ship
-  in the default `make patch-claude-code` build). Promoting it to an
-  enabled-by-default consumer is a build/security change, not a docs change: it
-  composes the same tools/prompt capability surface the `daemon` profile gates,
-  and enabling it blind risks a boot regression in a real patched session.
-- Turning that demo into a *validated, enabled* consumer is its own scoped work
-  and is tracked as the follow-up **COD-13** (intentionally not shipped in this
-  run). Doing it here would pre-empt that issue and widen this change's blast
-  radius past docs.
-- Until COD-13 lands, the honest statement is "provisional, not yet consumed by
-  an enabled-by-default patch" — which is what this change records, and it
-  unblocks the §7 decision without hardening the unconsumed surface further.
+**COD-13 (this step): the reference consumer is now SHIPPED in the `adk`
+profile.** `extensions/adk_handoff_demo.mjs` is a member of the curated `adk`
+profile, which now also lists the consumer's hard dependencies
+(`expose_tool_dispatch` + `expose_system_prompt`) so the profile actually builds
+— previously those were only set in the per-patch flags, which `--profile`
+ignores, so `--profile adk` would have build-failed at the dependsOn gate before
+any ADK patch ran. Building `--profile adk` therefore drives `defineHandoff`
+(delegate + swap), `AgentRouter` (register-only, never auto-started), and
+`createMemory` through a real patched session, so the TOCTOU pins, swap LIFO
+stack, and persona-overlay scoping are exercised in situ — not only by their own
+unit tests.
 
-**Status of the listed surfaces (until COD-13):**
-- `defineHandoff` (delegate + swap) — PROVISIONAL.
-- `swap` (persona overlay / `allowSwapTargets` / TOCTOU pins) — PROVISIONAL.
-- `AgentRouter` — PROVISIONAL.
-- `createMemory` (cross-process merge store) — PROVISIONAL.
-- `useAgentBus` — PROVISIONAL.
+Scope of "shipped":
+- The consumer ships **via the `adk` profile**, not via the default
+  `make patch-claude-code` build. It stays globally `enabled: false`: flipping it
+  true would build-fail the default build (whose `expose_agent_tool` is globally
+  false) and would pull the tools/prompt swap surface into every default build.
+  `--profile` deliberately ignores the per-patch flag, so the profile is the
+  correct shipping vehicle for a consumer whose own deps are profile-gated.
+- The `adk` profile is intentionally pre-acked in the `ack:` block, so
+  `--profile adk` builds without `--allow-unacked`; adding the two deps here does
+  not widen the unacked-capability surface.
+- Locked by a dedicated case in `tests/patch-verification.test.mjs`
+  ("COD-13 — adk_handoff_demo ships as a buildable adk-profile consumer").
 
-The `tools` path (`defineAgent` + `defineTool`) is **not** provisional: it is the
-one surface `adk_hello_agent` consumes in the shipped `adk` profile.
+**Status of the listed surfaces (as of COD-13):**
+- `defineHandoff` (delegate + swap) — CONSUMED by `adk_handoff_demo` (`adk` profile).
+- `swap` (persona overlay / `allowSwapTargets` / TOCTOU pins) — CONSUMED (swap handoff).
+- `AgentRouter` — CONSUMED (register-only; the operator drives `start()` explicitly).
+- `createMemory` (cross-process merge store) — CONSUMED (boot-count round-trip).
+- `useAgentBus` — still PROVISIONAL: `event_bus` is wired in the `adk` profile but
+  the demo does not call `useAgentBus`, so no shipped consumer drives the bus directly.
+
+The `tools` path (`defineAgent` + `defineTool`) was never provisional: it is the
+surface `adk_hello_agent` consumes in the shipped `adk` profile.
 
 ### Smaller items
 - `depthOf()` is O(n) per swap push/restore (`handoff.mjs`) — fine at depth 64,

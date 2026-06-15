@@ -14,30 +14,34 @@
 > that other patches expose (see `core/contracts.mjs` and
 > `extensions/expose_system_prompt.mjs`).
 >
-> **What the shipped profile actually exercises is a subset of the API. The rest
-> is PROVISIONAL (COD-12).** The built-in `adk_hello_agent` registers a persona +
-> injects one tool (the `tools` capability only). `defineHandoff` / `swap` /
-> `AgentRouter` / `createMemory` / `useAgentBus` are wired at the *capability*
-> level (the globals are exposed and `capabilities()` reports them live under
-> `--profile adk`) but **no enabled-by-default patch consumes them**, so they are
-> explicitly **PROVISIONAL**: validated by this package's own unit tests, and
-> reachable today only through your own `~/.ccpatch/agents/*.mjs` modules, those
-> test suites, or the *opt-in* `extensions/adk_handoff_demo.mjs` reference
-> consumer (listed in the `adk` profile but `enabled: false` — it does not ship
-> in the default build). Treat anything beyond the hello-agent path as
-> provisional and subject to change; always call `capabilities()` to preflight.
+> **The `adk` profile now ships an end-to-end reference consumer of the
+> handoff/router/memory surface (COD-13).** The built-in `adk_hello_agent`
+> registers a persona + injects one tool (the `tools` capability), and
+> `extensions/adk_handoff_demo.mjs` — a member of the `adk` profile — drives
+> `defineHandoff` (delegate + swap), `AgentRouter` (register-only, never
+> auto-started), and `createMemory` through a real patched session, so the TOCTOU
+> pins, swap LIFO stack, and persona-overlay scoping are exercised in situ and not
+> only by unit tests. The consumer ships **via `--profile adk`**, not via the
+> default `make patch-claude-code` build: it stays globally `enabled: false`
+> because its hard dep `expose_agent_tool` is globally off (a default build would
+> fail the dependsOn gate) and because pulling the tools/prompt swap surface into
+> every default build is not a safe default. `--profile` ignores the per-patch
+> flag, so the profile is the correct shipping vehicle.
 >
-> Promoting `adk_handoff_demo` to a *validated, enabled-by-default* consumer is
-> tracked separately as **COD-13**; this status banner is the COD-12 decision to
-> mark the surface provisional rather than ship that consumer blind. Tighten this
-> banner (and drop "PROVISIONAL") once COD-13 lands an enabled consumer.
+> `useAgentBus` remains the one **PROVISIONAL** surface here: `event_bus` is wired
+> in the `adk` profile but no shipped consumer calls `useAgentBus` directly, so it
+> is still validated only by this package's own unit tests. Always call
+> `capabilities()` to preflight which `__ccp*` primitives are actually live before
+> depending on any of them — the set is profile- and version-dependent.
 >
 > The in-repo test consumers are this package's own `tests/adk-*.test.mjs`
-> suites (run via `npm test -w @codehornets/adk` or the root `npm run test:adk`).
-> `knip.json` still lists `packages/adk/**` under `ignore` because the package's
-> public exports are consumed by user modules / tests rather than by `core/`
-> directly; revisit that ignore (and tighten this banner) if a shipped patch ever
-> consumes the handoff/router/memory/bus exports.
+> suites (run via `npm test -w @codehornets/adk` or the root `npm run test:adk`);
+> the shipped patched-session consumer is `extensions/adk_handoff_demo.mjs` (the
+> `adk` profile), locked by a dedicated case in
+> `tests/patch-verification.test.mjs`. `knip.json` still lists `packages/adk/**`
+> under `ignore` because the package's public exports are consumed by user
+> modules / the demo consumer / tests rather than by `core/` directly; revisit
+> that ignore if `core/` ever imports the handoff/router/memory exports.
 
 The ADK is a small, dependency-free (ESM, Node 20+, no build step) toolkit for
 **defining, registering, and orchestrating agents inside a live Claude Code
