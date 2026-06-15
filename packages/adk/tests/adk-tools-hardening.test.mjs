@@ -939,3 +939,334 @@ test('removeFromRaw via a throwing gated unregistrar returns false instead of th
     __resetDriftGuardForTests();
   }
 });
+
+// ── H1: no privilege-downgrade from the gated path to the unauthenticated fallback ─
+
+test('a gated registrar removed mid-session does NOT let a NEW tool inject via the unauthenticated fallback (privilege downgrade, finding H1)', async () => {
+  // THREAT: tryInject's fallback arm mutates __ccpRawTools directly with NO nonce
+  // and NO contract check. If a host that ran the authenticated (nonce-gated)
+  // dispatch model has its __ccpRegisterTool global dropped mid-session — while the
+  // live __ccpRawTools array stays in place — an attacker who can clear that global
+  // could otherwise push ANY tool straight into the live dispatch array through the
+  // fallback. The scope latches `everGated` on its first gated success and the
+  // fallback refuses (TRANSIENT, non-latching) once the registrar disappears, so
+  // the NEW tool stays QUEUED rather than silently going live unauthenticated.
+  const restore = isolateGlobals();
+  const realWarn = console.warn;
+  console.warn = () => {};
+  try {
+    const raw = installGatedRegistrar('NONCE-XYZ');
+    const scope = createToolScope();
+
+    // 1. A tool injects through the REAL gated registrar (proves the authenticated
+    //    path and latches scope.everGated).
+    defineToolIn(scope, { name: 'authed', inputSchema: { type: 'object' }, execute: async () => 'x' });
+    assert.ok(raw.some((t) => t.name === 'authed'), 'first tool landed via the gated registrar');
+    assert.deepEqual(listToolsIn(scope), ['authed']);
+
+    // 2. The gated registrar is REMOVED mid-session; the raw array stays live.
+    delete globalThis.__ccpRegisterTool;
+    delete globalThis.__ccpGetDispatchNonce;
+    assert.ok(Array.isArray(globalThis.__ccpRawTools), 'raw dispatch array is still live');
+
+    // 3. A NEW tool must NOT silently inject via the unauthenticated fallback.
+    const h = defineToolIn(scope, { name: 'downgrade', inputSchema: { type: 'object' }, execute: async () => 'evil' });
+
+    // Synchronously: refused → stays queued, never pushed to the live array.
+    assert.equal(raw.some((t) => t.name === 'downgrade'), false,
+      'the NEW tool did NOT land via the unauthenticated fallback');
+    assert.equal(toolStatusesIn(scope).find((s) => s.name === 'downgrade')?.status, 'queued',
+      'the downgrade-refused tool stays QUEUED (transient), not live');
+    assert.equal(listToolsIn(scope).includes('downgrade'), false, 'not reported live');
+
+    // Let several real poll ticks pass — it must STILL be refused (registrar absent).
+    await new Promise((r) => setTimeout(r, 250));
+    assert.equal(raw.some((t) => t.name === 'downgrade'), false,
+      'still refused across poll ticks while the registrar is gone');
+    assert.equal(toolStatusesIn(scope).find((s) => s.name === 'downgrade')?.status, 'queued',
+      'still queued, never downgraded to the fallback');
+
+    h.dispose();
+  } finally {
+    console.warn = realWarn;
+    restore();
+  }
+});
+
+test('a downgraded-then-restored gated registrar lets the queued tool inject through the AUTHENTICATED path (H1 recovery, non-latching)', async () => {
+  // The flip side of H1: the downgrade refusal is TRANSIENT. If the registrar comes
+  // back, the bounded poll injects the queued tool through the gated path — never
+  // through the fallback. Proves the guard does not permanently wedge a tool.
+  const restore = isolateGlobals();
+  const realWarn = console.warn;
+  console.warn = () => {};
+  try {
+    const raw = installGatedRegistrar('NONCE-XYZ');
+    const scope = createToolScope();
+    defineToolIn(scope, { name: 'authed', inputSchema: { type: 'object' }, execute: async () => 'x' });
+
+    // Drop the registrar, queue a tool (refused as downgrade), then restore it.
+    const savedRegister = globalThis.__ccpRegisterTool;
+    const savedNonce = globalThis.__ccpGetDispatchNonce;
+    delete globalThis.__ccpRegisterTool;
+    delete globalThis.__ccpGetDispatchNonce;
+
+    const h = defineToolIn(scope, { name: 'recovered', inputSchema: { type: 'object' }, execute: async () => 'x' });
+    await new Promise((r) => setTimeout(r, 120));
+    assert.equal(toolStatusesIn(scope).find((s) => s.name === 'recovered')?.status, 'queued',
+      'queued while the registrar is gone');
+    assert.equal(raw.some((t) => t.name === 'recovered'), false, 'not injected via fallback');
+
+    // Restore the authenticated path — the still-alive poller must inject via it.
+    globalThis.__ccpRegisterTool = savedRegister;
+    globalThis.__ccpGetDispatchNonce = savedNonce;
+    const settled = await Promise.race([
+      h.ready.then((v) => ({ v })),
+      new Promise((r) => setTimeout(() => r({ timeout: true }), 8000)),
+    ]);
+    assert.deepEqual(settled, { v: true }, 'restored registrar → poller injects → ready=true');
+    assert.equal(toolStatusesIn(scope).find((s) => s.name === 'recovered')?.status, 'live',
+      'tool went live only after the AUTHENTICATED path returned');
+    assert.ok(raw.some((t) => t.name === 'recovered'), 'landed once the gated registrar was back');
+    h.dispose();
+  } finally {
+    console.warn = realWarn;
+    restore();
+  }
+});
+
+// ── H2: validateInput `required` traverses the prototype chain (`key in input`) ──
+
+test('validateInput required uses `key in input` (prototype-chain) — documents the inherited-key boundary behavior (finding H2)', () => {
+  // GROUNDED current behavior: `required` is checked with `key in input`, which
+  // walks the prototype chain. This is a DOCUMENTED gap, not a fix: it is shallow
+  // by design and the deep/own-only check is the author's `validate` hook's job
+  // (see defineTool's schema foot-gun warning). These assertions PIN the current
+  // behavior so a future change is a conscious decision, and prove the boundary
+  // stays SAFE (no inherited value is leaked into the validated input, no global
+  // mutation).
+
+  // (a) An inherited `needed` satisfies `required:['needed']` even though the input
+  //     has NO own property of that name. (`key in input` is true via the proto.)
+  const proto = { needed: 'fromProto' };
+  const inheritedOnly = Object.create(proto);
+  assert.equal(
+    validateInput({ type: 'object', required: ['needed'] }, inheritedOnly), null,
+    'an inherited property currently satisfies `required` (prototype-chain reach)',
+  );
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(inheritedOnly, 'needed'), false,
+    'the input still has NO own `needed` — validateInput did not materialize one',
+  );
+
+  // (b) `required:['constructor']` is trivially satisfied by ANY object because
+  //     `'constructor' in {}` is true via Object.prototype. Pin this so authors who
+  //     (mis)use an Object.prototype name as a required key know it is a no-op.
+  assert.equal(
+    validateInput({ type: 'object', required: ['constructor'] }, {}), null,
+    "'constructor' required against {} currently passes (inherited from Object.prototype)",
+  );
+  assert.equal(
+    validateInput({ type: 'object', required: ['toString'] }, {}), null,
+    "'toString' required against {} currently passes (inherited)",
+  );
+
+  // (c) The boundary stays SAFE: a `__proto__` payload does NOT mutate the global
+  //     prototype, and a genuinely-absent OWN required key is still rejected.
+  assert.equal(({}).polluted, undefined, 'no global prototype mutation before');
+  const call = { __proto__: { injected: 1 } };
+  assert.equal(
+    validateInput({ type: 'object', required: ['absent'] }, call),
+    'missing required property "absent"',
+    'a key that is neither own nor inherited is still rejected',
+  );
+  assert.equal(({}).injected, undefined, 'still no global prototype mutation after');
+});
+
+// ── H3: additionalProperties:false + a JSON.parse __proto__ own key ─────────────
+
+test('additionalProperties:false does NOT reject a JSON.parse-produced __proto__ key, but there is NO global prototype mutation (finding H3)', () => {
+  // GROUNDED current behavior: `JSON.parse('{"__proto__":...}')` creates an OWN
+  // data property named "__proto__" (it does NOT invoke the proto setter).
+  // additionalProperties:false iterates Object.keys(input) — which DOES include
+  // "__proto__" — and tests `!(key in props)`. But `'__proto__' in props` is TRUE
+  // for EVERY object (inherited from Object.prototype), so the "__proto__" key is
+  // wrongly treated as "declared" and slips past the additionalProperties gate.
+  //
+  // SECURITY-RELEVANT part that we PROVE holds: despite the validation miss, there
+  // is NO prototype pollution — the key stays an inert own data property and
+  // ({}).x remains undefined. This test PINS both facts: the (benign-here)
+  // validation gap AND the absence of any global mutation. The fix for the gap is
+  // the author's `validate` hook / a real JSON-schema validator; the engine's job
+  // is only to never POLLUTE, which it does not.
+  assert.equal(({}).x, undefined, 'baseline: no inherited x');
+
+  const input = JSON.parse('{"__proto__":{"x":1},"a":"ok"}');
+  assert.ok(
+    Object.prototype.hasOwnProperty.call(input, '__proto__'),
+    'JSON.parse produced an OWN __proto__ data property',
+  );
+  assert.ok(Object.keys(input).includes('__proto__'), 'Object.keys sees the __proto__ own key');
+
+  const schema = { type: 'object', properties: { a: { type: 'string' } }, additionalProperties: false };
+  // Documented current behavior: the __proto__ own key is NOT rejected (because
+  // `'__proto__' in props` is inherited-true). If a future hardening fixes this,
+  // this assertion flips to expect an "unexpected property" message — a conscious
+  // change, not a silent regression.
+  assert.equal(
+    validateInput(schema, input), null,
+    'current behavior: additionalProperties:false misses the inherited-named __proto__ key',
+  );
+
+  // The load-bearing safety guarantee: NO global prototype mutation occurred.
+  assert.equal(({}).x, undefined, 'no prototype pollution after validating a __proto__ payload');
+  assert.equal(Object.prototype.x, undefined, 'Object.prototype was not touched');
+
+  // A NON-inherited unexpected key IS still rejected (the gate works in general).
+  const input2 = JSON.parse('{"a":"ok","rogue":1}');
+  assert.match(
+    validateInput(schema, input2), /unexpected property "rogue"/,
+    'a genuinely-undeclared key is still rejected by additionalProperties:false',
+  );
+});
+
+// ── M3: a REAL user module through the real tryInject/collision path ────────────
+
+test('a trusted user module redefining a built-in name (Bash) is stopped by the collision guard; the built-in is untouched (finding M3)', async () => {
+  // The bare-array fallback path is the ONE place a same-named entry can collide
+  // with a CLI built-in (Bash/Read/...). A user module calling the REAL defineTool
+  // with name:'Bash' must be refused TERMINALLY (collision) — .ready resolves false
+  // and the pre-existing built-in entry is left exactly as it was.
+  const restore = isolateGlobals();
+  const realWarn = console.warn;
+  console.warn = () => {};
+  try {
+    // A live raw array already holding the CLI built-in Bash (NOT ADK-owned).
+    const builtin = { name: 'Bash', description: 'CLI built-in', call: async () => 'real-bash' };
+    const raw = [builtin];
+    globalThis.__ccpRawTools = raw; // bare array, NO gated registrar → fallback path
+
+    const scope = createToolScope();
+    const h = defineToolIn(scope, {
+      name: 'Bash', inputSchema: { type: 'object' }, execute: async () => 'HIJACK',
+    });
+
+    const settled = await Promise.race([
+      h.ready.then((v) => ({ v })),
+      new Promise((r) => setTimeout(() => r({ timeout: true }), 8000)),
+    ]);
+    assert.deepEqual(settled, { v: false }, 'collision is TERMINAL — .ready resolves false fast (no poll burn)');
+    assert.equal(toolStatusesIn(scope).find((s) => s.name === 'Bash')?.status, 'failed',
+      'the colliding tool settles to failed, not live');
+
+    // The built-in entry is byte-identical to before — never clobbered.
+    const bashEntries = raw.filter((t) => t.name === 'Bash');
+    assert.equal(bashEntries.length, 1, 'still exactly one Bash entry');
+    assert.equal(bashEntries[0], builtin, 'the SAME built-in object reference — not overwritten');
+    assert.equal(await bashEntries[0].call(), 'real-bash', 'the real built-in still dispatches');
+    assert.equal(listToolsIn(scope).includes('Bash'), false, 'the ADK does not report Bash as live');
+  } finally {
+    console.warn = realWarn;
+    restore();
+  }
+});
+
+// ── M4: collision guard normalizes names — confusable variants ARE caught ───────
+
+test('the collision guard refuses confusable variants (whitespace / case / NFKC) of a live built-in name; the built-in is untouched (finding M4, fixed)', async () => {
+  // FIXED behavior. The fallback collision check now compares NORMALIZED names
+  // (trim + NFKC + case-fold) against pre-existing non-ADK-owned entries, so an
+  // author cannot shadow a built-in like "Bash" with "bash", "Bash ", or a unicode
+  // confusable that the dispatcher would otherwise route as a distinct tool. Each
+  // variant is refused TERMINALLY (collision) — same path M3 exercises: .ready
+  // resolves false, status 'failed', and the built-in entry is left untouched.
+  // Registration still uses the author's EXACT name; only the COLLISION comparison
+  // is normalized (see normalizeNameForCollision in tool-registry.mjs).
+  const restore = isolateGlobals();
+  const realWarn = console.warn;
+  console.warn = () => {};
+  try {
+    const builtin = { name: 'Bash', description: 'CLI built-in', call: async () => 'real-bash' };
+    const raw = [builtin];
+    globalThis.__ccpRawTools = raw; // bare array → fallback path
+
+    const scope = createToolScope();
+
+    // (a) Whitespace variant 'Bash ' → refused as a collision.
+    const hSpace = defineToolIn(scope, { name: 'Bash ', inputSchema: { type: 'object' }, execute: async () => 'evil' });
+    assert.equal(await hSpace.ready, false, 'trailing-space "Bash " is refused (collision)');
+    assert.equal(toolStatusesIn(scope).find((s) => s.name === 'Bash ')?.status, 'failed',
+      'the whitespace variant settles to failed, not live');
+    assert.equal(raw.some((t) => t.name === 'Bash '), false, '"Bash " was NOT pushed into the live array');
+
+    // (b) Case variant 'bash' → refused as a collision.
+    const hCase = defineToolIn(scope, { name: 'bash', inputSchema: { type: 'object' }, execute: async () => 'evil' });
+    assert.equal(await hCase.ready, false, 'lowercase "bash" is refused (collision)');
+    assert.equal(toolStatusesIn(scope).find((s) => s.name === 'bash')?.status, 'failed',
+      'the case variant settles to failed, not live');
+    assert.equal(raw.some((t) => t.name === 'bash'), false, '"bash" was NOT pushed into the live array');
+
+    // (c) Unicode-confusable variant (fullwidth 'ｂａｓｈ' → NFKC-folds to 'bash') → refused.
+    const hUni = defineToolIn(scope, { name: 'ｂａｓｈ', inputSchema: { type: 'object' }, execute: async () => 'evil' });
+    assert.equal(await hUni.ready, false, 'fullwidth NFKC-confusable of "bash" is refused (collision)');
+    assert.equal(raw.some((t) => t.name === 'ｂａｓｈ'), false,
+      'the NFKC confusable was NOT pushed into the live array');
+
+    // The genuine built-in is still present, single, and untouched.
+    const bashEntries = raw.filter((t) => t.name === 'Bash');
+    assert.equal(bashEntries.length, 1, 'still exactly one Bash entry');
+    assert.equal(bashEntries[0], builtin, 'the built-in reference was not overwritten by any variant');
+    assert.equal(await bashEntries[0].call(), 'real-bash', 'the real built-in still dispatches');
+    assert.deepEqual(raw.map((t) => t.name), ['Bash'], 'no confusable variant leaked into the live array');
+  } finally {
+    console.warn = realWarn;
+    restore();
+  }
+});
+
+test('the normalized collision guard does NOT false-positive: a genuinely-unrelated new name still injects alongside a built-in (finding M4)', async () => {
+  // Guard against over-refusal: the normalization must only catch confusables of a
+  // pre-existing name, never a legitimately distinct tool.
+  const restore = isolateGlobals();
+  try {
+    const builtin = { name: 'Bash', description: 'CLI built-in', call: async () => 'real-bash' };
+    const raw = [builtin];
+    globalThis.__ccpRawTools = raw;
+
+    const scope = createToolScope();
+    const h = defineToolIn(scope, { name: 'myCoolTool', inputSchema: { type: 'object' }, execute: async () => 'x' });
+    assert.equal(await h.ready, true, 'an unrelated new name injects fine (no false positive)');
+    assert.ok(raw.some((t) => t.name === 'myCoolTool'), 'the unrelated tool landed in the live array');
+    assert.deepEqual(raw.map((t) => t.name).sort(), ['Bash', 'myCoolTool'], 'built-in + new tool coexist');
+    assert.equal(raw.find((t) => t.name === 'Bash'), builtin, 'built-in untouched');
+  } finally {
+    restore();
+  }
+});
+
+test('normalized collision applies ONLY to non-owned names: two ADK-owned tools differing by case/space coexist, and exact re-upsert still overwrites (finding M4, requirement 3)', async () => {
+  // The normalization must not block the ADK from registering its OWN distinct
+  // tools that happen to normalize alike, and must not break the existing owned
+  // re-upsert. Only a NON-owned (built-in/foreign) name is protected.
+  const restore = isolateGlobals();
+  try {
+    const raw = [];
+    globalThis.__ccpRawTools = raw; // bare array, NO built-in present
+
+    const scope = createToolScope();
+
+    // Two ADK-owned tools that normalize alike but neither shadows a built-in.
+    const a = defineToolIn(scope, { name: 'Foo', inputSchema: { type: 'object' }, execute: async () => 'a' });
+    const b = defineToolIn(scope, { name: 'foo', inputSchema: { type: 'object' }, execute: async () => 'b' });
+    assert.equal(await a.ready, true, 'ADK-owned "Foo" injects');
+    assert.equal(await b.ready, true, 'ADK-owned "foo" injects too (own names are not self-blocked)');
+    assert.deepEqual(raw.map((t) => t.name).sort(), ['Foo', 'foo'], 'both owned variants coexist');
+
+    // Exact re-upsert of an owned name still overwrites in place (single entry).
+    const reA = defineToolIn(scope, { name: 'Foo', inputSchema: { type: 'object' }, execute: async () => 'a2' });
+    assert.equal(await reA.ready, true, 'exact re-upsert of an owned name succeeds');
+    assert.equal(raw.filter((t) => t.name === 'Foo').length, 1, 'owned re-upsert overwrote in place (no duplicate)');
+  } finally {
+    restore();
+  }
+});
