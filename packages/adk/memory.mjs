@@ -256,15 +256,23 @@ export function createMemory({ path: filePath, transform, maxBytes, appendLog = 
   // Warn once at construction so the divergence is observable, not a silent loss.
   const exists = (p) => { try { statSync(p); return true; } catch { return false; } };
   if (appendLog && exists(resolved)) {
-    console.warn(
-      `createMemory: opened ${resolved} in append-log mode, but a default-mode ` +
+    host.report('warn', 'memory.mode.divergence', {
+      path: resolved,
+      openedMode: 'append-log',
+      ignoredMode: 'default',
+      message:
+        `createMemory: opened ${resolved} in append-log mode, but a default-mode ` +
         `store exists at ${resolved} — its contents will be IGNORED (modes don't merge).`,
-    );
+    });
   } else if (!appendLog && exists(logPath)) {
-    console.warn(
-      `createMemory: opened ${resolved} in default mode, but an append-log store ` +
+    host.report('warn', 'memory.mode.divergence', {
+      path: logPath,
+      openedMode: 'default',
+      ignoredMode: 'append-log',
+      message:
+        `createMemory: opened ${resolved} in default mode, but an append-log store ` +
         `exists at ${logPath} — its contents will be IGNORED (modes don't merge).`,
-    );
+    });
   }
 
   // ENCRYPTION/REDACTION HOOK: callers may plug in a reversible
@@ -418,11 +426,16 @@ export function createMemory({ path: filePath, transform, maxBytes, appendLog = 
         // A single record larger than the whole cap can't be helped by compaction
         // (the snapshot still contains the value) — the log will compact on every
         // subsequent write. Make that observable rather than a silent cap-bypass.
-        if (recordBytes > capBytes && host.debug()) {
-          console.warn(
-            `createMemory: a single delta (${recordBytes}B) exceeds the ${capBytes}B cap — ` +
+        // 'debug' level: always on the bus, console only under host.debug().
+        if (recordBytes > capBytes) {
+          host.report('debug', 'memory.delta.oversized', {
+            path: resolved,
+            recordBytes,
+            capBytes,
+            message:
+              `createMemory: a single delta (${recordBytes}B) exceeds the ${capBytes}B cap — ` +
               `the log will compact on every write for this store`,
-          );
+          });
         }
         compactLog();
         return;
@@ -432,7 +445,11 @@ export function createMemory({ path: filePath, transform, maxBytes, appendLog = 
       dirty = false;
       firstDirtyAt = -1;
     } catch (err) {
-      console.warn(`createMemory: delta append failed: ${err?.message ?? err}`);
+      host.report('warn', 'memory.write.failed', {
+        path: logPath,
+        op: 'delta-append',
+        message: `createMemory: delta append failed: ${err?.message ?? err}`,
+      });
     }
   }
 
@@ -480,10 +497,14 @@ export function createMemory({ path: filePath, transform, maxBytes, appendLog = 
       const st = statSync(resolved);
       loadedMtimeMs = st.mtimeMs;
       if (st.size > capBytes) {
-        console.warn(
-          `createMemory: ${resolved} is ${st.size} bytes (> ${capBytes} cap); ignoring contents. ` +
-          `Raise it with createMemory({ maxBytes }) or switch to { appendLog: true } for O(delta) writes.`,
-        );
+        host.report('warn', 'memory.read.oversized', {
+          path: resolved,
+          size: st.size,
+          capBytes,
+          message:
+            `createMemory: ${resolved} is ${st.size} bytes (> ${capBytes} cap); ignoring contents. ` +
+            `Raise it with createMemory({ maxBytes }) or switch to { appendLog: true } for O(delta) writes.`,
+        });
         return {};
       }
       // onRead maps the raw on-disk bytes back to a JSON string (identity by
@@ -493,13 +514,12 @@ export function createMemory({ path: filePath, transform, maxBytes, appendLog = 
       // (e.g. "[1,2]" or "42" or "null") must NOT become the store — get/set
       // assume a plain object. Reset to {} and warn.
       if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        if (host.debug()) {
-          console.warn(
-            `createMemory: ${resolved} parsed to a non-object (${
-              Array.isArray(parsed) ? 'array' : parsed === null ? 'null' : typeof parsed
-            }); resetting to empty store.`,
-          );
-        }
+        const kind = Array.isArray(parsed) ? 'array' : parsed === null ? 'null' : typeof parsed;
+        host.report('debug', 'memory.read.nonObject', {
+          path: resolved,
+          parsedKind: kind,
+          message: `createMemory: ${resolved} parsed to a non-object (${kind}); resetting to empty store.`,
+        });
         return {};
       }
       return parsed;
@@ -537,31 +557,45 @@ export function createMemory({ path: filePath, transform, maxBytes, appendLog = 
         const quarantine = `${resolved}.corrupt-${Date.now()}`;
         try {
           renameSync(resolved, quarantine);
-          console.warn(
-            `createMemory: ${resolved} is unreadable/corrupt (${err?.message ?? err}); ` +
+          host.report('warn', 'memory.corrupt', {
+            path: resolved,
+            quarantined: quarantine,
+            message:
+              `createMemory: ${resolved} is unreadable/corrupt (${err?.message ?? err}); ` +
               `quarantined to ${quarantine} and starting from an empty store.`,
-          );
+          });
         } catch (qErr) {
           // Couldn't move it aside (perms?). Still warn loudly — the next write
           // may clobber it, but we must not throw out of a load.
-          console.warn(
-            `createMemory: ${resolved} is unreadable/corrupt (${err?.message ?? err}) ` +
+          host.report('warn', 'memory.corrupt', {
+            path: resolved,
+            quarantined: false,
+            message:
+              `createMemory: ${resolved} is unreadable/corrupt (${err?.message ?? err}) ` +
               `and could NOT be quarantined (${qErr?.message ?? qErr}); starting from an empty store.`,
-          );
+          });
         }
       } else if (existed) {
         // Exists but failed for an access/transient reason — leave it untouched.
-        console.warn(
-          `createMemory: ${resolved} could not be read (${err?.message ?? err}); ` +
+        host.report('warn', 'memory.corrupt', {
+          path: resolved,
+          quarantined: false,
+          transient: true,
+          message:
+            `createMemory: ${resolved} could not be read (${err?.message ?? err}); ` +
             `leaving it in place (not corruption) and starting from an empty store.`,
-        );
+        });
       } else {
-        console.warn(
-          `createMemory: ${resolved} could not be read (${err?.message ?? err}); ` +
+        host.report('warn', 'memory.corrupt', {
+          path: resolved,
+          existed: false,
+          message:
+            `createMemory: ${resolved} could not be read (${err?.message ?? err}); ` +
             `starting from an empty store.`,
-        );
+        });
       }
-      host.emit('memory.corrupt', { path: resolved });
+      // NB: every branch above already emitted 'memory.corrupt' via report() —
+      // exactly one emit per call, preserving the prior single-emit contract.
       return {};
     }
   }
@@ -768,7 +802,9 @@ export function createMemory({ path: filePath, transform, maxBytes, appendLog = 
     // unlocked best-effort write — we log the contention but never hang/throw.
     const lockHandle = acquireLock();
     if (lockHandle === null) {
-      host.emit('memory.lock.contended', { path: resolved });
+      // Contention is expected under healthy concurrency, not a fault — keep it a
+      // bus-only signal ('silent'), no console noise on every contended write.
+      host.report('silent', 'memory.lock.contended', { path: resolved });
     }
     try {
       writeToDiskLocked();
@@ -913,7 +949,11 @@ export function createMemory({ path: filePath, transform, maxBytes, appendLog = 
       try {
         writeToDisk();
       } catch (err) {
-        console.warn(`createMemory: coalesce-cap write failed: ${err?.message ?? err}`);
+        host.report('warn', 'memory.write.failed', {
+          path: resolved,
+          op: 'coalesce-cap',
+          message: `createMemory: coalesce-cap write failed: ${err?.message ?? err}`,
+        });
       }
       return;
     }
@@ -924,7 +964,11 @@ export function createMemory({ path: filePath, transform, maxBytes, appendLog = 
         writeToDisk();
       } catch (err) {
         // Don't crash the event loop on a background write failure; surface it.
-        console.warn(`createMemory: debounced write failed: ${err?.message ?? err}`);
+        host.report('warn', 'memory.write.failed', {
+          path: resolved,
+          op: 'debounced',
+          message: `createMemory: debounced write failed: ${err?.message ?? err}`,
+        });
       }
     }, DEBOUNCE_MS);
     // Don't keep the process alive solely for a pending memory flush.

@@ -148,6 +148,65 @@ export function emit(topic, payload) {
   }
 }
 
+// ── unified observability seam ────────────────────────────────────────────────
+// Before this seam every ADK catch block picked its OWN failure channel: some
+// emitted a bus event, some did a bare console.warn, some a DEBUG-gated
+// console.warn, some just returned false. The SAME class of failure therefore
+// surfaced (or didn't) depending purely on which catch you landed in, and a
+// silent fallback was an accident of omission rather than a decision.
+//
+// report() is the one channel. It ALWAYS emits `event` to the bus (so every
+// failure is observable by an attached observer regardless of log level) and
+// then OPTIONALLY logs a single `[adk] event: …detail` line to the console per
+// `level`:
+//
+//   'error' | 'warn'  → always console.warn (operator-visible failures)
+//   'debug'           → console.warn only when host.debug() is on (authoring
+//                       noise: definition-time hints, transient races)
+//   'silent'          → never logs; the bus emit is the ONLY surface
+//
+// "silent" is a DELIBERATE level — a catch that wants the event on the bus but
+// no console line states that intent explicitly, instead of being a console.warn
+// someone forgot to add. Both the emit and the (best-effort) log are fully
+// guarded: report() never throws, so fail-open catch sites stay fail-open.
+//
+/** @typedef {'error'|'warn'|'debug'|'silent'} ReportLevel */
+
+/** @type {Set<string>} levels that always log to the console. */
+const LOUD_LEVELS = new Set(['error', 'warn']);
+
+/**
+ * Unified failure-reporting seam: emit `event` to the bus (always) and log a
+ * single line to the console per `level`. Never throws.
+ * @param {ReportLevel} level  'error'|'warn' always log; 'debug' logs only under
+ *   host.debug(); 'silent' never logs (bus-only — a deliberate choice).
+ * @param {string} event  bus topic, also the log tag (e.g. 'memory.corrupt').
+ * @param {*} [detail]  structured payload emitted on the bus; when it carries a
+ *   human-readable `message`/`reason` string (or is itself a string) that text
+ *   is appended to the log line.
+ */
+export function report(level, event, detail) {
+  // 1. ALWAYS surface on the bus — the one channel every level shares.
+  emit(event, detail);
+  // 2. Log per level. Best-effort; a console failure must never break a catch.
+  try {
+    const loud = LOUD_LEVELS.has(level);
+    const debugLine = level === 'debug' && debug();
+    if (!loud && !debugLine) return; // 'silent', or 'debug' with debug off.
+    let line = `[adk] ${event}`;
+    const msg =
+      typeof detail === 'string'
+        ? detail
+        : detail && typeof detail === 'object'
+          ? detail.message ?? detail.reason
+          : undefined;
+    if (typeof msg === 'string' && msg.length) line += `: ${msg}`;
+    console.warn(line);
+  } catch (_) {
+    /* logging must never break ADK logic */
+  }
+}
+
 // ── typed contract registry (core/contracts.mjs) ──────────────────────────────
 
 /** @returns {Function|undefined} __ccpInspectContracts, if the host registered it. */
@@ -186,5 +245,5 @@ export const host = Object.freeze({
   hasSetSystemPrompt, setSystemPromptFn, getSystemPromptNonceFn,
   systemPromptGetterRaw, getSystemPrompt, systemPromptOverride,
   agentTool, hasDelegate, submitInput, hasSubmitInput,
-  bus, hasBus, emit, inspectContracts, requireFn, path, debug,
+  bus, hasBus, emit, report, inspectContracts, requireFn, path, debug,
 });
