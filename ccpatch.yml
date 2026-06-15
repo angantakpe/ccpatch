@@ -111,6 +111,11 @@ ack:
   save_conversations: [network, fs, env, telemetry]
   assistant_stream_events: [telemetry]
   headless_bridge: [network, prompt, tools, exec, env, fs]
+  # standup_command rewrites the submitted prompt (prompt) and shells out to
+  # `git log` / `git diff` in the CLI's cwd to gather recent activity (exec).
+  # Acked so enabling the (disabled-by-default) extension builds without
+  # --allow-unacked. The git invocation is read-only and fails open.
+  standup_command: [prompt, exec]
 
 patches:
 
@@ -231,6 +236,9 @@ patches:
     enabled: false
     env: [CC_BRIDGE_ADDR, CC_BRIDGE_TOKEN, CC_BRIDGE_TOKEN_FILE, CC_BRIDGE_MAX_LINE]
 
+  # ── Scaffolded (disabled by default — flip to `true` to enable) ──────────────
+  standup_command: false           # native /standup [N] — rewrite prompt with recent git activity for a standup summary
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Profiles — curated subsets selected via `--profile <name>` (or `-p`).
 # When --profile is absent, behaviour is unchanged: every patch enabled above
@@ -302,6 +310,7 @@ profiles:
       - dotenv_loader
       - block_tools
       - input_bar_color
+      - standup_command
 
   # native = standard, minus the two patches that cannot survive a Bun SEA
   # repack. The exclusion itself is owned by runner/cli/native-profile.mjs

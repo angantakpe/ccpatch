@@ -55,6 +55,7 @@ const ALLOWLIST = new Map([
   ['__ccpFetchBusProvided_v1', 'fetch_interceptor: provide-once sentinel for the fetchBus contract'],
   ['__ccpBusWarnBudget', 'fetch_interceptor: private bounded-surfacing counter for swallowed bus errors'],
   ['__ccpSlashCommandsProvided_v1', 'custom_commands: provide-once sentinel for the slashCommands contract'],
+  ['__ccpStandupCommand_v1BuildPrompt', "standup_command: private git→standup prompt composer, consumed only by the same patch's submit-callback adapter — not a cross-patch surface"],
   ['__ccpSubagentStubInstalled', 'subagent_hooks_stub: install-once sentinel'],
   ['__ccpPolicyGateInstalled_v1', 'policy_gate: install-once sentinel'],
   ['__ccpAgentLifecycle_v1', 'agent_lifecycle: install-once sentinel'],

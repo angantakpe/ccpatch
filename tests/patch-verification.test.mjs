@@ -570,6 +570,82 @@ test('Layer 3 — injected code registers its runtime surface', async (t) => {
     // lives in the daemon-profile integration round-trip (test:integration).
 
     // ── custom ──
+    standup_command: {
+      // standup_command REPLACES the submit useCallback with a wrapping IIFE, so
+      // the insert-diff recovery can't isolate a runnable block. Instead, drive
+      // the wrapper directly: evaluate the patched fixture's wrapper expression
+      // in a sandbox, invoke it with a fake original callback, and assert it
+      //   (a) installs the composer global, and
+      //   (b) rewrites a /standup queued command into a normal prompt before
+      //       delegating (the core "rewrite, don't print" contract).
+      custom(_ignored, out) {
+        // Build the wrapper expression in isolation rather than slicing it out
+        // of a 16 MB bundle: re-derive the var/React names from the patched
+        // output's sentinel-adjacent decl, then evaluate ONLY that statement.
+        // The wrapper shape is `var <S>=!0;let <var>=(function(__ccpCb){...})(...);`
+        const wrapRe = /var __ccpStandupCommand_v1=!0;let ([A-Za-z_$][\w$]*)=\(function\(__ccpCb\)/;
+        assert.ok(wrapRe.test(out), 'standup_command must wrap the submit useCallback as an IIFE');
+
+        // Drive the composer + adapter directly with a hand-built wrapper that
+        // mirrors what apply() injects, fed a fake original callback. This keeps
+        // the runtime assertion independent of the surrounding bundle text.
+        const declStart = out.indexOf('var __ccpStandupCommand_v1=!0;');
+        // Capture from the sentinel decl up to the end of the IIFE invocation:
+        // find `(function(__ccpCb)`'s matching `})(`, then paren-count the call.
+        const fnStart = out.indexOf('(function(__ccpCb)', declStart);
+        // Locate `})(` that closes the function body and opens the invocation.
+        const invokeOpen = out.indexOf('})(', fnStart);
+        assert.ok(invokeOpen > 0, 'wrapper IIFE invocation not found');
+        // Paren-count the invocation argument list to find its close.
+        let i = invokeOpen + 2; // at the '('
+        let depth = 0, end = -1;
+        for (; i < out.length; i++) {
+          const ch = out[i];
+          if (ch === '(') depth++;
+          else if (ch === ')') { depth--; if (depth === 0) { end = i + 1; break; } }
+        }
+        assert.ok(end > 0, 'wrapper IIFE close not found');
+        // Replace the real original-callback arg with a recording stub so the
+        // statement is self-contained (no bundle identifiers leak in).
+        const captured = [];
+        // Rewrite the `let <var>=` binding to a global assignment so the
+        // resulting adapter is observable on the sandbox (a `let` decl wouldn't
+        // surface as a sandbox property).
+        const head = out
+          .slice(declStart, invokeOpen + 3)
+          .replace(/let [A-Za-z_$][\w$]*=\(function\(__ccpCb\)/, 'globalThis.__ccpStandupAdapterOut=(function(__ccpCb)');
+        const stmt = head + '__ccpFakeOrig);';
+
+        const sandbox = makeSandbox({
+          __ccpFakeOrig: function (...a) { captured.push(a[0]); return 'delegated'; },
+          require: () => { throw new Error('no child_process in sandbox'); },
+          process: { cwd: () => '/tmp', env: {}, argv: [], versions: { node: '20.0.0' } },
+        });
+        vm.createContext(sandbox);
+        new vm.Script(stmt).runInContext(sandbox);
+
+        // (a) composer global installed
+        assert.equal(
+          typeof sandbox.__ccpStandupCommand_v1BuildPrompt, 'function',
+          'standup_command must install globalThis.__ccpStandupCommand_v1BuildPrompt',
+        );
+        // Non-/standup input returns null (leave the prompt untouched).
+        assert.equal(sandbox.__ccpStandupCommand_v1BuildPrompt('hello'), null);
+        // /standup yields a rewritten prompt (git unavailable here → graceful text).
+        const gen = sandbox.__ccpStandupCommand_v1BuildPrompt('/standup');
+        assert.equal(typeof gen, 'string');
+        assert.match(gen, /standup/i);
+
+        // (b) the adapter rewrites a queued /standup command before delegating.
+        const adapter = sandbox.__ccpStandupAdapterOut;
+        assert.equal(typeof adapter, 'function', 'wrapper must yield the adapter callback');
+        const qc = [{ value: '/standup', preExpansionValue: '/standup', mode: 'prompt' }];
+        adapter(qc);
+        assert.notEqual(qc[0].value, '/standup', 'adapter must rewrite the /standup value');
+        assert.equal(qc[0].skipSlashCommands, true, 'rewritten prompt must not be re-dispatched as a slash command');
+        assert.ok(captured.length > 0, 'adapter must delegate to the original callback');
+      },
+    },
     fetch_interceptor: {
       // fetch_interceptor prepends flat code (not a self-contained IIFE) before
       // the bundle's CJS wrapper. Extract only the prepended portion, run it in
