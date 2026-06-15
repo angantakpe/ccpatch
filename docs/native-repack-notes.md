@@ -13,18 +13,49 @@ Audit notes for review finding #7. Scope: `bin/repack-bundle.mjs`,
 > to plain-JS or a reduced patch set. **Do NOT build patch features that ASSUME
 > native repack succeeds.** (Architecture-review finding #5.)
 
-### Platform support
+### Supported repack matrix (authoritative)
 
-| Platform / format | Same-size or smaller splice | Size-increasing (grow) repack |
-|---|---|---|
-| **ELF, linux-x64** | supported | **supported** (`growBunSeaBinary`, `bin/bun-sea-graph.mjs`) |
-| **Thin Mach-O, darwin-arm64 / darwin-x64** | supported | **supported** (`growMachoSea`, `bin/macho-sea-graph.mjs`) — strips code signature, see below |
-| **Fat / universal Mach-O** | n/a | **FAIL LOUD** — thin to a single arch slice first (`emitSkipLine({platform:'macho-fat'})` then `die()`) |
-| **PE / Windows-x64 (and any other format)** | n/a | **FAIL LOUD** (`emitSkipLine({platform:'windows-or-unknown'})` then `die()`) |
+This is the authoritative supported matrix. The `die()` messages in
+`bin/repack-bundle.mjs` for the unsupported grow paths point back here by name —
+when one of those fires, the failure is **intentional and documented**, not a
+dead end the user has to reverse-engineer.
+
+| Platform / format | Same-size or smaller splice | Size-increasing (grow) repack | Fallback when grow is unavailable |
+|---|---|---|---|
+| **ELF, linux-x64** | supported | **supported** (`growBunSeaBinary`, `bin/bun-sea-graph.mjs`) | n/a — grow works |
+| **Thin Mach-O, darwin-arm64 / darwin-x64** | supported | **supported** (`growMachoSea`, `bin/macho-sea-graph.mjs`) — strips code signature, see below | n/a — grow works |
+| **Fat / universal Mach-O** | n/a | **NOT SUPPORTED — FAIL LOUD** (`emitSkipLine({platform:'macho-fat'})` then `die()`) | thin to a single arch slice first, then grow that slice; **or** build from the plain-JS path |
+| **PE / Windows-x64 (and any other format)** | n/a | **NOT SUPPORTED — FAIL LOUD** (`emitSkipLine({platform:'windows-or-unknown'})` then `die()`) | **build from the plain-JS path** (or use a reduced patch set so the region does not grow) |
 
 The format gate lives at `bin/repack-bundle.mjs` around line 505: magic-byte
 detection (`isElf` / `isMachO` / `isFatMachO`), then the grow-path branches at
 lines 649–683 (`isFatMachO` → skip+die, `!isElf && !isMachO` → skip+die).
+
+### Explicit fallback strategy (why fat Mach-O / PE fail loud by design)
+
+A size-increasing repack on **fat/universal Mach-O** or **PE/Windows** is a
+**deliberate, supported failure** — not a missing feature that silently corrupts:
+
+- **Fat / universal Mach-O.** Growing a fat binary means thinning to the matching
+  arch slice, growing that slice, and rebuilding the fat wrapper with every slice
+  re-aligned. That repack is not implemented. The supported strategy is to **thin
+  the binary to a single arch slice first** (e.g. `lipo -thin arm64 …`) and let the
+  thin-Mach-O grow path handle it, **or** build that version from the plain-JS
+  path. The repacker emits a structured `[repack:skip]` line
+  (`platform:'macho-fat'`) and then `die()`s — no output file is written.
+- **PE / Windows-x64 (and any other/unknown format).** There is **no** Bun-SEA
+  grow path for PE. The supported strategy is to **build from the plain-JS path**,
+  or use a reduced patch set so the patched JS stays within the original region
+  (the same-size/smaller splice path works on any format). The repacker emits a
+  structured `[repack:skip]` line (`platform:'windows-or-unknown'`) and then
+  `die()`s — no output file is written.
+
+In every unsupported case the failure happens **before any bytes are written**, so
+it can never truncate or corrupt an existing binary. Implementing the fat-Mach-O /
+PE grow paths is intentionally **out of scope** (high-risk binary surgery against an
+undocumented, unversioned format); the documented fallback above is the supported
+answer until those decoders are built and verified the same way the ELF /
+thin-Mach-O grow paths were (round-trip schema decode + STRICT boot smoke check).
 
 ### The format is undocumented and unversioned — `VALIDATED_BUN_VERSIONS` is a proxy
 
