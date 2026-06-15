@@ -322,6 +322,28 @@ describe('runBunApiScan (end-to-end on fixtures)', () => {
     assert.match(scan.lines.join('\n'), /NEW vs v2\.1\.160 baseline \(2\)/);
   });
 
+  it('collapses the degraded inventory to one line when verbose:false', () => {
+    const { refmaps, payloadPath, coveragePath } = mkFixtureRepo({
+      baselines: { '2.1.160': { spawn: 4, Terminal: 2, hash: 6, which: 2, deepEquals: 1 } },
+    });
+    const scan = runBunApiScan({
+      code: FIXTURE_BUNDLE,
+      version: '2.1.175',
+      refmapsDir: refmaps,
+      shimPayloadPath: payloadPath,
+      coveragePath,
+      verbose: false,
+    });
+    const text = scan.lines.join('\n');
+    // The collapsed summary replaces the per-API breakdown…
+    assert.match(text, /degraded\/throwing shim\(s\) in use/);
+    assert.match(text, /VERBOSE=1 for the per-API breakdown/);
+    // …so an individual shim's caveat must NOT appear under verbose:false.
+    assert.doesNotMatch(text, /sync, 5s cap, blocks event loop/);
+    // Actionable sections are never collapsed.
+    assert.match(text, /UNSHIMMED \(2\)/);
+  });
+
   it('renderReport says so when every API is shimmed and clean', () => {
     const usage = scanBundle('Bun.sleep(1);');
     const result = classifyUsage({

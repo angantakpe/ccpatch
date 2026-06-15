@@ -14,6 +14,7 @@ import {
 } from './capabilities.mjs';
 import { readAcks } from '../config.mjs';
 import { CAPABILITIES } from '../manifest.mjs';
+import { isVerbose } from './style.mjs';
 
 /**
  * Strict mode requires --version (or CCPATCH_CLI_VERSION) so version-pinned
@@ -175,6 +176,10 @@ export async function bunApiScanGate({ code, inputPath, patchOptions, logger, sc
       code,
       bundleLabel: path.basename(inputPath),
       version: patchOptions.version || null,
+      // The degraded-shim inventory is stable build-to-build; collapse it to a
+      // one-liner unless VERBOSE=1/--verbose. Actionable sections (unshimmed,
+      // drift, new APIs) print regardless.
+      verbose: isVerbose(),
       ...scanOverrides,
     });
     logger.log('');

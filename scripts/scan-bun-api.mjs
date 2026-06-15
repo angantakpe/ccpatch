@@ -340,9 +340,15 @@ const sites = n => `${n} site${n === 1 ? '' : 's'}`;
  * Render the sectioned text report. Every line carries the `  [bun-api]`
  * prefix to match the build log's `  [capabilities]` / `  [native]` sections.
  *
+ * The per-shim degraded inventory is a known, stable list — it is the same
+ * caveats on every build and adds 16+ lines of noise. In non-verbose builds it
+ * collapses to a single count line; `verbose: true` (VERBOSE=1 / --verbose)
+ * restores the full per-API breakdown. The genuinely actionable sections
+ * (unshimmed, degraded-shim DRIFT, NEW APIs) are NEVER collapsed.
+ *
  * @returns {string[]} lines ready for logger.log / console.log
  */
-export function renderReport({ usage, result, baseline, bundleLabel, version }) {
+export function renderReport({ usage, result, baseline, bundleLabel, version, verbose = true }) {
   const lines = [];
   const apiCount = Object.keys(usage.apis).length;
   const head = `${apiCount} distinct Bun.* API${apiCount === 1 ? '' : 's'} (${sites(usage.totalSites)})`;
@@ -361,12 +367,23 @@ export function renderReport({ usage, result, baseline, bundleLabel, version }) 
   }
 
   if (result.degraded.length > 0) {
-    lines.push(`  [bun-api] ⚠️ degraded/throwing shims in use (${result.degraded.length}):`);
-    const w = Math.max(...result.degraded.map(e => e.name.length), 8);
-    for (const e of result.degraded) {
-      const tag = e.status === 'throws' ? '[throws] ' : '';
+    if (verbose) {
+      lines.push(`  [bun-api] ⚠️ degraded/throwing shims in use (${result.degraded.length}):`);
+      const w = Math.max(...result.degraded.map(e => e.name.length), 8);
+      for (const e of result.degraded) {
+        const tag = e.status === 'throws' ? '[throws] ' : '';
+        lines.push(
+          `  [bun-api]     Bun.${e.name.padEnd(w)} (${sites(e.count)}) — ${tag}${e.caveat}`
+        );
+      }
+    } else {
+      const throwing = result.degraded.filter(e => e.status === 'throws').length;
+      const detail = throwing
+        ? `${throwing} throwing` + (throwing < result.degraded.length ? ', rest return safe fallbacks' : '')
+        : 'all return safe fallbacks';
       lines.push(
-        `  [bun-api]     Bun.${e.name.padEnd(w)} (${sites(e.count)}) — ${tag}${e.caveat}`
+        `  [bun-api] ⚠️ ${result.degraded.length} degraded/throwing shim(s) in use ` +
+        `(${detail}) — VERBOSE=1 for the per-API breakdown`
       );
     }
   }
@@ -418,6 +435,10 @@ export function renderReport({ usage, result, baseline, bundleLabel, version }) 
  * @param {string} [args.refmapsDir]         override for tests
  * @param {string} [args.shimPayloadPath]    override for tests
  * @param {string} [args.coveragePath]       override for tests
+ * @param {boolean} [args.verbose]           full per-API degraded breakdown
+ *                                           (default true; build passes
+ *                                           isVerbose() to collapse the stable
+ *                                           inventory in non-verbose builds)
  */
 export function runBunApiScan({
   code,
@@ -427,6 +448,7 @@ export function runBunApiScan({
   refmapsDir = REFMAPS_DIR,
   shimPayloadPath = SHIM_PAYLOAD_PATH,
   coveragePath = COVERAGE_PATH,
+  verbose = true,
 }) {
   const usage = scanBundle(code);
   const shimKeys = readShimKeys(shimPayloadPath);
@@ -441,7 +463,7 @@ export function runBunApiScan({
     );
   }
   const result = classifyUsage({ usage, shimKeys, coverage, baseline });
-  const lines = renderReport({ usage, result, baseline, bundleLabel, version });
+  const lines = renderReport({ usage, result, baseline, bundleLabel, version, verbose });
   return { usage, shimKeys, baseline, ...result, lines };
 }
 
