@@ -323,8 +323,12 @@ export function createHandoffScope() {
   return { id: `hoscope-${++_scopeSeq}`, seq: 0, swapDegradeWarned: false, pinMismatchWarned: false };
 }
 
+// Bus-only telemetry: every handoff lifecycle event reaches the bus, with NO
+// console line of its own (the few human-facing warnings are emitted separately
+// via the warn-once latches below). Routed through the unified report() seam at
+// the explicit 'silent' level so the bus-only intent is stated, not implied.
 function busEmit(topic, payload) {
-  host.emit(topic, payload);
+  host.report('silent', topic, payload);
 }
 
 /**

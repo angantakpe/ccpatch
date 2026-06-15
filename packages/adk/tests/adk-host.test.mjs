@@ -129,6 +129,106 @@ test('host.emit() is a no-op without a bus and swallows a throwing observer', ()
   }
 });
 
+// ── unified report() seam (COD-8) ─────────────────────────────────────────────
+
+/** Install a capturing bus + console.warn stub; returns {events, logs, restore}. */
+function captureBusAndWarn() {
+  const events = [];
+  const logs = [];
+  const prevBus = globalThis.__ccpBus;
+  const realWarn = console.warn;
+  globalThis.__ccpBus = { emit: (topic, payload) => events.push({ topic, payload }) };
+  console.warn = (m) => logs.push(String(m));
+  return {
+    events,
+    logs,
+    restore() {
+      console.warn = realWarn;
+      if (prevBus === undefined) delete globalThis.__ccpBus;
+      else globalThis.__ccpBus = prevBus;
+    },
+  };
+}
+
+test('host.report() ALWAYS emits to the bus, at every level (incl. silent)', () => {
+  const restore = isolateGlobals();
+  const cap = captureBusAndWarn();
+  try {
+    for (const level of ['error', 'warn', 'debug', 'silent']) {
+      host.report(level, `evt.${level}`, { message: `m-${level}` });
+    }
+    assert.deepEqual(
+      cap.events.map((e) => e.topic),
+      ['evt.error', 'evt.warn', 'evt.debug', 'evt.silent'],
+      'every level — including silent — reached the bus',
+    );
+    assert.deepEqual(
+      cap.events.find((e) => e.topic === 'evt.silent').payload,
+      { message: 'm-silent' },
+      'the structured detail is the bus payload',
+    );
+  } finally {
+    cap.restore();
+    restore();
+  }
+});
+
+test("host.report('silent', …) suppresses the console line but is a deliberate emit", () => {
+  const restore = isolateGlobals();
+  const cap = captureBusAndWarn();
+  try {
+    globalThis.__ccpDebug = true; // even with debug ON, silent must not log.
+    host.report('silent', 'memory.lock.contended', { path: '/tmp/x' });
+    assert.equal(cap.logs.length, 0, "silent NEVER logs, even under host.debug()");
+    assert.deepEqual(
+      cap.events,
+      [{ topic: 'memory.lock.contended', payload: { path: '/tmp/x' } }],
+      'silent still emits to the bus — a deliberate bus-only path, not a dropped signal',
+    );
+  } finally {
+    cap.restore();
+    restore();
+  }
+});
+
+test("host.report('warn'|'error') always logs a tagged line; 'debug' is gated on host.debug()", () => {
+  const restore = isolateGlobals();
+  let cap = captureBusAndWarn();
+  try {
+    // debug OFF: warn/error log, debug does NOT (but all three still emit).
+    host.report('warn', 'a.warn', { message: 'w' });
+    host.report('error', 'a.error', { message: 'e' });
+    host.report('debug', 'a.debug', { message: 'd' });
+    assert.deepEqual(cap.logs, ['[adk] a.warn: w', '[adk] a.error: e'], 'warn+error logged, debug muted');
+    assert.deepEqual(cap.events.map((x) => x.topic), ['a.warn', 'a.error', 'a.debug'], 'all three emitted');
+  } finally {
+    cap.restore();
+  }
+
+  cap = captureBusAndWarn();
+  try {
+    globalThis.__ccpDebug = true; // debug ON: the debug line now logs too.
+    host.report('debug', 'b.debug', { reason: 'why' });
+    assert.deepEqual(cap.logs, ['[adk] b.debug: why'], "debug logs under host.debug(); uses .reason");
+  } finally {
+    cap.restore();
+    restore();
+  }
+});
+
+test('host.report() never throws (fail-open) even when the bus observer and console both throw', () => {
+  const restore = isolateGlobals();
+  const realWarn = console.warn;
+  try {
+    globalThis.__ccpBus = { emit() { throw new Error('observer boom'); } };
+    console.warn = () => { throw new Error('console boom'); };
+    assert.doesNotThrow(() => host.report('warn', 'boom', { message: 'x' }), 'report swallows both failures');
+  } finally {
+    console.warn = realWarn;
+    restore();
+  }
+});
+
 // ── createAdk() id + process-global method identity ──────────────────────────
 
 test('createAdk() exposes a stable, unique id', () => {

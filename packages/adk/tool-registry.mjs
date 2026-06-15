@@ -77,11 +77,19 @@ function getDispatchNonce() {
  * normal runs aren't noisy); escalates to console.warn only when the project
  * debug switch is on — process.env.CLAUDE_DEBUG or globalThis.__ccpDebug truthy
  * (matches the core/contracts.mjs convention). Best-effort; never throws.
+ *
+ * Routed through the unified observability seam at the 'debug' level: the message
+ * ALWAYS reaches the bus (so an attached observer sees these tool-registry events
+ * regardless of the debug switch), while the console line stays gated on
+ * host.debug() exactly as before. The console output is therefore byte-identical
+ * to the prior behaviour; only the additive (no-op-without-observer) bus emit is
+ * new. `event` lets a call site tag a specific topic; it defaults to the generic
+ * 'tools.debug' channel so existing single-arg callers are unchanged.
  * @param {string} msg
+ * @param {string} [event]
  */
-function debug(msg) {
-  if (!host.debug()) return;
-  try { console.warn(msg); } catch (_) {}
+function debug(msg, event = 'tools.debug') {
+  host.report('debug', event, { message: msg });
 }
 
 /**
@@ -869,12 +877,13 @@ function pollOnce(scope) {
     stopWatchers(scope);
     if (!scope.pollWarned) {
       scope.pollWarned = true;
-      try {
-        console.warn(
+      // 'warn' level: always logs (operator must learn the patch is off) AND
+      // surfaces on the bus. Latched once per scope so it can't become noise.
+      host.report('warn', 'tools.inject.timeout', {
+        message:
           '[adk:tools] __ccpRawTools never appeared after ~5s — the expose_tool_dispatch ' +
           'patch is not enabled, so ADK tools were never injected.',
-        );
-      } catch (_) {}
+      });
     }
     // Surface the silent failure to every still-waiting consumer: .ready=false,
     // onInjectFail callback, and .injected rejection (throwOnInjectFail). Catch so
@@ -1008,12 +1017,16 @@ export function defineToolIn(scope, { name, description, inputSchema, execute, o
     const unenforced = unenforcedSchemaKeywords(inputSchema);
     if (unenforced.length) {
       _schemaWarnedTools.add(name);
-      try {
-        console.warn(
+      // 'warn' level: a production author must learn their schema isn't enforced,
+      // so it always logs (once per tool name) AND emits the keyword list on the
+      // bus for tooling to surface.
+      host.report('warn', 'tools.schema.unenforced', {
+        tool: name,
+        unenforced,
+        message:
           `[adk:tools] tool "${name}": inputSchema contains keyword(s) the built-in validateInput does NOT enforce: ${unenforced.join(', ')}. ` +
           'Pass a validate(input)=>string|null hook (ajv/zod/etc.) to deep-check them.',
-        );
-      } catch (_) { /* warning must never break defineTool */ }
+      });
     }
   }
 
