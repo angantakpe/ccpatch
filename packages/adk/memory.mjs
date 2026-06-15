@@ -13,7 +13,7 @@ import {
   closeSync,
 } from 'node:fs';
 import { dirname, resolve, relative, isAbsolute } from 'node:path';
-import { cwd, pid } from 'node:process';
+import { cwd, pid, kill } from 'node:process';
 import { host } from './host.mjs';
 
 // Default hard cap on the on-disk store: refuse to JSON.parse unbounded input.
@@ -39,6 +39,17 @@ const FILE_MODE = 0o600;
 // read-merge-write critical section, short enough that a crash doesn't wedge the
 // store for long.
 const LOCK_STALE_MS = 10_000; // 10 s
+// Absolute backstop: a lock older than this is stolen EVEN IF its holder pid still
+// looks alive. Guards against pid REUSE (a crashed holder's pid recycled by an
+// unrelated live process would otherwise wedge the store forever) and genuinely
+// hung writers. Must be >> any legitimate read-merge-write critical section.
+const LOCK_HARD_STALE_MS = 60_000; // 60 s
+// Bounded synchronous wait when a LIVE writer holds the lock: rather than
+// immediately falling back to an UNLOCKED write (which reopens the exact TOCTOU
+// the lock closes), spin a short, bounded interval and retry. ~1 s total worst
+// case, only ever paid under genuine contention.
+const LOCK_RETRY_MS = 25;
+const LOCK_RETRY_ATTEMPTS = 40;
 
 // ── durable write helpers ─────────────────────────────────────────────────────
 // DURABILITY: a bare writeFileSync(tmp) followed by renameSync gives ATOMICITY
@@ -539,30 +550,101 @@ export function createMemory({ path: filePath, transform, maxBytes, appendLog = 
   // its merge.
   //
   // Lock = openSync(path + '.lock', 'wx') (O_CREAT|O_EXCL → fails with EEXIST if
-  // it already exists). On EEXIST we treat a lock older than LOCK_STALE_MS as a
-  // crashed-writer leftover: remove it and retry ONCE. If we still can't get it,
-  // we fall back to the (best-effort, unlocked) write rather than hanging or
-  // throwing — correctness degrades to the prior behaviour, never a deadlock.
+  // it already exists) with the holder's pid written into it. On EEXIST we decide
+  // whether to STEAL (only a crashed/dead/ancient holder — never a pid that is
+  // still alive within the hard ceiling) or to WAIT: a bounded synchronous retry
+  // while a live writer finishes its brief critical section, instead of the old
+  // immediate fall-through to an unlocked write (which reopened the very TOCTOU
+  // the lock closes). Only if the bounded wait is exhausted do we fall back to a
+  // best-effort unlocked write — degraded, but never a hang or a deadlock.
   const lockPath = `${resolved}.lock`;
+
+  /** Block the current thread for ~ms WITHOUT async (writeToDisk is synchronous). */
+  function sleepSync(ms) {
+    try {
+      // A real sleep, not a busy spin: Atomics.wait on a throwaway buffer.
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+    } catch {
+      // SharedArrayBuffer/Atomics unavailable → coarse busy-wait fallback.
+      const end = Date.now() + ms;
+      while (Date.now() < end) { /* spin */ }
+    }
+  }
+
+  /** @returns {number|null} the pid recorded in the lockfile, or null if unreadable. */
+  function readLockPid() {
+    try {
+      const n = Number.parseInt(String(readFileSync(lockPath, 'utf8')).trim(), 10);
+      return Number.isInteger(n) && n > 0 ? n : null;
+    } catch {
+      return null; // empty/garbage/legacy lock with no pid → unknown holder.
+    }
+  }
+
+  /** @returns {boolean} true when pid `p` is a live process on THIS host. */
+  function isPidAlive(p) {
+    try {
+      kill(p, 0); // signal 0 = existence probe, sends nothing.
+      return true;
+    } catch (err) {
+      // ESRCH = no such process (dead). EPERM = exists but not ours (alive).
+      return !!(err && err.code === 'EPERM');
+    }
+  }
+
+  /**
+   * Remove the existing lock IFF it is safe to steal. A holder whose pid is still
+   * ALIVE is mid-critical-section (however slow) and is NEVER stolen — this is the
+   * fix for the old mtime-only rule, which would rob a healthy-but-slow writer the
+   * instant the lock crossed LOCK_STALE_MS. We steal only when the holder is
+   * provably dead, the holder is unknown AND the lock is mtime-stale (crash
+   * backstop), or the lock is older than the hard ceiling (pid-reuse / hung-writer
+   * backstop).
+   * @returns {boolean} true when the stale lock was removed (caller may re-open).
+   */
+  function tryStealStaleLock() {
+    try {
+      const ageMs = Date.now() - statSync(lockPath).mtimeMs;
+      const holderPid = readLockPid();
+      const alive = holderPid !== null && isPidAlive(holderPid);
+      // A live holder within the hard ceiling owns the lock — do not steal.
+      if (alive && ageMs <= LOCK_HARD_STALE_MS) return false;
+      // Steal: dead holder, OR (unknown holder AND mtime-stale), OR past the hard
+      // ceiling (alive-but-ancient ⇒ reused pid / hung writer).
+      const dead = holderPid !== null && !alive;
+      if (dead || ageMs > LOCK_STALE_MS || ageMs > LOCK_HARD_STALE_MS) {
+        rmSync(lockPath, { force: true });
+        return true;
+      }
+    } catch {
+      /* stat/read/rm race lost to another writer → treat as not stealable */
+    }
+    return false;
+  }
 
   /** @returns {number|null} an open fd for the held lock, or null if not acquired. */
   function acquireLock() {
-    try {
-      return openSync(lockPath, 'wx', FILE_MODE);
-    } catch (err) {
-      if (!err || err.code !== 'EEXIST') return null; // unexpected → no lock.
-      // Lock exists: steal it only if it is stale (older than LOCK_STALE_MS).
+    for (let attempt = 0; ; attempt++) {
       try {
-        const lockStat = statSync(lockPath);
-        if (Date.now() - lockStat.mtimeMs > LOCK_STALE_MS) {
-          rmSync(lockPath, { force: true });
-          // Retry exactly once after removing the stale lock.
-          return openSync(lockPath, 'wx', FILE_MODE);
+        const fd = openSync(lockPath, 'wx', FILE_MODE);
+        // Record our pid so a later writer can tell a live holder from a crashed
+        // one (best-effort; mtime staleness still works if this write fails).
+        try { writeSync(fd, String(pid)); } catch { /* best-effort pid stamp */ }
+        return fd;
+      } catch (err) {
+        if (!err || err.code !== 'EEXIST') return null; // unexpected → no lock.
+        // Lock is held. If it's safe to steal (crashed/dead/ancient holder),
+        // remove it and retry the open immediately.
+        if (tryStealStaleLock()) continue;
+        // Held by a LIVE writer: wait a bounded interval and retry rather than
+        // falling back to an unlocked write. Exhausting the budget degrades to the
+        // prior best-effort unlocked write (never a deadlock).
+        if (attempt < LOCK_RETRY_ATTEMPTS) {
+          sleepSync(LOCK_RETRY_MS);
+          continue;
         }
-      } catch {
-        /* stat/rm/retry race lost to another writer → treat as not acquired */
+        return null;
       }
-      return null;
     }
   }
 
