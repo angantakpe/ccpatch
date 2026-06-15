@@ -38,6 +38,21 @@ state is INSTANCE-LOCAL; `capabilities` / `useAgentBus` / `createMemory` front
 single process-global resources and are intentionally shared (memory is keyed by
 file path, not by instance). Instances now carry a stable `id`. See REVIEW.md §1.
 
+### contractVerdict — single "drift → action" + memoization policy (architecture review #3)
+The "latch only when proven via `require`, re-check otherwise" rule was
+duplicated in `tool-registry.gatedPathTrusted()` and
+`handoff.assertSystemPromptContract()` — each with its own `_driftChecked` latch.
+It now lives once in `contracts.mjs` as `contractVerdict(name)`, which returns one
+decided verdict (`'trusted'` — require-proven, latched in a single process-global
+`_trusted` set; `'refuse'` — proven drift, not latched; `'proceed'` — nothing to
+prove / advertised-only, not latched). Consumers keep only their *reaction*
+(tool-registry → `false` on refuse; handoff → throw on refuse; both proceed
+otherwise). `capabilities()` / `useAgentBus()` deliberately stay on raw
+`checkContract` (they must re-probe every call, never memoize). The per-module
+`__resetDriftGuardForTests` / `__resetSystemPromptDriftGuardForTests` seams remain
+as back-compat aliases over the central `__resetContractVerdictsForTests`. See
+REVIEW.md §3.
+
 ## tool-registry.mjs
 
 Findings present: 2, 8, 9, 12, 14, 15, 16.
@@ -45,11 +60,15 @@ Findings present: 2, 8, 9, 12, 14, 15, 16.
 ### tool-registry FINDING 2 — load-bearing drift guard on the gated injection path
 Before routing an injection through the (possibly drifted) `__ccpRegisterTool`
 global, positively re-validate the `toolDispatch` typed contract shape via
-`__ccpRequire` (`shape: ['registerTool']`). A throw is *proven drift* → latch a
-refusal and `tryInject()` fails closed. Fail-OPEN when there is nothing to prove
-(no `__ccpRequire` / no registered `toolDispatch` contract), which keeps the
-bare-array and fake-registrar test stubs working. Memoized at most once per
-process (`gatedPathTrusted()`); `__resetDriftGuardForTests()` clears the latch.
+`__ccpRequire` (`shape: ['registerTool']`). Proven drift → `tryInject()` fails
+closed. Fail-OPEN when there is nothing to prove (no `__ccpRequire` / no
+registered `toolDispatch` contract), which keeps the bare-array and
+fake-registrar test stubs working. The validate-and-memoize policy was
+since centralized — `gatedPathTrusted()` now delegates to `contractVerdict()`
+and holds only the `false`-on-refuse reaction; the latch lives in the central
+`_trusted` set, and `__resetDriftGuardForTests()` is a back-compat alias over
+`__resetContractVerdictsForTests('toolDispatch')` (see the architecture-review
+`contractVerdict` entry above).
 
 ### tool-registry FINDING 8 — shared drain scheduler
 Previously every waiting scope armed its OWN `setInterval`, so N waiting scopes
@@ -117,12 +136,17 @@ existing callers are unaffected.
 ### handoff FINDING 2 — load-bearing systemPrompt contract handshake at the write site
 `assertSystemPromptContract()` makes the drift guard load-bearing at handoff's
 actual persona WRITE site (where a present-but-broken `systemPrompt` contract
-would do real damage). Before the first live write, consult
+would do real damage). Before a live write, validate
 `__ccpRequire('systemPrompt', { minVersion: 2, shape: ['getNonce'] })` — but ONLY
-when both the require helper AND a registered `systemPrompt` contract exist. A
-throw is proven drift → refuse the write with a clear Error (not memoized true, so
-a recovered host re-checks). Absent helper / unregistered contract → proceed
-unchanged (fail-open for bare-global test stubs). Memoized otherwise.
+when both the require helper AND a registered `systemPrompt` contract exist.
+Proven drift → refuse the write with a clear thrown Error. Absent helper /
+unregistered contract → proceed unchanged (fail-open for bare-global test stubs).
+The validate-and-memoize policy was since centralized:
+`assertSystemPromptContract()` now delegates to `contractVerdict('systemPrompt')`
+and holds only the throw-on-refuse reaction; the latch lives in the central
+`_trusted` set, and `__resetSystemPromptDriftGuardForTests()` is a back-compat
+alias over `__resetContractVerdictsForTests('systemPrompt')` (see the
+architecture-review `contractVerdict` entry above).
 
 ### handoff FINDING 5 — persona PIN at definition time (swap-mode TOCTOU)
 `allowSwapTargets` only allowlists the target NAME; a later `defineAgent()` could

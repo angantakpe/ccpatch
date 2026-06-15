@@ -184,3 +184,84 @@ export function checkContract(name) {
   }
   return { status: 'ok', via: 'advertised', entry };
 }
+
+/**
+ * Per-contract memoization latch for `contractVerdict()`. A name is added here
+ * ONLY after a registered contract has positively validated through __ccpRequire
+ * (the strongest, value-path-probing check). Once latched, the gated path the
+ * verdict guards is proven safe and re-consulting a fixed contract is pure
+ * overhead. Every other outcome (nothing-to-prove, advertised-only ok, proven
+ * drift) is intentionally NOT latched so a registry that populates — or a host
+ * that recovers — after the first call is honored on a later one.
+ *
+ * @type {Set<string>}
+ */
+const _trusted = new Set();
+
+/**
+ * @typedef {Object} ContractVerdict
+ * @property {'trusted'|'refuse'|'proceed'} decision
+ *   The single decided action, with the "latch only when proven via require"
+ *   memoization policy already applied:
+ *   - 'trusted': SAFE to use the gated path. Either this call latched a
+ *     require-proven contract, or a prior call already did. Callers proceed and
+ *     should not re-probe (the latch makes that cheap to skip).
+ *   - 'refuse': PROVEN drift — a registered contract failed the pin. Callers
+ *     fail closed (return false / throw / downgrade). NOT latched: a recovered
+ *     host re-checks next call.
+ *   - 'proceed': nothing to prove (no registry helpers / contract unregistered)
+ *     OR an advertised-metadata-only 'ok' (no __ccpRequire on the host). Callers
+ *     proceed on their direct global probe. NOT latched, so a later-appearing
+ *     require helper / contract is still consulted. Distinct from 'trusted' so
+ *     consumers that care can tell "proven safe" from "unproven, fail-open".
+ * @property {string} [reason]  For 'refuse': the actionable drift reason.
+ * @property {ContractCheckResult} check  The underlying checkContract() result.
+ */
+
+/**
+ * The single source of the "drift → action" + memoization policy that
+ * `gatedPathTrusted()` (tool-registry) and `assertSystemPromptContract()`
+ * (handoff) previously each re-implemented. Both latched `_driftChecked = true`
+ * only on a `via:'require'` ok and re-checked otherwise — a correct but
+ * non-obvious rule that lived in two places and could drift apart. It now lives
+ * here once; consumers branch on `decision` and keep their own *reaction*
+ * (tool-registry returns false on 'refuse'; handoff throws; both proceed on
+ * 'trusted'/'proceed').
+ *
+ * NEVER throws — advisory by construction, like `checkContract`.
+ *
+ * @param {string} name  A key of ADK_CONTRACT_REQUIREMENTS.
+ * @returns {ContractVerdict}
+ */
+export function contractVerdict(name) {
+  if (_trusted.has(name)) {
+    return { decision: 'trusted', check: { status: 'ok', via: 'require' } };
+  }
+  const check = checkContract(name);
+  if (check.status === 'drift') {
+    return { decision: 'refuse', reason: check.reason, check };
+  }
+  // 'ok' or 'unchecked'. Latch ONLY a require-proven ok — that is the only
+  // outcome strong enough to stop re-probing. Advertised-only ok and unchecked
+  // stay re-checkable.
+  if (check.status === 'ok' && check.via === 'require') {
+    _trusted.add(name);
+    return { decision: 'trusted', check };
+  }
+  return { decision: 'proceed', check };
+}
+
+/**
+ * TEST SEAM ONLY. `contractVerdict()` memoizes once a registered contract
+ * validates via __ccpRequire; tests that exercise distinct registry
+ * configurations within one process must clear those latches between cases.
+ * Replaces the per-module `__resetDriftGuardForTests` /
+ * `__resetSystemPromptDriftGuardForTests` seams now that the latch is central.
+ * Not part of the public ADK surface.
+ * @param {string} [name]  Clear one contract's latch; omit to clear all.
+ * @returns {void}
+ */
+export function __resetContractVerdictsForTests(name) {
+  if (typeof name === 'string') _trusted.delete(name);
+  else _trusted.clear();
+}

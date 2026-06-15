@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
 import { getAgent as getAgentDefault } from './agent.mjs';
 import { defineTool as defineToolDefault } from './tool-registry.mjs';
-import { checkContract } from './contracts.mjs';
+import { contractVerdict, __resetContractVerdictsForTests } from './contracts.mjs';
 import { host } from './host.mjs';
 
 /**
@@ -328,73 +328,42 @@ function busEmit(topic, payload) {
 }
 
 /**
- * Memoized result of the drift handshake. `undefined` = not yet POSITIVELY
- * validated; once a REGISTERED 'systemPrompt' contract has been validated it is
- * set to `true` and never re-evaluated (the contract registry is fixed once it
- * populates, so re-consulting a proven-good contract is pure overhead).
- *
- * The fail-OPEN decision (no require/inspect helper, or no contract registered
- * yet) is deliberately NOT latched: a contract registry that populates AFTER the
- * first swap must still be honored, so the guard keeps re-evaluating cheaply until
- * a contract is actually present. A PROVEN drift throws synchronously EVERY time
- * (and is never memoized true).
- * @type {boolean|undefined}
- */
-let _driftChecked;
-
-/**
- * TEST SEAM ONLY. assertSystemPromptContract() memoizes once a registered
- * contract validates; tests that exercise distinct contract-registry
- * configurations within one process need to clear that latch between cases (and
- * an earlier fail-open path must not leak into a later drift case). Mirrors
- * tool-registry.mjs's __resetDriftGuardForTests(). Not part of the public ADK
+ * TEST SEAM ONLY. Back-compat alias for the now-central
+ * __resetContractVerdictsForTests; clears the systemPrompt latch specifically so
+ * existing tests that import this name from handoff keep working (and an earlier
+ * fail-open path can't leak into a later drift case). Not part of the public ADK
  * surface — do NOT surface in index.mjs / index.d.ts.
  * @returns {void}
  */
 export function __resetSystemPromptDriftGuardForTests() {
-  _driftChecked = undefined;
+  __resetContractVerdictsForTests('systemPrompt');
 }
 
 /**
  * Make the drift guard load-bearing at handoff's write call site. The build-time
  * `verify { present }` and capabilities()'s advisory handshake catch a drifted
  * host, but the actual WRITE here is where a present-but-broken `systemPrompt`
- * contract would do real damage. Before a live write, consult
- * checkContract('systemPrompt') — the centralized pin in contracts.mjs (v>=2,
- * shape ['getNonce'], routed through __ccpRequire when the helper is live).
- * Proven drift refuses the write with a clear thrown Error (naming the contract
- * and the producer-vs-required versions) rather than calling the drifted
- * global. An unregistered contract / absent registry proceeds unchanged —
- * fail-open preserves test stubs that set bare globals with no contract
- * registry.
+ * contract would do real damage. Before a live write, consult the centralized
+ * verdict for 'systemPrompt' — the pin in contracts.mjs (v>=2, shape
+ * ['getNonce'], routed through __ccpRequire when the helper is live). Proven
+ * drift refuses the write with a clear thrown Error (naming the contract and the
+ * producer-vs-required versions) rather than calling the drifted global.
  *
- * Memoization is asymmetric ON PURPOSE: we ONLY latch `_driftChecked = true` once
- * a REGISTERED contract has positively validated. The fail-open branches (no
- * helper / not registered yet) are NOT latched, so a contract registry that
- * populates AFTER the first swap is still honored on a later write — the guard
- * re-evaluates cheaply until a contract is actually present. Proven drift throws
- * every time and is never memoized.
+ * The "latch only when proven via require, re-check otherwise" memoization rule
+ * (previously duplicated here and in tool-registry.mjs's gatedPathTrusted) now
+ * lives once in `contractVerdict()`. This site keeps only its *reaction*:
+ * 'refuse' → throw; everything else ('trusted'/'proceed') → return. The fail-open
+ * 'proceed' branch (no helper / not registered yet) is the centralized
+ * non-latched path, so a registry that populates AFTER the first swap is still
+ * honored on a later write; proven drift throws every time and is never latched.
  */
 function assertSystemPromptContract() {
-  if (_driftChecked) return;
-  // Centralized pin: contracts.mjs requires 'systemPrompt' v>=2 with shape
-  // ['getNonce'] through __ccpRequire when the helper is live, falling back to
-  // the registry's advertised metadata otherwise.
-  const res = checkContract('systemPrompt');
-  // Fail-open (NOT latched): no registry helpers, or no registered
-  // 'systemPrompt' contract, means a bare-global host/test stub — proceed
-  // unchanged, but re-check on the next write in case the registry populates late.
-  if (res.status === 'unchecked') return;
-  // Contract IS registered → the handshake is now load-bearing. Drift is
-  // proven; refuse the write (and do NOT latch, so a recovered host re-checks).
-  if (res.status === 'drift') {
-    throw new Error(`[adk:handoff] refusing persona write — systemPrompt contract drift: ${res.reason}`);
+  const v = contractVerdict('systemPrompt');
+  if (v.decision === 'refuse') {
+    throw new Error(`[adk:handoff] refusing persona write — systemPrompt contract drift: ${v.reason}`);
   }
-  // Positively validated a registered contract → safe to memoize from here on,
-  // but ONLY when the actual value paths were probed through __ccpRequire; an
-  // advertised-metadata-only 'ok' stays unlatched so a later-appearing require
-  // helper is still consulted.
-  if (res.via === 'require') _driftChecked = true;
+  // 'trusted' (require-proven, latched) or 'proceed' (nothing to prove /
+  // advertised-only) → safe to write the persona.
 }
 
 /**
