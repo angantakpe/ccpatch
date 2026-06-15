@@ -67,6 +67,60 @@ dispatched tools with the variable unset must now set it (a per-tool list is
 preferred; `'*'` restores the old behavior). See THREAT_MODEL.md ("Remote
 tool/code-execution surface") for why the default is deny-all.
 
+## policy_gate: host-driven behavior gate
+
+> **Status: ships disabled, no bundled consumer.** `policy_gate` is `enabled: false`
+> in `ccpatch.yml` and provides only the gate *mechanism* — it is policy-free and
+> inert until a host wires a consumer module. ccpatch does **not** bundle a
+> consumer; the gate is a platform-tier building block for downstream hosts that
+> own their own policy logic. The keep-vs-remove question (should ccpatch ship a
+> consumer-less gate at all?) is an **owner decision tracked in COD-15** — this
+> entry documents the gate so the decision is explicit rather than implicit. Do
+> not remove this patch without owner sign-off; it is a security-relevant
+> enforcement primitive.
+
+The `policy_gate` extension enforces two host-supplied checks **inside** the CLI
+process, on every surface (interactive and headless), so a host's server-side
+policy engine can reach a raw `claude` session it otherwise couldn't:
+
+- **SOFT** — a system-prompt steer string (`steer()`), installed via
+  `expose_system_prompt`'s nonce-gated writer at boot and before each turn.
+- **HARD** — an outbound request gate (`inspectRequest()`) via `fetch_interceptor`'s
+  `__ccpOnFetchBefore`, returning `allow` / `scrub` (replace request body) /
+  `block` (short-circuit with a synthetic assistant turn). An optional
+  response-side `onStreamEvent()` can abort a stream early.
+
+### Wiring a consumer
+
+1. Write a host policy module exporting any subset of the contract
+   (`steer`, `inspectRequest`, `onStreamEvent` — all optional, feature-detected):
+
+   ```js
+   module.exports = {
+     steer() { return '## House rules: …' /* or null to clear */ },
+     inspectRequest({ url, options, isApi, body }) {
+       return { action: 'allow' }; // or { action:'scrub', body } / { action:'block', message }
+     },
+     onStreamEvent(ev) { return false; /* true aborts the stream */ },
+   };
+   ```
+
+2. Enable `policy_gate` (and its deps `fetch_interceptor` + `expose_system_prompt`)
+   in your profile and re-apply the patch set.
+3. Point the CLI at the module and choose a failure mode:
+
+| Env var | Effect |
+|---|---|
+| `CCP_POLICY_GATE_MODULE` | Absolute path to the host policy module. **Unset = inert** (the shipped default); the gate does nothing. |
+| `CCP_POLICY_GATE_REQUIRED` | `1` = **fail closed**: a configured-but-degraded gate (missing/throwing module, wrong shape, throwing `steer()` boot probe) BLOCKS every outbound Anthropic request instead of degrading to no-gating. Default (unset) = **fail open**: degrade to no-gating, but print one loud boot warning. |
+| `CCP_POLICY_GATE_PRIORITY` | Before-hook priority for the outbound gate (default `20`; lower runs earlier). |
+| `CLAUDE_DEBUG` | `1` surfaces per-request gate diagnostics on stderr. |
+
+**Loading a module path runs arbitrary host code in the CLI process** — hence the
+extension's `exec` capability and the disabled-by-default posture. See the file
+header in `extensions/policy_gate.mjs` for the full contract and fail-open /
+fail-closed semantics.
+
 ## Authoring an extension
 
 See [docs/authoring-patches.md](docs/authoring-patches.md) for the full patch manifest reference, lifecycle hooks, and worked examples.
