@@ -651,7 +651,8 @@ function repack(originalBinaryPath, patchedJsPath, outputBinaryPath, options = {
     const delta = patchedBuf.length - originalRegionSize;
 
     if (isFatMachO) {
-      // FENCED / UNSUPPORTED PLATFORM — see docs/native-repack-notes.md ("Platform support").
+      // FENCED / UNSUPPORTED PLATFORM — see docs/native-repack-notes.md
+      // ("Supported repack matrix" / "Explicit fallback strategy").
       // Fat/universal Mach-O: we would have to thin to the matching arch slice, grow that, and
       // rebuild the fat wrapper (re-aligning every slice). That is not implemented — fail loud
       // and emit the structured skip line WS6 parses.
@@ -665,13 +666,16 @@ function repack(originalBinaryPath, patchedJsPath, outputBinaryPath, options = {
       die(
         `Patched JS (${patchedBuf.length.toLocaleString()} bytes) exceeds the original JS region ` +
         `(${originalRegionSize.toLocaleString()} bytes) by ${delta.toLocaleString()} bytes, and grow-repack ` +
-        `does not support fat/universal Mach-O. Thin the binary to the matching arch slice first, or ` +
-        `reduce the patched content / build from the plain-JS path.`
+        `does not support fat/universal Mach-O. Thin the binary to the matching arch slice first ` +
+        `(e.g. lipo -thin arm64), or build from the plain-JS path. This is an intentional, documented ` +
+        `limitation — see the supported repack matrix and fallback strategy in ` +
+        `docs/native-repack-notes.md.`
       );
     }
 
     if (!isElf && !isMachO) {
-      // FENCED / UNSUPPORTED PLATFORM — see docs/native-repack-notes.md ("Platform support").
+      // FENCED / UNSUPPORTED PLATFORM — see docs/native-repack-notes.md
+      // ("Supported repack matrix" / "Explicit fallback strategy").
       // Anything else (e.g. PE / Windows) has no grow path — fail loud with a structured skip line.
       emitSkipLine({
         reason: 'native-grow-path-unavailable',
@@ -684,7 +688,9 @@ function repack(originalBinaryPath, patchedJsPath, outputBinaryPath, options = {
         `Patched JS (${patchedBuf.length.toLocaleString()} bytes) exceeds the original JS region ` +
         `(${originalRegionSize.toLocaleString()} bytes) by ${delta.toLocaleString()} bytes, and grow-repack ` +
         `is implemented for ELF (linux-x64) and thin Mach-O (darwin arm64/x64) only (PE/Windows is not ` +
-        `supported). Reduce the patched content or build from the plain-JS path.`
+        `supported). Build from the plain-JS path, or reduce the patched content so the region does not ` +
+        `grow. This is an intentional, documented limitation — see the supported repack matrix and ` +
+        `fallback strategy in docs/native-repack-notes.md.`
       );
     }
 
