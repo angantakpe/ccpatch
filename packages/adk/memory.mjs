@@ -869,7 +869,20 @@ export function createMemory({ path: filePath, root: rootOpt, transform, maxByte
             // cache (any post-clear re-set()s, which are also in dirtyKeys).
             const merged = {};
             for (const k of Object.keys(diskRaw)) {
-              if (isSafeKey(k) && !knownKeys.has(k)) merged[k] = diskRaw[k];
+              if (isSafeKey(k) && !knownKeys.has(k)) {
+                merged[k] = diskRaw[k];
+              } else if (isSafeKey(k) && !dirtyKeys.has(k)) {
+                // A key we KNEW about is still present on disk under a NEWER
+                // mtime: a concurrent writer (re-)wrote it after our load, and
+                // our clear is about to drop it. The drop is intentional — we
+                // resolve the clear-vs-same-name-write ambiguity in favour of
+                // the local clear — but it silently discards a foreign write.
+                // Surface the dropped key as a bus event so it is observable
+                // instead of vanishing. (Keys this instance is re-setting
+                // post-clear are in dirtyKeys and survive the merge below, so
+                // they are not a dropped foreign write and are skipped here.)
+                host.emit('memory.clear.conflict', { path: resolved, key: k });
+              }
             }
             for (const k of dirtyKeys) {
               if (Object.prototype.hasOwnProperty.call(cache, k)) merged[k] = cache[k];
