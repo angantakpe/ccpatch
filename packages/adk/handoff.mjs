@@ -125,13 +125,26 @@ const SwapCoordinator = {
   restoreSkipWarnedPairs: new Set(),
 
   /**
+   * Per-scope swap-depth counter: `scopeId` → number of shared-stack entries that
+   * scope currently owns. This is the O(1) authoritative source for depthOf(),
+   * maintained incrementally by the ONLY two methods that change a scope's
+   * ownership count — push() (+1) and restore() (−1) — so it stays in lockstep
+   * with `stack.filter((e) => e.owner === scopeId).length` without re-walking the
+   * shared stack on the swap hot path. An absent key reads as depth 0; a key is
+   * deleted when its count returns to 0 so the map never accumulates dead scopes.
+   * @type {Map<string, number>}
+   */
+  depths: new Map(),
+
+  /**
    * Number of stack entries owned by `scopeId` (that instance's current swap
-   * depth).
+   * depth). O(1): reads the incremental per-scope counter (`depths`) maintained
+   * on push/restore, not an O(n) walk of the shared stack.
    * @param {string} scopeId
    * @returns {number}
    */
   depthOf(scopeId) {
-    return this.stack.reduce((n, e) => (e.owner === scopeId ? n + 1 : n), 0);
+    return this.depths.get(scopeId) || 0;
   },
 
   /** The top stack entry, or undefined when empty. */
@@ -177,6 +190,10 @@ const SwapCoordinator = {
     const prev = captureCurrentPrompt();
     const removedTools = restrictLiveTools(allow); // null when unrestricted
     this.stack.push({ owner: scopeId, prev, removedTools });
+    // Keep the per-scope depth counter in lockstep with this scope's ownership
+    // count on the shared stack (read O(1) by depthOf). Done only after the entry
+    // is actually pushed, so a depth-cap refusal above never touches the counter.
+    this.depths.set(scopeId, (this.depths.get(scopeId) || 0) + 1);
     setLiveSystemPrompt(persona);
     return removedTools;
   },
@@ -227,6 +244,12 @@ const SwapCoordinator = {
     try { setLiveSystemPrompt(top.prev, { skipContractCheck: true }); } catch (_) { return false; }
     // Write succeeded and the top is ours → NOW pop (write-before-pop ordering).
     this.stack.pop();
+    // Decrement this scope's per-scope depth counter in lockstep with the pop
+    // (write-before-pop above guarantees we only reach here when an owned entry is
+    // actually removed). Delete the key at 0 so the map never retains dead scopes.
+    const remaining = (this.depths.get(scopeId) || 0) - 1;
+    if (remaining > 0) this.depths.set(scopeId, remaining);
+    else this.depths.delete(scopeId);
     // Re-add any tools this swap hid (LIFO-correct: each entry restores exactly
     // what IT removed from the live surface at its swap time).
     restoreLiveTools(top.removedTools);
