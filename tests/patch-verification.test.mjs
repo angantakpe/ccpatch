@@ -18,7 +18,7 @@ import vm from 'node:vm';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readPatchFlags } from '../runner/config.mjs';
+import { readPatchFlags, readProfiles, resolveEffectivePatches } from '../runner/config.mjs';
 import { resolveEffectiveApply } from '../runner/effective-apply.mjs';
 import {
   BOOT_REGISTRY_SENTINEL,
@@ -818,5 +818,66 @@ test('Layer 4 — boot registry: one splice, declared order, idempotent re-apply
     assert.equal(out, plain, 'code returned unchanged');
     assert.equal(warns.length, 1, 'one loud warning');
     assert.match(warns[0], /boot-registry/);
+  });
+});
+
+// ── COD-13: adk_handoff_demo is a shipped reference consumer ──────────────────
+// COD-12 marked the handoff/router/memory surfaces PROVISIONAL and deferred the
+// "ship a real consumer" decision here. This locks the contract that makes
+// adk_handoff_demo a shipped consumer: it must (1) be an agent-dir-only patch
+// whose no-op apply() is idempotent (rule 2), (2) carry a STRONG verify that
+// does not trip the UNVERIFIED/--strict gate (rule 3), and (3) be a member of
+// the `adk` profile with every hard dependsOn resolved in that profile — i.e.
+// the profile actually BUILDS. (3) is the load-bearing one: --profile ignores
+// the per-patch enabled flags, so the consumer's deps must be listed in the
+// profile or the build throws at the dependsOn gate before this patch runs.
+
+test('COD-13 — adk_handoff_demo ships as a buildable adk-profile consumer', async (t) => {
+  const NAME = 'adk_handoff_demo';
+  const patch = patches[NAME];
+
+  await t.test('is loaded and agent-dir-only with an idempotent no-op apply (rule 2)', () => {
+    assert.ok(patch, `${NAME} must be loadable from extensions/`);
+    assert.ok(isAgentDirOnly(patch), `${NAME} must ship its behavior via agentDir, not a bundle splice`);
+    // No-op apply() is idempotent by construction: applying twice is byte-identical.
+    const sample = 'const x = 1;\n';
+    assert.equal(patch.apply(sample), sample, 'apply() must be a no-op (behavior ships in ccpatch-agents/)');
+    assert.equal(patch.apply(patch.apply(sample)), sample, 're-apply must be byte-identical (rule 2)');
+  });
+
+  await t.test('verify is strong — absent-only, not the weak present-only shape (rule 3)', () => {
+    const v = patch.verify;
+    assert.ok(v, `${NAME} must declare a verify block`);
+    const hasPresent = v.present != null;
+    const hasAbsent = v.absent != null;
+    const hasCount = v.count != null;
+    // Weak == present-only (no absent, no count) — that is what shows UNVERIFIED
+    // under --strict. An absent-only verify is the agent-dir contract and is
+    // explicitly exempt (runner/anchors.mjs isWeakLocal + apply-pipeline gate).
+    const isWeak = hasPresent && !hasAbsent && !hasCount;
+    assert.ok(!isWeak, `${NAME} verify must not be present-only (would show UNVERIFIED under --strict)`);
+    assert.ok(hasAbsent || hasCount, `${NAME} verify must assert absent: or count:`);
+  });
+
+  await t.test('is a member of the adk profile with all hard deps resolved there', () => {
+    const flags = readPatchFlags(resolve(ROOT, 'ccpatch.yml')) ?? {};
+    const { selected } = resolveEffectivePatches({
+      patches: flags,
+      requested: null,
+      profile: 'adk',
+      yamlPath: resolve(ROOT, 'ccpatch.yml'),
+    });
+    const sel = new Set(selected);
+    assert.ok(sel.has(NAME), `${NAME} must be selected by --profile adk`);
+    // Every hard dependsOn must ALSO be in the resolved adk set, or the build
+    // throws "requires <dep>, but it is not enabled" before this patch applies.
+    for (const dep of patch.dependsOn ?? []) {
+      assert.ok(sel.has(dep), `adk profile must include ${NAME}'s hard dep "${dep}" (else --profile adk build-fails)`);
+    }
+  });
+
+  await t.test('the adk profile is defined and extends standard', () => {
+    const profiles = readProfiles(resolve(ROOT, 'ccpatch.yml'));
+    assert.ok(profiles && profiles.adk, 'adk profile must be defined in ccpatch.yml');
   });
 });

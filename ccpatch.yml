@@ -342,12 +342,28 @@ profiles:
   adk:
     extends: standard
     patches:
+      # Hard deps of the ADK consumers below. These are globally `true` in the
+      # per-patch flags above, but --profile IGNORES those flags (it resolves
+      # ONLY the profiles: map), so they MUST be listed here explicitly or
+      # adk_hello_agent / adk_handoff_demo build-fail at the dependsOn gate
+      # ("requires expose_tool_dispatch, but it is not enabled"). Both are
+      # already pre-acked in the ack: block above, so listing them here does not
+      # widen the unacked-capability surface. (COD-13: without these two the adk
+      # profile never builds, so the reference consumer could not ship.)
+      - expose_tool_dispatch
+      - expose_system_prompt
       - expose_agent_tool
       - prime_agent_tool_on_boot
       - expose_submit_input
       - event_bus
       - adk_hello_agent
       - adk_user_agents
+      # adk_handoff_demo — the SHIPPED reference consumer (COD-13). It stays
+      # globally `enabled: false`: flipping it true would build-fail the default
+      # `make patch-claude-code` (whose expose_agent_tool is globally false) and
+      # would pull the tools/prompt swap surface into every default build. Its
+      # shipping vehicle is THIS curated profile, where every primitive it
+      # consumes (tools / swap / delegate / router / bus) is wired and pre-acked.
       - adk_handoff_demo
 
   # power lists everything explicitly -- no extends
