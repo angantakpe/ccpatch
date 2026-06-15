@@ -4,28 +4,32 @@
  * STATUS: ships DISABLED (`enabled: false` in ccpatch.yml). This patch is the
  * GATE MECHANISM only — it is policy-FREE and inert until a host wires a
  * consumer module via CCP_POLICY_GATE_MODULE (see "WIRING A CONSUMER" below).
- * There is no consumer bundled in this repo; the gate is a platform-tier
- * building block intended for downstream hosts that own their own policy logic.
- * It stays disabled-by-default because (a) with no module configured it does
+ * A canonical REFERENCE CONSUMER ships at consumers/policy_gate.reference.cjs
+ * (a small, documented example operators fork); the gate itself is a platform-
+ * tier building block intended for downstream hosts that own their own policy
+ * logic. It stays disabled-by-default because (a) with no module configured it does
  * nothing useful, and (b) when configured it loads ARBITRARY host code into the
  * CLI process (capability `exec`), so enabling it is an explicit operator
  * decision, never an implicit default.
  *
  * WIRING A CONSUMER (operator quickstart)
  *   1. Write a module that exports any subset of the HOST POLICY MODULE CONTRACT
- *      below (steer / inspectRequest / onStreamEvent).
+ *      below (steer / inspectRequest / onStreamEvent). Start from the shipped
+ *      reference: consumers/policy_gate.reference.cjs (copy it and edit the rules).
  *   2. Enable `policy_gate` (and its deps fetch_interceptor + expose_system_prompt)
  *      in your profile, then re-apply the patch set.
  *   3. Point the CLI at the module:
  *        export CCP_POLICY_GATE_MODULE=/abs/path/to/policy.cjs
  *      Optionally set CCP_POLICY_GATE_REQUIRED=1 to fail CLOSED (see FAIL-CLOSED).
- *   A worked operator reference (env table + the keep/remove status note) lives
- *   in EXTENSIONS_API.md ("policy_gate: host-driven behavior gate").
+ *   A worked operator reference (env table + the reference-consumer pointer)
+ *   lives in EXTENSIONS_API.md ("policy_gate: host-driven behavior gate").
  *
- * KEEP-VS-REMOVE: whether ccpatch should ship this gate at all without a bundled
- * consumer is an OWNER decision (tracked in COD-15). This change documents the
- * gate and surfaces the decision; it does NOT remove the patch. Removing a
- * security-relevant enforcement primitive must not happen without owner sign-off.
+ * KEEP DECISION (COD-15): the owner resolved to KEEP this gate and ship a real
+ * reference consumer (consumers/policy_gate.reference.cjs) plus an end-to-end
+ * contract test (tests/policy_gate_consumer.test.mjs). It stays enabled:false —
+ * loading a host module runs arbitrary code (exec) — so arming a policy remains
+ * an explicit operator opt-in via CCP_POLICY_GATE_MODULE. Removing this security-
+ * relevant enforcement primitive must not happen without owner sign-off.
  *
  * WHY THIS EXISTS
  * Some products need a behavior check that is enforced IN the CLI process, on

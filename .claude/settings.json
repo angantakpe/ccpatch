@@ -1,5 +1,19 @@
 {
   "enabledPlugins": {
     "andrej-karpathy-skills@karpathy-skills": true
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "c=$(jq -r '.tool_input.command // \"\"'); case \"$c\" in *\"git commit\"*) if printf '%s' \"$c\" | grep -qE -- '(^|[[:space:]])-[a-zA-Z]*m([[:space:]]|$)|--message|--file|(^|[[:space:]])-F([[:space:]]|$)'; then if ! printf '%s' \"$c\" | grep -qE 'COD-[0-9]+'; then printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"ccpatch policy: every commit must reference a Linear issue (COD-<number>). Add e.g. COD-13 to the commit message. Tie the commit to a workable COD- issue in the ccpatch Linear project.\"}}'; fi; fi ;; esac; exit 0",
+            "statusMessage": "Checking commit references a COD- issue"
+          }
+        ]
+      }
+    ]
   }
 }
