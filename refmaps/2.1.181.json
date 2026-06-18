@@ -1,0 +1,22 @@
+{
+  "ccVersion": "2.1.181",
+  "generatedAt": "2026-06-18T07:33:17.390Z",
+  "bundleSha256": "0a2b15d470e3bbb9431d5994c8cf89a37a501881bbd8a09b7cbdf4e1e2abe033",
+  "anchors": {
+    "isDurableCronEnabled": {
+      "fn": "IAe",
+      "offset": 4949598
+    },
+    "isLoopDynamicEnabled": {
+      "fn": "TAe",
+      "offset": 4930944
+    },
+    "isLoopPromptEnabled": {
+      "fn": "dWr",
+      "offset": 4927637
+    }
+  },
+  "misses": [
+    "isPlanModeInterviewEnabled"
+  ]
+}
