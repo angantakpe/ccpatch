@@ -134,12 +134,13 @@ describe('bare profile and required-patch override', () => {
     }
   });
 
-  it('standard still resolves to the same 28 patches', async () => {
+  it('standard still resolves to the same 29 patches', async () => {
     const patches = await loadPatches();
     const { selected } = resolveEffectivePatches({
       patches, requested: [], profile: 'standard', yamlPath: CCPATCH_YML,
     });
-    assert.equal(selected.length, 28);
+    // 28 → 29: c0c03c3 added standup_command to the standard profile.
+    assert.equal(selected.length, 29);
   });
 
   it('--no-required suppresses the auto-include for explicit --patch lists, loudly', async () => {
