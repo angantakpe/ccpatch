@@ -315,8 +315,10 @@ export function patchManifestAllowsRegex(src) {
 export const ALLOWED_REGEX_ANCHORS = {
   // onAfterApply() self-check window — NOT a locator. The primary anchor in this
   // file (`guardRe`) is stable-string-anchored on "progress"/"attachment".
+  // v2.1.181: the normalizer parameter rotated from H to e, so the self-check
+  // regex no longer hard-codes the param (it is now a name-slot class too).
   'core/message_normalizer.mjs': new Set([
-    'function [A-Za-z_$][\\w$]*\\(H\\)\\{$',
+    'function [A-Za-z_$][\\w$]*\\([A-Za-z_$][\\w$]*\\)\\{$',
   ]),
   // Secondary matches scoped by the file's stable property-skeleton anchor
   // (`async call({prompt:…,subagent_type:…,description:…})`).

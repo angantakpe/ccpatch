@@ -226,12 +226,13 @@ function captureLogger() {
 describe('strict-mode capability gate (CLI)', () => {
   it('exits non-zero when a high-risk patch is selected without --allow-capabilities', async () => {
     // Use a real patch that is high-risk AND deliberately left unacked:
-    // debug (network, fs, env, telemetry). (webhook is now acked for the daemon
-    // profile, so it would pass the gate — it can no longer prove a rejection.)
+    // policy_gate (network, prompt, fs, env, exec). (webhook is acked for the
+    // daemon profile and debug is acked for the power profile, so neither can
+    // prove a rejection any more; policy_gate remains unacked on purpose.)
     const { inputPath, outputPath } = makeFixture();
     const logger = captureLogger();
     const code = await runPatchCli(
-      [inputPath, outputPath, '--patch', 'debug', '--strict', '--version', '2.1.140'],
+      [inputPath, outputPath, '--patch', 'policy_gate', '--strict', '--version', '2.1.140'],
       logger,
     );
     assert.equal(code, 1);
