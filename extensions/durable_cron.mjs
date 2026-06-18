@@ -61,6 +61,9 @@ export default {
   if (!_regCron()) {
     var _retries = 0;
     var _t = setInterval(function() { if (_regCron() || ++_retries > 50) clearInterval(_t); }, 200);
+    // Defensive: this retry interval self-clears, but don't let it hold the
+    // event loop open meanwhile (so print-and-exit invocations still exit).
+    try { if (_t && typeof _t.unref === 'function') _t.unref(); } catch (_e) {}
   }
 })();
 `;
