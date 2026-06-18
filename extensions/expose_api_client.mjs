@@ -21,6 +21,8 @@
  * ── Anchor history ────────────────────────────────────────────────────────
  * v2.1.142: return new zh(P)}async function WV1(
  * v2.1.146: return new ch(Z)}async function IC1(   (Tu→jm, zh→ch, P→Z, WV1→IC1)
+ * v2.1.181: return new aU(S)}async function O5u(   (factory Lq; params gained a
+ *           trailing `agentContext:s` field after `source:o`)
  *
  * Names rotate every release, so we capture them with a regex over the
  * stable shape: `return new <CLIENT>(<OPTSVAR>)}async function <NEXT>(`.
@@ -47,7 +49,10 @@ export default {
     // sits immediately at a function boundary — by construction, that's the end
     // of the SDK client factory.
     const re = /return new ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\)\}async function ([A-Za-z_$][\w$]*)\(/g;
-    let factoryRe = /async function ([A-Za-z_$][\w$]*)\(\{apiKey:[A-Za-z_$][\w$]*,maxRetries:[A-Za-z_$][\w$]*,model:[A-Za-z_$][\w$]*,fetchOverride:[A-Za-z_$][\w$]*,source:[A-Za-z_$][\w$]*\}\)/;
+    // v2.1.181: the destructured params gained a trailing `agentContext:s`
+    // field after `source:o`. Tolerate any number of additional `key:val`
+    // pairs after `source:` so future added fields don't re-break the anchor.
+    let factoryRe = /async function ([A-Za-z_$][\w$]*)\(\{apiKey:[A-Za-z_$][\w$]*,maxRetries:[A-Za-z_$][\w$]*,model:[A-Za-z_$][\w$]*,fetchOverride:[A-Za-z_$][\w$]*,source:[A-Za-z_$][\w$]*(?:,[A-Za-z_$][\w$]*:[A-Za-z_$][\w$]*)*\}\)/;
     const factoryMatch = code.match(factoryRe);
     if (!factoryMatch) {
       console.warn('  [!] expose_api_client: SDK factory function not found — API client not exposed');

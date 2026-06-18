@@ -70,6 +70,16 @@
       "cliSha256": "ca5ce856242606107e6400c61ce482228888f4ab9e544f22764fb9b372d00594",
       "sizeBytes": 17032451,
       "source": "auto-pin (TOFU: native-binary release, first verified build)"
+    },
+    "2.1.179": {
+      "cliSha256": "befb574b076f054d4f965e70efa5c6e2fa90af4336dab4a3edf5c47047e645f1",
+      "sizeBytes": 17117447,
+      "source": "auto-pin (TOFU: native-binary release, first verified build)"
+    },
+    "2.1.181": {
+      "cliSha256": "0a2b15d470e3bbb9431d5994c8cf89a37a501881bbd8a09b7cbdf4e1e2abe033",
+      "sizeBytes": 17150590,
+      "source": "auto-pin (TOFU: native-binary release, first verified build)"
     }
   }
 }

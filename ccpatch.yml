@@ -116,6 +116,17 @@ ack:
   # Acked so enabling the (disabled-by-default) extension builds without
   # --allow-unacked. The git invocation is read-only and fails open.
   standup_command: [prompt, exec]
+  # power profile additions — the observability/rate-limit/caching stack the
+  # `power` profile layers on. Opting into `power` is an explicit choice to
+  # re-confirm the threat model for these; acked here (full declared cap sets)
+  # so `make patch-claude-code PROFILE=power` builds without --allow-unacked.
+  rate_limit: [network, env]
+  cost_tracker: [network]
+  tools_log: [network, fs, telemetry]
+  debug: [network, fs, env, telemetry]
+  cache_responses: [network, fs, env]
+  # boost_project_commands re-sorts the slash-command list (tools).
+  boost_project_commands: [tools]
 
 patches:
 
