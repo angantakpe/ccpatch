@@ -53,6 +53,11 @@ function collectPatchFiles() {
       continue; // dir optional (extensions/ in theory could be absent)
     }
     for (const ent of entries) {
+      // Mirror the real loader: `_`-prefixed files are shims/examples (e.g.
+      // _standup_command_shim.mjs, _overlay_example.mjs) and `.`-prefixed are
+      // sidecar data — neither is a shipped patch, so neither is loaded or
+      // validated as one. (runner/modules.mjs uses the same skip rule.)
+      if (ent.name.startsWith('_') || ent.name.startsWith('.')) continue;
       if (ent.isFile() && ent.name.endsWith('.mjs')) {
         out.push({ dir, file: resolve(abs, ent.name), name: ent.name });
       } else if (ent.isDirectory()) {
@@ -144,6 +149,12 @@ const UNINSTRUMENTED_HOT_CAP_DEBT = new Set([
   'project_root',
   'rate_limit',
   'save_conversations',
+  // Justification: standup_command (added to the standard profile in c0c03c3)
+  // shells out to read-only `git log`/`git diff` via the _standup_command_shim
+  // (exec) to compose the prompt. It is not yet runtime-instrumented, so it
+  // joins the debt list like the other hot-cap patches. The git invocation is
+  // read-only and fails open. Remove this entry when a coverageMarker is wired.
+  'standup_command',
   'tool_result_error_content',
   'tool_result_trim',
   'tools_log',
