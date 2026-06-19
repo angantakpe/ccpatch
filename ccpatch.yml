@@ -428,6 +428,7 @@ profiles:
     - webhook
     - cache_responses
     - input_bar_color
+    - standup_command
 
   # ⚠ SECURITY: the daemon / daemon_native / orchestrator profiles below compose
   # the full headless remote-control stack — expose_tool_dispatch +
