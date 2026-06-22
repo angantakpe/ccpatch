@@ -18,7 +18,7 @@
  */
 
 const ANCHOR =
-  'id:"npm-deprecation",tier:"warning",type:"warning",isActive:(H)=>H.npmInstallDeprecated';
+  'id:"npm-deprecation",tier:"warning",type:"warning",isActive:(e)=>e.npmInstallDeprecated';
 const PATCHED =
   'id:"npm-deprecation",tier:"warning",type:"warning",isActive:()=>false';
 
@@ -27,7 +27,7 @@ export default {
   description: 'Suppress the "switched from npm to native installer" startup warning (irrelevant for patched bundles)',
   capabilities: [],
   verify: {
-    absent: 'isActive:(H)=>H.npmInstallDeprecated',
+    absent: 'isActive:(e)=>e.npmInstallDeprecated',
     present: 'isActive:()=>false',
   },
   apply: (code) => {
