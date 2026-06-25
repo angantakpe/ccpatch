@@ -116,6 +116,9 @@ export default {
   }
 })();
 `;
+    // Idempotency guard (rule 2): the hook sets this sentinel global; if it's
+    // already present the bundle is patched — return unchanged.
+    if (code.includes('__ccpAgentTree_v1')) return code;
     // spliceBoot prepends at the shebang (Node-script bundle) or the CJS-IIFE
     // seam (npm bundle) — same boot site as before — and throws on anchor miss
     // so the strict-mode runner catches drift instead of silently no-oping.

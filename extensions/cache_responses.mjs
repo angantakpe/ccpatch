@@ -158,6 +158,9 @@ export default {
   }
 })();
 `;
+      // Idempotency guard (rule 2): the hook embeds this unique banner; if it's
+      // already present the bundle is patched — return unchanged.
+      if (code.includes('[PATCH] Response Cache (for development)')) return code;
       return code.replace('(function(exports, require, module, __filename, __dirname) {', '(function(exports, require, module, __filename, __dirname) {' + hook);
     }
   };

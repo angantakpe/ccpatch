@@ -118,6 +118,9 @@ export default {
 })();
 `;
           const _CJS_IIFE = '(function(exports, require, module, __filename, __dirname) {';
+    // Idempotency guard (rule 2): the hook embeds this unique banner; if it's
+    // already present the bundle is patched — return unchanged.
+    if (code.includes('[PATCH] Conversation Saver')) return code;
     if (code.startsWith('#!/usr/bin/env node')) {
       return code.replace('#!/usr/bin/env node', '#!/usr/bin/env node' + hook);
     } else if (code.includes(_CJS_IIFE)) {

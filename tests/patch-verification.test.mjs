@@ -310,14 +310,14 @@ test('Layer 1b — re-apply is a byte-identical no-op (rule 2)', async (t) => {
         assert.fail(`re-apply threw: ${err.message}`);
       }
       if (twice !== once) {
+        // Idempotency is a hard invariant for EVERY patch (rule 2), enabled or
+        // not: profiles enable+compose extensions, so a non-idempotent re-apply
+        // corrupts composed output regardless of ccpatch.yml default state. Do
+        // not demote disabled patches here — always fail.
         const msg =
           `patch "${name}" is not idempotent: re-apply changed the output by ` +
           `${Math.abs(twice.length - once.length)} byte(s) — guard apply() with its sentinel (rule 2)`;
-        if (isEnabled(name)) {
-          assert.fail(msg);
-        } else {
-          t.diagnostic(`${msg} (disabled in ccpatch.yml — demoted to warning)`);
-        }
+        assert.fail(msg);
       }
     });
   }

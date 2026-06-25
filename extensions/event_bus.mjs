@@ -80,6 +80,9 @@ export default {
   }
 })();
 `;
+    // Idempotency guard (rule 2): the hook sets this sentinel global; if it's
+    // already present the bundle is patched — return unchanged.
+    if (code.includes('__ccpBus_v1')) return code;
     const SHEBANG = '#!/usr/bin/env node';
     const IIFE = '(function(exports, require, module, __filename, __dirname)';
     // Use the function form so `$&`/`$'`/`$$` inside `hook` (regex source) are

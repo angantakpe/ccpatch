@@ -127,5 +127,8 @@ export default {
   // spliceAfter inserts the hook immediately after the CJS-IIFE header via a
   // slice (no String.replace `$&` hazard) and throws on a missing anchor so the
   // strict-mode runner catches drift instead of silently no-oping.
-  apply: (code) => spliceAfter(code, CJS_IIFE_HEAD, hook),
+  // Idempotency guard (rule 2): the hook embeds this unique banner; if it's
+  // already present the bundle is patched — return unchanged.
+  apply: (code) =>
+    code.includes('[PATCH] Cost Tracker') ? code : spliceAfter(code, CJS_IIFE_HEAD, hook),
 };

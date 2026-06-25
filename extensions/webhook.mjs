@@ -292,6 +292,9 @@ process.on('exit', (code) => {
 });
 
 `;
+      // Idempotency guard (rule 2): the hook embeds this sentinel marker; if
+      // it's already present the bundle is patched — return unchanged.
+      if (code.includes('__ccpWebhook_v1')) return code;
       const _SHEBANG_ = '#!/usr/bin/env node';
     const _CJS_IIFE_ = '(function(exports, require, module, __filename, __dirname)';
     if (code.startsWith(_SHEBANG_)) return code.replace(_SHEBANG_, _SHEBANG_ + '\n' + hook);
