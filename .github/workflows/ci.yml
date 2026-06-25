@@ -111,6 +111,18 @@ jobs:
       - name: Run full test suite
         run: bun run test:all
 
+      # Coverage ratchet gate (scripts/check-coverage.mjs). `test:all` above owns
+      # correctness; this step owns the coverage FLOOR so coverage can't silently
+      # erode. Native threshold flags (--test-coverage-lines=) need Node >= 22 but
+      # this job pins Node 20, so the script parses the `--experimental-test-coverage`
+      # summary instead. Floors are a ratchet set a few points below the coverage
+      # measured when the gate landed (line 68 / branch 62 / funcs 23); raise them
+      # as coverage climbs. The gate keys off the produced coverage report, not the
+      # test exit code, so it does not double-gate (or flake on) the suite's known
+      # pty/timing-sensitive tests that `test:all` already covers.
+      - name: Coverage gate (ratchet floor)
+        run: bun run test:coverage:gate
+
       # tests/boot-tty.test.mjs — the Tier-4 interactive pty boot canary — is
       # part of test:all but needs a patched bundle in releases/ AND python3
       # with the pty module. This job builds no bundle, so the canary skips

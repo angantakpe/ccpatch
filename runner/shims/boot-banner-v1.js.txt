@@ -253,12 +253,18 @@
 //     stdout: tens of bytes, well under 1KB (measured 0 bytes on the real
 //     v2.1.175 bundle hung headless).
 //   - A rendered interactive frame (Ink TUI: welcome box, trust dialog,
-//     prompt) is several KB of text + ANSI per paint, and Ink repaints
-//     continuously — measured ~5KB cumulative stdout within seconds of a
-//     healthy interactive boot even on a default 80x24 PTY. The threshold
-//     sits at 2048: comfortably above any hung boot's query traffic and
-//     under half of the smallest healthy render measured, biased toward
-//     never firing on a slow-but-healthy boot.
+//     prompt) is several KB with the alternate screen ON: Ink repaints
+//     continuously — ~5KB cumulative stdout within seconds of a healthy boot
+//     on a default 80x24 PTY. But with CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1
+//     (which this very watchdog recommends, and which a Node boot needs) Ink
+//     writes ONE static frame and only repaints on change: a healthy idle
+//     boot measured ~787B by 7s and ~1.4KB by 15s — legitimately under the
+//     old 2048 threshold, which made the beacon fire over a fully-rendered,
+//     interactive UI (the alt-screen-off path was never accounted for).
+//     The threshold sits at 512: above any hung boot's query traffic (a hung
+//     headless v2.1.175 emitted 0 bytes on stdout; terminal capability probes
+//     are tens of bytes) and well under the smallest healthy render measured
+//     in either mode, biased toward never firing on a slow-but-healthy boot.
 // The beacon is written with fs.writeSync(2, …), NOT process.stderr.write:
 // once the TUI is up the bundle (Ink patch-console) replaces stderr.write
 // and swallows it — a direct fd-2 write bypasses that (verified against the
@@ -295,7 +301,7 @@
     var delayMs = parseInt(env.CCPATCH_WATCHDOG_MS, 10);
     if (!(delayMs > 0)) delayMs = 15000;
     var threshold = parseInt(env.CCPATCH_WATCHDOG_THRESHOLD, 10);
-    if (!(threshold > 0)) threshold = 2048;
+    if (!(threshold > 0)) threshold = 512;
 
     var bytes = 0;
     var timer = null;
@@ -353,8 +359,19 @@
         '  hints:',
       ];
       if (!(process.versions && process.versions.bun)) {
-        lines.push('    - running under Node: fullscreen TUI unavailable — CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN should be set (currently: ' +
-          (altScreen === undefined ? '<unset>' : JSON.stringify(altScreen)) + ')');
+        var altOn = altScreen === '1' ||
+          (typeof altScreen === 'string' && altScreen.toLowerCase() === 'true');
+        if (altOn) {
+          // Already disabled — telling the user to set what's already set is
+          // self-contradictory noise. With alt-screen off a healthy Node boot
+          // renders a single static frame, so low stdout volume is EXPECTED
+          // and not itself the fault; report the state, don't prescribe it.
+          lines.push('    - running under Node with CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=' +
+            JSON.stringify(altScreen) + ' (alt-screen already disabled; a static single-frame render is normal)');
+        } else {
+          lines.push('    - running under Node: fullscreen TUI unavailable — CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN should be set (currently: ' +
+            (altScreen === undefined ? '<unset>' : JSON.stringify(altScreen)) + ')');
+        }
       }
       if (where) lines.push('    - check the ccpatch diagnostics log for swallowed errors: ' + where);
       lines.push('    - relaunch with CCPATCH_PARANOID=1 to surface swallowed subscriber errors on stderr');

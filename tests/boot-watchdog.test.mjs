@@ -9,7 +9,7 @@
  * Test hooks exercised here:
  *   CCPATCH_WATCHDOG_FORCE=1     — bypass the TTY/argv interactivity gate
  *   CCPATCH_WATCHDOG_MS          — shrink the 15s delay for tests
- *   CCPATCH_WATCHDOG_THRESHOLD   — render-byte threshold (default 4096)
+ *   CCPATCH_WATCHDOG_THRESHOLD   — render-byte threshold (default 512)
  *   CCPATCH_NO_WATCHDOG=1        — opt out entirely
  */
 
@@ -52,7 +52,7 @@ test('watchdog — fires one beacon when stdout stays under the threshold (simul
   try {
     assert.equal(r.status, 0, `stderr: ${r.stderr}`);
     assert.match(r.stderr, BEACON);
-    assert.match(r.stderr, /stdout bytes since boot: \d+ \(render threshold: 2048\)/);
+    assert.match(r.stderr, /stdout bytes since boot: \d+ \(render threshold: 512\)/);
     assert.match(r.stderr, /active handles: /);
     assert.match(r.stderr, /active requests: /);
     assert.match(r.stderr, /child processes: \d+/);
@@ -76,6 +76,25 @@ test('watchdog — reports the current CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN valu
   try {
     assert.match(r.stderr, /CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN should be set \(currently: "0"\)/);
   } finally { rmSync(r.dir, { recursive: true, force: true }); }
+});
+
+test('watchdog — does not prescribe CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN when it is already enabling', () => {
+  // Regression: the hint used to read "should be set (currently: \"1\")",
+  // telling the user to set what was already set. When the var is already
+  // enabling ("1"/"true"), the hint must report state, not prescribe it.
+  for (const val of ['1', 'true', 'TRUE']) {
+    const r = runChild(
+      `setTimeout(() => {}, 900);`,
+      { CCPATCH_WATCHDOG_FORCE: '1', CCPATCH_WATCHDOG_MS: '300', CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN: val },
+    );
+    try {
+      assert.match(r.stderr, BEACON, `beacon should still fire (forced)\nstderr: ${r.stderr}`);
+      assert.ok(!/should be set/.test(r.stderr),
+        `must not prescribe an already-set var (val=${val})\nstderr: ${r.stderr}`);
+      assert.match(r.stderr, /alt-screen already disabled; a static single-frame render is normal/);
+      assert.match(r.stderr, new RegExp(`CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=${JSON.stringify(val)}`));
+    } finally { rmSync(r.dir, { recursive: true, force: true }); }
+  }
 });
 
 test('watchdog — stays silent when stdout crosses the threshold (healthy render)', () => {

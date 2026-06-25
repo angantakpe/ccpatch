@@ -1,0 +1,3 @@
+# metric_direction: lower_is_better
+iteration	timestamp	error_type	error_fixed	commit	metric	delta	guard	status	description
+0	2026-06-24T21:22:52-04:00	-	-	0e7e006	0	0.0	pass	baseline	tests=215pass/0fail types=0 lint=0 — zero errors, nothing to fix

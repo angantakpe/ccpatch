@@ -1,0 +1,18 @@
+{
+  "schema": "safe-cancel/v1",
+  "kind": "stop",
+  "timestamp": "2026-06-17T14:44:06Z",
+  "session_id": "4466ec04-4acd-4a7b-8ef4-bf52d6f6de3d",
+  "is_git": true,
+  "branch": "main",
+  "last_commit": "fd4e9d3df0bb2065f557c1bb70fca255dacfd20b patches: ship policy_gate reference consumer + contract test (COD-15) (#22)",
+  "stash_ref": "stash@{0}",
+  "files_touched": [
+  "refmaps/bun-api-coverage.json",
+  "runner/shims/bun-polyfill-v1.js.txt",
+  "storage/known-shas.json",
+  "tests/bun-polyfill.test.mjs",
+  ".claude/safe-cancel/"
+],
+  "todos": []
+}

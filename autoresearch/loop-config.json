@@ -1,0 +1,30 @@
+{
+  "version": "2.2.0",
+  "source": "wizard",
+  "created": "2026-06-24",
+  "status": "DEFERRED_NO_HEADROOM",
+  "config": {
+    "goal": "Maximize doctor-verified patches",
+    "scope": ["**/*"],
+    "metric": "doctor OK count",
+    "direction": "higher_is_better",
+    "verify": "node bin/patch-cli.mjs doctor storage/archives/claude-code-v$(node -e \"process.stdout.write(require('./package.json').version||'')\")/cli.*.cjs 2>&1 | grep -oE '[0-9]+ ok' | grep -oE '[0-9]+'",
+    "verify_note": "Pin VERSION to the pristine bundle under test. On 2.1.185: node bin/patch-cli.mjs doctor storage/archives/claude-code-v2.1.185/cli.v2.1.185.cjs",
+    "guard": "make verticals-check",
+    "iterations": "unlimited"
+  },
+  "round0": {
+    "baseline_bundle": "storage/archives/claude-code-v2.1.185/cli.v2.1.185.cjs",
+    "profiles": {
+      "default": "14 ok / 0 drift / 0 unverified / 0 missing",
+      "standard": "29 ok / 0 / 0 / 0",
+      "platform": "29 ok / 0 / 0 / 0",
+      "daemon": "25 ok / 0 / 0 / 0",
+      "orchestrator": "22 ok / 0 / 0 / 0",
+      "power": "49 ok / 0 / 0 / 0"
+    },
+    "lint": "make lint exits 0 (no warnings)",
+    "finding": "Metric already at ceiling across all profiles; no headroom. Launch deferred until a new CLI release drifts anchors (doctor reports DRIFT/MISSING) or lint regresses."
+  },
+  "trigger": "Re-run /autoresearch with Metric/Verify present when `make doctor` against a newer pristine bundle reports drifted>0, unverified>0, or missing>0."
+}

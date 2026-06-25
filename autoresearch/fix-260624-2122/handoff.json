@@ -1,0 +1,20 @@
+{
+  "version": "2.1.0",
+  "source": "fix",
+  "timestamp": "2026-06-24",
+  "status": "COMPLETE",
+  "results_tsv": "autoresearch/fix-260624-2122/fix-results.tsv",
+  "findings": [],
+  "baseline": {
+    "tests": "215 pass / 0 fail / 2 skipped (npm run test:patches)",
+    "types": "0 errors (tsc --strict)",
+    "lint": "0 errors (dead-code + 4 honesty lints)",
+    "error_count": 0
+  },
+  "outcome": "Zero errors at baseline. fix exited SUCCESS at iteration 0 — no fixes applied. Working tree is dirty (5 ADK files) but fully green.",
+  "config": {
+    "target": "npm run test:patches && npm run lint:types && npm run lint",
+    "scope": ["**/*"],
+    "guard": "make verticals-check"
+  }
+}
