@@ -1,27 +1,11 @@
-import { spliceBoot } from '../runner/patch-helpers.mjs';
+import { spliceBoot, registerFetchHook, FETCH_PRIORITY } from '../runner/patch-helpers.mjs';
 
-export default {
-  category: 'observe',
-
-  description: 'Truncate oversized tool_result content blocks before they are sent to the API (saves tokens)',
-  capabilities: ["network","tools"],
-  verify: { present: "'tool_result_trim'", count: { present: 1 } },
-  dependsOn: ['fetch_interceptor'],
-  apply: (code) => {
-    // Idempotency (rule 2): sentinel == verify.present marker. Re-apply on an
-    // already-patched bundle is a byte-identical no-op.
-    if (code.includes("'tool_result_trim'")) return code;
-    const hook = `
-// ══════════════════════════════════════════════════════════════════════════
-// [PATCH] Tool Result Trim
-// Truncates tool_result content blocks > 8000 chars in outgoing API requests.
-// Exempt: blocks with is_error: true (errors should be seen in full).
-// ══════════════════════════════════════════════════════════════════════════
-
-try {
-  var __TOOL_RESULT_MAX__ = 8000;
-  if (typeof globalThis.__ccpOnFetchBefore === 'function') {
-    globalThis.__ccpOnFetchBefore('tool_result_trim', function(ctx) {
+// Handler source for the fetch-before subscriber, kept verbatim from the
+// hand-written form. registerFetchHook() supplies the guard + registration
+// wiring around it at priority FETCH_PRIORITY.TRIM (== 40). The body indents
+// are relative to a 2-space wrapper base (indent: '  '), so the rendered output
+// is byte-identical to the previous hand-rolled block.
+const HANDLER = `function(ctx) {
       if (!ctx.isApi || !ctx.options || !ctx.options.body) return;
       try {
         var body = typeof ctx.options.body === 'string' ? JSON.parse(ctx.options.body) : ctx.options.body;
@@ -56,8 +40,29 @@ try {
           ctx.options = Object.assign({}, ctx.options, { body: JSON.stringify(body) });
         }
       } catch (e) {}
-    }, 40);
-  }
+    }`;
+
+export default {
+  category: 'observe',
+
+  description: 'Truncate oversized tool_result content blocks before they are sent to the API (saves tokens)',
+  capabilities: ["network","tools"],
+  verify: { present: "'tool_result_trim'", count: { present: 1 } },
+  dependsOn: ['fetch_interceptor'],
+  apply: (code) => {
+    // Idempotency (rule 2): sentinel == verify.present marker. Re-apply on an
+    // already-patched bundle is a byte-identical no-op.
+    if (code.includes("'tool_result_trim'")) return code;
+    const hook = `
+// ══════════════════════════════════════════════════════════════════════════
+// [PATCH] Tool Result Trim
+// Truncates tool_result content blocks > 8000 chars in outgoing API requests.
+// Exempt: blocks with is_error: true (errors should be seen in full).
+// ══════════════════════════════════════════════════════════════════════════
+
+try {
+  var __TOOL_RESULT_MAX__ = 8000;
+${registerFetchHook('tool_result_trim', HANDLER, FETCH_PRIORITY.TRIM, { indent: '  ' })}
 } catch (e) {
   process.stderr.write('[tool_result_trim] init error: ' + (e && e.message || e) + '\\n');
 }

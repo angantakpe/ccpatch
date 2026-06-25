@@ -21,15 +21,62 @@
  *      so callers can log + emit downstream snippets keyed off the resolved
  *      name.
  *
+ *   4. registerFetchHook(name, handlerSource, priority) + FETCH_PRIORITY
+ *      Builds the canonical `globalThis.__ccpOnFetchBefore(name, handler, prio)`
+ *      subscriber wiring as a string snippet, with NAMED priority tiers instead
+ *      of the magic numbers (15/80/5/…) the ~8 fetch-hook extensions hand-wrote.
+ *
+ *   5. injectAtModuleTop(code, snippet, opts)
+ *      Dual-anchor (shebang OR CJS-IIFE) module-top injection in one place, with
+ *      a `placement: 'before' | 'after'` knob covering both the spliceBoot /
+ *      extended_thinking shape and the model.mjs (after-the-IIFE) shape, and a
+ *      fail-open `onMissing: 'warn'` default matching the hand-rolled patches.
+ *
  * Existing patches do NOT need to migrate. New patches should prefer these
- * helpers — they throw on drift (rather than returning unchanged code) so
- * the strict-mode runner catches anchor misses immediately.
+ * helpers — the strict ones (spliceAfter / replaceFunctionByLiteral) throw on
+ * drift so the runner catches anchor misses immediately.
  */
 
 import { findFunctionByLiteral } from './ast-anchor.mjs';
 
 const SHEBANG = '#!/usr/bin/env node';
 const CJS_IIFE = '(function(exports, require, module, __filename, __dirname)';
+// The IIFE header as it appears in npm bundles, WITH the opening brace. Some
+// hand-rolled patches matched `…__dirname) {` (brace included) and spliced the
+// snippet AFTER it (inside the wrapper scope); others matched without the brace
+// and spliced BEFORE it (outer scope). injectAtModuleTop() supports both.
+const CJS_IIFE_BRACE = '(function(exports, require, module, __filename, __dirname) {';
+
+/**
+ * Named priority tiers for `globalThis.__ccpOnFetchBefore(name, handler, priority)`.
+ *
+ * Semantics come from core/fetch_interceptor.mjs: subscribers are kept sorted
+ * ascending by priority and **lower number = called first**; the default is 50.
+ *
+ * These names replace the scattered magic numbers hand-written at each call
+ * site. Values are derived from the priorities actually in use across the
+ * extension set at migration time:
+ *
+ *   0  → policy_gate (fail-closed), mcp_lazy   → GATE   (run before everything)
+ *   15 → extended_thinking                     → EARLY
+ *   20 → policy_gate (normal inspect)          → INSPECT
+ *   40 → tool_result_trim                      → TRIM
+ *   50 → fetch_interceptor default             → DEFAULT
+ *   80 → context_budget_warn                   → LATE   (after body rewrites)
+ *   95 → rate_limit                            → LAST   (throttle the final body)
+ *
+ * Prefer a named tier over a bare integer at new call sites. Callers needing a
+ * value between tiers may still pass a literal number to `registerFetchHook`.
+ */
+export const FETCH_PRIORITY = Object.freeze({
+  GATE: 0,
+  EARLY: 15,
+  INSPECT: 20,
+  TRIM: 40,
+  DEFAULT: 50,
+  LATE: 80,
+  LAST: 95,
+});
 
 /**
  * Inject `snippet` at the earliest viable boot point in the bundle.
@@ -172,4 +219,125 @@ export function forceFeatureFlag(code, literal, opts = {}) {
     (fnName) => `function ${fnName}(){return ${value}}`,
     { allowMissing: opts.allowMissing },
   );
+}
+
+/**
+ * Build the canonical `globalThis.__ccpOnFetchBefore(...)` subscriber wiring as
+ * a string snippet, ready to splice into a bundle. Factors out the boilerplate
+ * that ~8 extensions hand-wrote (the `typeof … === 'function'` guard + the
+ * registration call + a magic priority number).
+ *
+ * The emitted snippet:
+ *   - guards on `typeof globalThis.__ccpOnFetchBefore === 'function'` so it is a
+ *     no-op when fetch_interceptor isn't installed (fail-open, rule 4);
+ *   - registers `handlerSource` under `name` at the given `priority`;
+ *   - does NOT wrap anything in try/catch — the CALLER is expected to wrap the
+ *     whole module-top snippet (as every existing extension already does), and
+ *     keeping this helper try/catch-free preserves byte-for-byte parity with the
+ *     hand-written form it replaces.
+ *
+ * `handlerSource` is raw JS source for the handler — typically
+ * `'function(ctx){ … }'` or `'async (ctx) => { … }'`. It is emitted verbatim.
+ *
+ * `priority` may be a `FETCH_PRIORITY.*` tier or a bare integer. Lower runs
+ * first (see FETCH_PRIORITY). Defaults to `FETCH_PRIORITY.DEFAULT` (50), which
+ * matches fetch_interceptor's own default.
+ *
+ * `opts.indent` is the leading whitespace for the wrapping `if`/`}` lines (the
+ * registration call is indented two further spaces). It lets a migrated patch
+ * reproduce its existing byte layout exactly — the hand-written extensions wrap
+ * at a 2-space base indent (pass `indent: '  '`), and the multi-line handler's
+ * own closing brace then lines up with the registration call. Default `''`.
+ *
+ * @param {string} name           - Stable subscriber name (also the verify anchor)
+ * @param {string} handlerSource  - JS source of the handler function/arrow
+ * @param {number} [priority]     - FETCH_PRIORITY tier or integer; default 50
+ * @param {{ indent?: string }} [opts]
+ * @returns {string}              - JS snippet (no leading/trailing newline)
+ */
+export function registerFetchHook(name, handlerSource, priority = FETCH_PRIORITY.DEFAULT, opts = {}) {
+  if (typeof name !== 'string' || name.length === 0) {
+    throw new TypeError('registerFetchHook: name must be a non-empty string');
+  }
+  if (typeof handlerSource !== 'string' || handlerSource.length === 0) {
+    throw new TypeError('registerFetchHook: handlerSource must be a non-empty string');
+  }
+  if (typeof priority !== 'number' || !Number.isFinite(priority)) {
+    throw new TypeError('registerFetchHook: priority must be a finite number');
+  }
+  const indent = opts.indent ?? '';
+  if (typeof indent !== 'string') {
+    throw new TypeError('registerFetchHook: opts.indent must be a string');
+  }
+  return (
+    `${indent}if (typeof globalThis.__ccpOnFetchBefore === 'function') {\n` +
+    `${indent}  globalThis.__ccpOnFetchBefore('${name}', ${handlerSource}, ${priority});\n` +
+    `${indent}}`
+  );
+}
+
+/**
+ * Inject `snippet` at the module top of the bundle, handling BOTH distribution
+ * shapes in one place:
+ *
+ *   - Node-script bundle (starts with a shebang): splice the snippet right after
+ *     the shebang line.
+ *   - npm/CJS bundle (CJS IIFE wrapper present): splice the snippet relative to
+ *     the IIFE header. `opts.placement` controls where:
+ *       'before' (default) → snippet runs in the OUTER scope, immediately before
+ *                            `(function(exports, …){`. Matches spliceBoot and the
+ *                            extended_thinking hand-rolled form.
+ *       'after'            → snippet runs INSIDE the wrapper, immediately after
+ *                            `…__dirname) {`. Matches the model.mjs hand-rolled
+ *                            form (env-var setup that wants the bundle's scope).
+ *
+ * On a miss (neither anchor present) the behaviour depends on `opts.onMissing`:
+ *   'warn'  (default) → `console.warn('  [!] <label>: anchor not found …')` and
+ *                       return `code` unchanged (rule 4 — never half-apply). This
+ *                       matches the hand-rolled extensions being migrated.
+ *   'throw'           → throw, for strict new patches that prefer loud drift.
+ *
+ * The shebang is matched with startsWith() (not includes()) for the same reason
+ * spliceBoot documents: Bun-extracted bundles carry "#!/usr/bin/env node" as an
+ * interior string literal that must not be treated as the boot point.
+ *
+ * The CJS branch uses the function form of String.replace so `$&`/`$n` sequences
+ * inside `snippet` are injected literally (see spliceBoot for the 15.5MB→62MB
+ * blow-up this avoids).
+ *
+ * Idempotency is the caller's responsibility — guard `snippet` with a sentinel.
+ *
+ * @param {string} code
+ * @param {string} snippet
+ * @param {{ placement?: 'before'|'after', onMissing?: 'warn'|'throw', label?: string }} [opts]
+ * @returns {string}
+ */
+export function injectAtModuleTop(code, snippet, opts = {}) {
+  if (typeof code !== 'string') throw new TypeError('injectAtModuleTop: code must be a string');
+  if (typeof snippet !== 'string') throw new TypeError('injectAtModuleTop: snippet must be a string');
+
+  const placement = opts.placement ?? 'before';
+  if (placement !== 'before' && placement !== 'after') {
+    throw new TypeError(`injectAtModuleTop: placement must be 'before' or 'after' (got ${placement})`);
+  }
+  const onMissing = opts.onMissing ?? 'warn';
+  const label = opts.label ?? 'patch';
+
+  if (code.startsWith(SHEBANG)) {
+    return code.replace(SHEBANG, () => SHEBANG + snippet);
+  }
+
+  if (placement === 'after') {
+    if (code.includes(CJS_IIFE_BRACE)) {
+      return code.replace(CJS_IIFE_BRACE, () => CJS_IIFE_BRACE + snippet);
+    }
+  } else if (code.includes(CJS_IIFE)) {
+    return code.replace(CJS_IIFE, () => snippet + CJS_IIFE);
+  }
+
+  if (onMissing === 'throw') {
+    throw new Error('injectAtModuleTop: bundle has neither shebang nor CJS-IIFE anchor — no safe boot site');
+  }
+  console.warn(`  [!] ${label}: anchor not found (no shebang, no CJS-IIFE) — skipping`);
+  return code;
 }

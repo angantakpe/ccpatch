@@ -1,3 +1,4 @@
+import { injectAtModuleTop } from '../runner/patch-helpers.mjs';
 
 export default {
     category: 'optional',
@@ -46,14 +47,10 @@ if (!process.env.ANTHROPIC_MODEL) {
 })();
 
 `;
-    const _CJS_IIFE = '(function(exports, require, module, __filename, __dirname) {';
-    if (code.startsWith('#!/usr/bin/env node')) {
-      return code.replace('#!/usr/bin/env node', '#!/usr/bin/env node' + modelHook);
-    } else if (code.includes(_CJS_IIFE)) {
-      return code.replace(_CJS_IIFE, () => _CJS_IIFE + modelHook);
-    } else {
-      console.warn('  [!] anchor not found (no shebang, no CJS-IIFE) — skipping');
-      return code;
-    }
+    // Dual-anchor module-top injection. placement: 'after' keeps the env-var
+    // setup INSIDE the CJS wrapper (after `…__dirname) {`), matching the prior
+    // hand-rolled form; the shebang branch is identical. On a miss the helper
+    // warns and returns code unchanged (fail-open, rule 4).
+    return injectAtModuleTop(code, modelHook, { placement: 'after', label: 'model' });
     }
   };

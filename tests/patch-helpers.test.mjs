@@ -6,6 +6,9 @@ import {
   spliceAfter,
   replaceFunctionByLiteral,
   forceFeatureFlag,
+  registerFetchHook,
+  injectAtModuleTop,
+  FETCH_PRIORITY,
 } from '../runner/patch-helpers.mjs';
 
 describe('spliceBoot', () => {
@@ -115,5 +118,102 @@ describe('replaceFunctionByLiteral / forceFeatureFlag', () => {
   it('respects custom value (e.g. !1 to force-disable)', () => {
     const { code } = forceFeatureFlag(FIXTURE, 'tengu_test_flag', { value: '!1' });
     assert.ok(code.includes('function Qx7(){return !1}'));
+  });
+});
+
+describe('FETCH_PRIORITY', () => {
+  it('exposes the named tiers with their real values and is frozen', () => {
+    assert.deepEqual(
+      { ...FETCH_PRIORITY },
+      { GATE: 0, EARLY: 15, INSPECT: 20, TRIM: 40, DEFAULT: 50, LATE: 80, LAST: 95 },
+    );
+    assert.ok(Object.isFrozen(FETCH_PRIORITY));
+  });
+});
+
+describe('registerFetchHook', () => {
+  it('emits the canonical guard + registration wiring', () => {
+    const out = registerFetchHook('my_hook', 'function(ctx){}', FETCH_PRIORITY.TRIM);
+    assert.equal(
+      out,
+      "if (typeof globalThis.__ccpOnFetchBefore === 'function') {\n" +
+        "  globalThis.__ccpOnFetchBefore('my_hook', function(ctx){}, 40);\n" +
+        '}',
+    );
+  });
+
+  it('defaults to FETCH_PRIORITY.DEFAULT (50)', () => {
+    const out = registerFetchHook('h', 'function(){}');
+    assert.ok(out.includes("'h', function(){}, 50);"));
+  });
+
+  it('indents the wrapper to reproduce a hand-written 2-space layout', () => {
+    const out = registerFetchHook('h', 'function(){}', 80, { indent: '  ' });
+    assert.equal(
+      out,
+      "  if (typeof globalThis.__ccpOnFetchBefore === 'function') {\n" +
+        "    globalThis.__ccpOnFetchBefore('h', function(){}, 80);\n" +
+        '  }',
+    );
+  });
+
+  it('rejects empty name / handler and non-finite priority', () => {
+    assert.throws(() => registerFetchHook('', 'f', 0), /non-empty string/);
+    assert.throws(() => registerFetchHook('n', '', 0), /non-empty string/);
+    assert.throws(() => registerFetchHook('n', 'f', NaN), /finite number/);
+  });
+});
+
+describe('injectAtModuleTop', () => {
+  const SHEBANG = '#!/usr/bin/env node';
+  const IIFE_NO_BRACE = '(function(exports, require, module, __filename, __dirname)';
+  const IIFE_BRACE = '(function(exports, require, module, __filename, __dirname) {';
+
+  it('splices after the shebang regardless of placement', () => {
+    const code = SHEBANG + '\nbody();\n';
+    assert.equal(injectAtModuleTop(code, '/*X*/'), SHEBANG + '/*X*/\nbody();\n');
+    assert.equal(
+      injectAtModuleTop(code, '/*X*/', { placement: 'after' }),
+      SHEBANG + '/*X*/\nbody();\n',
+    );
+  });
+
+  it("placement 'before' splices ahead of the no-brace IIFE (outer scope)", () => {
+    const code = 'pre;' + IIFE_NO_BRACE + '{body();})()';
+    const out = injectAtModuleTop(code, '/*X*/');
+    assert.ok(out.includes('/*X*/' + IIFE_NO_BRACE));
+  });
+
+  it("placement 'after' splices inside the brace IIFE (wrapper scope)", () => {
+    const code = 'pre;' + IIFE_BRACE + '\nbody();})()';
+    const out = injectAtModuleTop(code, '/*X*/', { placement: 'after' });
+    assert.ok(out.includes(IIFE_BRACE + '/*X*/'));
+  });
+
+  it('injects a snippet containing $& literally (function-form replace)', () => {
+    const code = 'pre;' + IIFE_NO_BRACE + '{body();})()';
+    const snippet = '/* $& $1 keep */';
+    const out = injectAtModuleTop(code, snippet);
+    assert.ok(out.includes(snippet));
+    assert.equal(out.length, code.length + snippet.length);
+  });
+
+  it("onMissing 'warn' (default) returns code unchanged on a miss", () => {
+    const orig = console.warn;
+    let warned = '';
+    console.warn = (m) => { warned = String(m); };
+    try {
+      assert.equal(injectAtModuleTop('var x=1;', '/*X*/', { label: 'demo' }), 'var x=1;');
+    } finally {
+      console.warn = orig;
+    }
+    assert.match(warned, /demo: anchor not found/);
+  });
+
+  it("onMissing 'throw' raises on a miss", () => {
+    assert.throws(
+      () => injectAtModuleTop('var x=1;', '/*X*/', { onMissing: 'throw' }),
+      /no safe boot site/,
+    );
   });
 });

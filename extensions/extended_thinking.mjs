@@ -1,3 +1,5 @@
+import { injectAtModuleTop } from '../runner/patch-helpers.mjs';
+
 export default {
   category: 'feature',
 
@@ -119,14 +121,11 @@ try {
 }
 
 `;
-    const __shebang__ = '#!/usr/bin/env node';
-      const __cjsIife__ = '(function(exports, require, module, __filename, __dirname)';
-      if (code.startsWith(__shebang__)) {
-        return code.replace(__shebang__, __shebang__ + hook);
-      } else if (code.includes(__cjsIife__)) {
-        return code.replace(__cjsIife__, hook + __cjsIife__);
-      }
-      console.warn('  [!] patch: no shebang or CJS-IIFE anchor found — skipping');
-      return code;
+    // Dual-anchor module-top injection. placement: 'before' (the default) puts
+    // the hook in the OUTER scope, immediately before `(function(exports, …){`,
+    // matching the prior hand-rolled `hook + __cjsIife__` form; the shebang
+    // branch is identical. On a miss the helper warns and returns code unchanged
+    // (fail-open, rule 4).
+    return injectAtModuleTop(code, hook, { label: 'extended_thinking' });
   },
 };
