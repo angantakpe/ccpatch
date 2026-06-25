@@ -93,52 +93,39 @@ const AGENT_CODE = `
     return;
   }
 
-  // ── delegate handoff (needs: tools + delegate) ──────────────────────────────
-  // The delegate path injects a transfer_to_<target> tool backed by
-  // __ccpAgentTool.invoke. Requires the tool registrar (expose_tool_dispatch) to
-  // land the tool AND the agent-tool bridge (expose_agent_tool) to run the spawn.
-  if (caps.tools && caps.delegate) {
-    try {
-      const h = defineHandoff({
-        target: 'adk-demo-target',
-        mode: 'delegate',
-        description: 'Delegate the open question to the ADK demo target agent.',
-      });
-      const live = await h.ready;
-      log('delegate handoff injected=' + live);
-    } catch (e) {
-      log('delegate handoff failed: ' + (e && e.message));
-    }
-  } else {
-    const d = (caps.detail && (caps.detail.delegate || caps.detail.tools)) || {};
-    log('delegate handoff skipped — needs tools+delegate; enable ' + (d.patch || 'expose_tool_dispatch / expose_agent_tool'));
+  // ── delegate handoff ──────────────────────────────────────────────────────────
+  // defineHandoff polls for __ccpRawTools / __ccpAgentTool for ~5s — no boot-time
+  // caps guard needed. The globals are set by expose_* injection blocks that run
+  // after this agents-dir IIFE; the poll catches them on the first tick (~50ms).
+  try {
+    const h = defineHandoff({
+      target: 'adk-demo-target',
+      mode: 'delegate',
+      description: 'Delegate the open question to the ADK demo target agent.',
+    });
+    const live = await h.ready;
+    log('delegate handoff injected=' + live);
+  } catch (e) {
+    log('delegate handoff failed: ' + (e && e.message));
   }
 
-  // ── swap handoff (needs: tools + swap) ──────────────────────────────────────
-  // The swap path overlays the target persona onto the live system prompt with
-  // full system authority. allowSwapTargets pins the demo to ONE legal target, so
-  // even if another persona were registered later, this handoff can never flip to
-  // it. When __ccpSetSystemPrompt is absent the ADK degrades swap→delegate and
-  // emits handoff.degraded; we still gate on caps.tools so the injected tool lands.
-  if (caps.tools && caps.swap) {
-    try {
-      const h = defineHandoff({
-        target: 'adk-demo-target',
-        mode: 'swap',
-        description: 'Swap the live persona to the ADK demo target (in-place baton pass).',
-        allowSwapTargets: ['adk-demo-target'],
-      });
-      const live = await h.ready;
-      log('swap handoff injected=' + live);
-    } catch (e) {
-      // A throw here is the SAFE outcome of the trust guards (e.g. an
-      // allowSwapTargets / pin violation), not a boot failure. Log and continue.
-      log('swap handoff refused/failed: ' + (e && e.message));
-    }
-  } else {
-    const d = (caps.detail && (caps.detail.swap || caps.detail.tools)) || {};
-    const why = d.reason ? ' (' + d.reason + ')' : '';
-    log('swap handoff skipped' + why + ' — needs tools+swap; enable ' + (d.patch || 'expose_system_prompt'));
+  // ── swap handoff ──────────────────────────────────────────────────────────────
+  // Same polling model. allowSwapTargets constrains this swap to ONE legal target.
+  // When __ccpSetSystemPrompt is absent the ADK degrades swap→delegate and emits
+  // handoff.degraded — no need to gate on caps.swap here.
+  try {
+    const h = defineHandoff({
+      target: 'adk-demo-target',
+      mode: 'swap',
+      description: 'Swap the live persona to the ADK demo target (in-place baton pass).',
+      allowSwapTargets: ['adk-demo-target'],
+    });
+    const live = await h.ready;
+    log('swap handoff injected=' + live);
+  } catch (e) {
+    // A throw here is the SAFE outcome of the trust guards (e.g. an
+    // allowSwapTargets / pin violation), not a boot failure. Log and continue.
+    log('swap handoff refused/failed: ' + (e && e.message));
   }
 
   // ── AgentRouter (REGISTER ONLY — never auto-start) ──────────────────────────

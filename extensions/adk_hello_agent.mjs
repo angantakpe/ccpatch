@@ -47,16 +47,7 @@ const AGENT_CODE = `
     return;
   }
 
-  const { defineAgent, defineTool, capabilities } = adk;
-
-  // Preflight: which ccpatch primitives are actually live in this session?
-  let caps;
-  try {
-    caps = capabilities();
-  } catch (e) {
-    process.stderr.write('[adk-hello] capabilities() threw: ' + (e && e.message) + '\\n');
-    return;
-  }
+  const { defineAgent, defineTool } = adk;
 
   // Persona registration is always safe (it touches only ADK-local state).
   try {
@@ -70,23 +61,9 @@ const AGENT_CODE = `
     process.stderr.write('[adk-hello] defineAgent failed: ' + (e && e.message) + '\\n');
   }
 
-  // Tool injection requires the nonce-gated tool registrar (expose_tool_dispatch
-  // → toolDispatch v2). If it isn't live, skip loudly rather than hang on a
-  // never-injecting tool handle.
-  if (!caps.tools) {
-    const d = (caps.detail && caps.detail.tools) || {};
-    // d.reason names WHICH contract failed and the version mismatch (the ADK's
-    // centralized pins live in packages/adk/contracts.mjs); d.contract names the
-    // typed __ccp* contract the capability is pinned to.
-    const why = d.reason ? ' (' + d.reason + ')' : '';
-    const pin = d.contract ? ' [contract: ' + d.contract + ']' : '';
-    process.stderr.write(
-      '[adk-hello] tools capability not live' + why +
-      ' — enable ' + d.patch + pin +
-      '; persona registered, tool skipped.\\n');
-    return;
-  }
-
+  // defineTool polls for __ccpRawTools / __ccpRegisterTool for ~5s after boot,
+  // so no boot-time capabilities() guard is needed — the globals are set by the
+  // expose_tool_dispatch injection block that runs after this agents-dir IIFE.
   try {
     const handle = defineTool({
       name: 'adk_ping',

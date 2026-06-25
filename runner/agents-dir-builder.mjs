@@ -18,9 +18,12 @@ const ADK_SRC_DIR = path.resolve(
 const ADK_RUNTIME_FILES = [
   'index.mjs',
   'agent.mjs',
-  'tool-registry.mjs',
+  'agent-router.mjs',
+  'contracts.mjs',
   'handoff.mjs',
+  'host.mjs',
   'memory.mjs',
+  'tool-registry.mjs',
 ];
 
 /**

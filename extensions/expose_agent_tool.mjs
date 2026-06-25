@@ -36,8 +36,9 @@
  *
  * 4. FALLBACK PRIME anchor — the AgentTool.call() method signature:
  *      `async call({prompt:H,subagent_type:$,...},M,w,D,j){`
- *    Identical in v2.1.140 — destructured property names are stable English
- *    identifiers; only the outer AgentTool identifier changed (ZR7→vC7).
+ *    Destructured property names are stable English identifiers.
+ *    v2.1.185: `team_name` removed from the destructure. Two-tier regex: tries
+ *    with team_name first (older bundles), then without (v2.1.185+).
  *    Retained as a fallback: if the bm4 anchor misses (version drift),
  *    the first real user-facing Task invocation primes the tool as before.
  *    Also captures _callSelf as defense-in-depth (no-op if already set by
@@ -546,14 +547,18 @@ try {
     // single-letter param identifiers and their order rotate):
     //   v2.1.140: async call({...,cwd:O},M,w,D,j){
     //   v2.1.146: async call({...,cwd:O},M,w,j,D){   (D and j swapped)
-    // Match the destructure prefix (stable) + capture the tail param names.
-    const callRe = /(async call\(\{prompt:([A-Za-z_$][\w$]*),subagent_type:[A-Za-z_$][\w$]*,description:[A-Za-z_$][\w$]*,model:[A-Za-z_$][\w$]*,run_in_background:[A-Za-z_$][\w$]*,name:[A-Za-z_$][\w$]*,team_name:[A-Za-z_$][\w$]*,mode:[A-Za-z_$][\w$]*,isolation:[A-Za-z_$][\w$]*,cwd:[A-Za-z_$][\w$]*\},([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\)\{)/;
+    //   v2.1.185: team_name removed from destructure
+    // Two-tier: try with team_name first (older bundles), then without (v2.1.185+).
+    const callRe = /(async call\(\{prompt:([A-Za-z_$][\w$]*),subagent_type:[A-Za-z_$][\w$]*,description:[A-Za-z_$][\w$]*,model:[A-Za-z_$][\w$]*,run_in_background:[A-Za-z_$][\w$]*,name:[A-Za-z_$][\w$]*,team_name:[A-Za-z_$][\w$]*,mode:[A-Za-z_$][\w$]*,isolation:[A-Za-z_$][\w$]*,cwd:[A-Za-z_$][\w$]*\},([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\)\{)|(async call\(\{prompt:([A-Za-z_$][\w$]*),subagent_type:[A-Za-z_$][\w$]*,description:[A-Za-z_$][\w$]*,model:[A-Za-z_$][\w$]*,run_in_background:[A-Za-z_$][\w$]*,name:[A-Za-z_$][\w$]*,mode:[A-Za-z_$][\w$]*,isolation:[A-Za-z_$][\w$]*,cwd:[A-Za-z_$][\w$]*\},([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\)\{)/;
     const callMatch = code.match(callRe);
     if (!callMatch) {
       console.warn('  [!] expose_agent_tool: call() signature anchor not found — _callSelf will not be captured');
       return code;
     }
-    const [callSig, , , CTX] = callMatch;
+    // Groups 1-6: with team_name (old form); groups 7-12: without team_name (v2.1.185+).
+    // Group 1/7 = full call sig string; group 3/9 = CTX (first positional param after `}`).
+    const callSig = callMatch[1] ?? callMatch[7];
+    const CTX = callMatch[3] ?? callMatch[9];
     // We need the AgentTool identifier for `_callSelf = (args, ctx, a, b, c) => TOOL.call(...)`.
     // Reuse the TOOL0 from registration when available; otherwise fall back to
     // the (older) module-scope name. The tool identifier appears directly
