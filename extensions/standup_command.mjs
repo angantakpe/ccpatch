@@ -20,10 +20,14 @@
  *
  * ── Anchor strategy ───────────────────────────────────────────────────────────
  * Structural regex on the submit useCallback shape (NOT minified names, rule 1):
- *   let <var>=<React>.useCallback(async(<arg>)=>{await <inner>({helpers:{
- * The trailing `{helpers:{` disambiguates the submit handler from every other
- * useCallback(async ...) site. Verified unique (1×) in both the pristine
- * cli.v2.1.177.cjs and the already-patched cli.v2.1.177.patched.mjs (rule 9).
+ *   let <var>=<React>.useCallback(async(<arg>)=>{ … {helpers:{
+ * Up to v2.1.185 the dispatch call (`await <inner>({helpers:{`) was the callback's
+ * FIRST statement; v2.1.191 moved a queued-command guard ahead of it, so the
+ * `{helpers:{` literal now sits ~260 chars into the body. We anchor on the
+ * callback HEAD and a bounded lazy span to the globally-unique `{helpers:{`
+ * dispatch literal — that disambiguates the submit handler from every other
+ * useCallback(async ...) site. Verified unique (1×) in pristine cli.v2.1.191.cjs
+ * (the wrap only needs the head; the original body continues unchanged).
  * We wrap the callback expression: capture the original async callback, install
  * an adapter that rewrites `/standup` queued commands, then delegate.
  *
@@ -54,8 +58,18 @@ export default {
     count: { present: 4 },
   },
 
-  // No dependency: self-contained. Declared to coordinate with the other
-  // submit-callback consumer so the runner orders/overlap-checks them.
+  // expose_submit_input wraps the SAME submit useCallback. When both are enabled
+  // standup_command must apply AFTER it: it then sees the already-wrapped form
+  // and takes Mode 2 (via the __ccpSubmitInputCaptured_v1 sentinel). If it ran
+  // first, its Mode 1 wrap would hide the raw `let X=NS.useCallback(` head and
+  // expose_submit_input's anchor would miss. This is an ORDERING constraint only,
+  // NOT an enablement requirement — standup_command runs standalone (Mode 1) when
+  // expose_submit_input is absent (e.g. the `standard` profile). A hard
+  // `dependsOn` would wrongly force expose_submit_input on in every profile that
+  // ships /standup (and break the `standard` build, which has no expose_*), so we
+  // express the ordering with priority: lower applies first; expose_submit_input
+  // is the default 1000, we sit just after it.
+  priority: 1100,
   allowOverlapWith: ['expose_submit_input'],
 
   apply: (code) => {
@@ -64,82 +78,101 @@ export default {
     // byte-identical no-op.
     if (code.includes(SENTINEL)) return code;
 
-    // Structural anchor — match the submit useCallback shape, never the
-    // minified identifiers (rule 1).
-    const re = /let ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\.useCallback\(async\(([A-Za-z_$][\w$]*)\)=>\{await ([A-Za-z_$][\w$]*)\(\{helpers:\{/;
+    // Shared logic: composer (git → prompt) + adapter (queued-command rewriter).
+    // Used in BOTH modes below. The adapter receives the queued-commands array
+    // and delegates to __ccpOrig (the original submit callback, whatever form
+    // it takes — raw useCallback in standalone mode, or __ccpCb captured by
+    // expose_submit_input in co-applied mode).
+    const buildInner = (origVar) =>
+      // ── composer: git activity → standup prompt (inline copy of shim) ──
+      `if(!globalThis.${SENTINEL}BuildPrompt){` +
+        `globalThis.${SENTINEL}BuildPrompt=function(__raw){` +
+          `try{` +
+            `var __re=/^\\/standup(?:\\s+(\\d+))?\\s*$/i;` +
+            `var __mm=__re.exec(String(__raw||"").trim());` +
+            `if(!__mm)return null;` +
+            `var __days=Math.max(1,__mm[1]?(parseInt(__mm[1],10)||1):1);` +
+            `var __dw=__days===1?"day":"days";` +
+            `var __cp=null;try{__cp=require("node:child_process");}catch(_a){try{__cp=require("child_process");}catch(_b){__cp=null;}}` +
+            `var __instr="Write a concise daily standup update (Yesterday / Today / Blockers) from the git activity above. Keep it to a few bullet points per section.";` +
+            `function __git(__args){try{var __o=__cp.execFileSync("git",__args,{cwd:process.cwd(),encoding:"utf8",timeout:5000,maxBuffer:4194304,stdio:["ignore","pipe","ignore"]});return typeof __o==="string"?__o.trim():null;}catch(_g){return null;}}` +
+            `if(!__cp){return "Recent git activity for the last "+__days+" "+__dw+":\\n(git data was unavailable — child_process could not be loaded.)\\n\\n"+__instr;}` +
+            `var __since=__days+" "+__dw+" ago";` +
+            `var __log=__git(["log","--since="+__since,"--pretty=format:%h %s"]);` +
+            `var __churn=__git(["diff","--stat","@{"+__days+".days.ago}"]);` +
+            `if(__churn==null){__churn=__git(["log","--since="+__since,"--shortstat","--pretty=format:"]);if(__churn!=null){__churn=__churn.replace(/\\n{2,}/g,"\\n").trim();}}` +
+            `var __isRepo=__git(["rev-parse","--is-inside-work-tree"])==="true";` +
+            `if(!__isRepo){return "Recent git activity for the last "+__days+" "+__dw+":\\n(git data was unavailable — not a git repository, or git is not installed.)\\n\\n"+__instr;}` +
+            `var __cb=(__log&&__log.length)?__log:"(no commits in this window)";` +
+            `var __chb=(__churn&&__churn.length)?__churn:"(no diff stats available)";` +
+            `return "Recent git activity for the last "+__days+" "+__dw+" (generated by the /standup command):\\n\\nCommits:\\n"+__cb+"\\n\\nChurn:\\n"+__chb+"\\n\\n"+__instr;` +
+          `}catch(_e){return "Recent git activity:\\n(git data was unavailable — an internal error occurred while gathering it.)\\n\\nWrite a concise daily standup update (Yesterday / Today / Blockers) from the git activity above.";}` +
+        `};` +
+      `}` +
+      // ── adapter: rewrite /standup queued commands, then delegate ──
+      `var __ccpStandupAdapter=function(__qc){` +
+        `try{` +
+          `var __arr=Array.isArray(__qc)?__qc:(__qc!=null?[__qc]:[]);` +
+          `for(var __i=0;__i<__arr.length;__i++){` +
+            `var __it=__arr[__i];if(!__it||typeof __it!=="object")continue;` +
+            `var __v=(typeof __it.value==="string")?__it.value:((typeof __it.preExpansionValue==="string")?__it.preExpansionValue:"");` +
+            `var __np=globalThis.${SENTINEL}BuildPrompt(__v);` +
+            `if(typeof __np==="string"){` +
+              `__it.value=__np;__it.preExpansionValue=__np;` +
+              `if("mode" in __it)__it.mode="prompt";` +
+              `__it.skipSlashCommands=true;` +
+            `}` +
+          `}` +
+        `}catch(_e){}` +
+        `return ${origVar}(__qc);` +
+      `};` +
+      `return __ccpStandupAdapter;`;
+
+    // ── Mode 2: expose_submit_input already applied ───────────────────────────
+    // expose_submit_input wraps the submit useCallback in an IIFE, capturing
+    // the original callback as `__ccpCb` and returning it unchanged:
+    //   let bMe=(function(__ccpCb){ ...adapter... return __ccpCb; })(mn.useCallback(...))
+    // We intercept at the IIFE's return statement (unique sentinel — count 1):
+    //   return __ccpCb;})
+    // and replace it with a standup-aware wrapper around __ccpCb.
+    if (code.includes('__ccpSubmitInputCaptured_v1')) {
+      const anchor2 = 'return __ccpCb;})';
+      if (!code.includes(anchor2)) {
+        console.warn('  [!] standup_command: expose_submit_input secondary anchor not found — /standup disabled');
+        return code;
+      }
+      const inner2 = buildInner('__ccpOrig');
+      // Wrap __ccpCb with the standup adapter, then close the outer IIFE.
+      const replacement2 =
+        `var ${SENTINEL}=!0;` +
+        `return (function(__ccpOrig){try{${inner2}}catch(_ccpSU_){}return __ccpOrig;})(__ccpCb);})`;
+      code = code.replace(anchor2, replacement2);
+      return code;
+    }
+
+    // ── Mode 1: standalone (expose_submit_input NOT applied) ─────────────────
+    // Structural anchor on the raw submit useCallback shape (rule 1): the
+    // callback HEAD plus a bounded lazy span to the globally-unique `{helpers:{`
+    // dispatch literal (the body between them — a queued-command guard added in
+    // v2.1.191 — uses rotating minified names we must NOT anchor on).
+    const re = /let ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\.useCallback\(async\(([A-Za-z_$][\w$]*)\)=>\{[\s\S]{0,500}?\{helpers:\{/;
     const m = code.match(re);
     if (!m) {
-      // Fail loud, fail open (rule 4) — return code unchanged, never throw.
       console.warn('  [!] standup_command: submit useCallback anchor not found — /standup disabled');
       return code;
     }
 
-    const [, varName, ReactNs, argName, innerFn] = m;
+    const [, varName, ReactNs, argName] = m;
     const ucPrefix = `${ReactNs}.useCallback(`;
-    const anchor = `let ${varName}=${ReactNs}.useCallback(async(${argName})=>{await ${innerFn}(`;
+    // Wrap only the head; the original callback body follows `=>{` unchanged.
+    const anchor = `let ${varName}=${ReactNs}.useCallback(async(${argName})=>{`;
 
-    // Replacement wraps the callback expression. We:
-    //   1. capture the original callback (__ccpCb),
-    //   2. install a __ccpStandupBuildPrompt composer global once,
-    //   3. return an adapter that, for each queued command, detects /standup
-    //      and rewrites value/preExpansionValue to the generated prompt before
-    //      delegating to the original callback.
-    // Everything is wrapped in try/catch and falls through to the original
-    // callback on any error (fail open, rule 4).
+    const inner1 = buildInner('__ccpCb');
     const replacement =
       `var ${SENTINEL}=!0;` +
       `let ${varName}=(function(__ccpCb){` +
-        `try{` +
-          // ── composer: git activity → standup prompt (inline copy of shim) ──
-          `if(!globalThis.${SENTINEL}BuildPrompt){` +
-            `globalThis.${SENTINEL}BuildPrompt=function(__raw){` +
-              `try{` +
-                `var __re=/^\\/standup(?:\\s+(\\d+))?\\s*$/i;` +
-                `var __mm=__re.exec(String(__raw||"").trim());` +
-                `if(!__mm)return null;` +
-                `var __days=Math.max(1,__mm[1]?(parseInt(__mm[1],10)||1):1);` +
-                `var __dw=__days===1?"day":"days";` +
-                `var __cp=null;try{__cp=require("node:child_process");}catch(_a){try{__cp=require("child_process");}catch(_b){__cp=null;}}` +
-                `var __instr="Write a concise daily standup update (Yesterday / Today / Blockers) from the git activity above. Keep it to a few bullet points per section.";` +
-                `function __git(__args){try{var __o=__cp.execFileSync("git",__args,{cwd:process.cwd(),encoding:"utf8",timeout:5000,maxBuffer:4194304,stdio:["ignore","pipe","ignore"]});return typeof __o==="string"?__o.trim():null;}catch(_g){return null;}}` +
-                `if(!__cp){return "Recent git activity for the last "+__days+" "+__dw+":\\n(git data was unavailable — child_process could not be loaded.)\\n\\n"+__instr;}` +
-                `var __since=__days+" "+__dw+" ago";` +
-                `var __log=__git(["log","--since="+__since,"--pretty=format:%h %s"]);` +
-                `var __churn=__git(["diff","--stat","@{"+__days+".days.ago}"]);` +
-                `if(__churn==null){__churn=__git(["log","--since="+__since,"--shortstat","--pretty=format:"]);if(__churn!=null){__churn=__churn.replace(/\\n{2,}/g,"\\n").trim();}}` +
-                `var __isRepo=__git(["rev-parse","--is-inside-work-tree"])==="true";` +
-                `if(!__isRepo){return "Recent git activity for the last "+__days+" "+__dw+":\\n(git data was unavailable — not a git repository, or git is not installed.)\\n\\n"+__instr;}` +
-                `var __cb=(__log&&__log.length)?__log:"(no commits in this window)";` +
-                `var __chb=(__churn&&__churn.length)?__churn:"(no diff stats available)";` +
-                `return "Recent git activity for the last "+__days+" "+__dw+" (generated by the /standup command):\\n\\nCommits:\\n"+__cb+"\\n\\nChurn:\\n"+__chb+"\\n\\n"+__instr;` +
-              `}catch(_e){return "Recent git activity:\\n(git data was unavailable — an internal error occurred while gathering it.)\\n\\nWrite a concise daily standup update (Yesterday / Today / Blockers) from the git activity above.";}` +
-            `};` +
-          `}` +
-          // ── adapter: rewrite /standup queued commands, then delegate ──
-          `var __ccpStandupAdapter=function(__qc){` +
-            `try{` +
-              `var __arr=Array.isArray(__qc)?__qc:(__qc!=null?[__qc]:[]);` +
-              `for(var __i=0;__i<__arr.length;__i++){` +
-                `var __it=__arr[__i];if(!__it||typeof __it!=="object")continue;` +
-                `var __v=(typeof __it.value==="string")?__it.value:((typeof __it.preExpansionValue==="string")?__it.preExpansionValue:"");` +
-                `var __np=globalThis.${SENTINEL}BuildPrompt(__v);` +
-                `if(typeof __np==="string"){` +
-                  // Rewrite to a normal prompt. skipSlashCommands:true ensures the
-                  // generated text is never re-parsed as a slash command.
-                  `__it.value=__np;__it.preExpansionValue=__np;` +
-                  `if("mode" in __it)__it.mode="prompt";` +
-                  `__it.skipSlashCommands=true;` +
-                `}` +
-              `}` +
-            `}catch(_e){}` +
-            `return __ccpCb(__qc);` +
-          `};` +
-          `return __ccpStandupAdapter;` +
-        `}catch(_ccpSU_){}` +
+        `try{${inner1}}catch(_ccpSU_){}` +
         `return __ccpCb;` +
-      // Re-emit the ENTIRE original callback expression (everything after
-      // `let <var>=`) as the IIFE argument — including the async arrow head and
-      // the `await <inner>(` we matched. The original body continues unchanged.
       `})(${anchor.slice(anchor.indexOf('=') + 1)}`;
 
     code = code.replace(anchor, replacement);

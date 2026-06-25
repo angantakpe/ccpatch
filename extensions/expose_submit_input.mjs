@@ -9,11 +9,15 @@
  * v2.1.141: let fT8=q8.useCallback(async(j$)=>{await rZ8(
  * v2.1.142: let o08=e$.useCallback(async(j$)=>{await CZ8(
  * v2.1.146: let b1=J8.useCallback(async(k$)=>{await qV8(
+ * v2.1.191: let Plr=mn.useCallback(async(ut)=>{ …guard… await Csr({helpers:{
  *
- * All minified names rotate per version. We match the structural shape
- * `let <var>=<React>.useCallback(async(<arg>)=>{await <inner>(` and require the
- * inner call to start an object literal whose first field is `helpers:` — the
- * submit handler's signature dispatcher distinguishes it from other useCallbacks.
+ * All minified names rotate per version. Through v2.1.185 the dispatch call
+ * (`await <inner>({helpers:{`) was the callback's FIRST statement; v2.1.191 moved
+ * a queued-command guard ahead of it. So we no longer match `=>{await <inner>(`
+ * directly — we match the structural HEAD `let <var>=<React>.useCallback(async(
+ * <arg>)=>{` and require a bounded lazy span to the globally-unique `{helpers:{`
+ * dispatch literal, which distinguishes the submit handler from other
+ * useCallbacks. Only the head is rewritten; the body continues unchanged.
  */
 
 export default {
@@ -30,19 +34,22 @@ export default {
   apply: (code) => {
     if (code.includes('__ccpSubmitInputCaptured_v1')) return code;
 
-    // Regex match the submit shape. The `{helpers:{` follow-on is what
-    // disambiguates from other useCallback(async ...) sites.
-    const re = /let ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\.useCallback\(async\(([A-Za-z_$][\w$]*)\)=>\{await ([A-Za-z_$][\w$]*)\(\{helpers:\{/;
+    // Regex match the submit shape: the callback HEAD plus a bounded lazy span to
+    // the globally-unique `{helpers:{` dispatch literal (v2.1.191 inserts a
+    // queued-command guard between the two — rotating minified names we must not
+    // anchor on). The `{helpers:{` follow-on disambiguates from other
+    // useCallback(async ...) sites.
+    const re = /let ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\.useCallback\(async\(([A-Za-z_$][\w$]*)\)=>\{[\s\S]{0,500}?\{helpers:\{/;
     const m = code.match(re);
     if (!m) {
       console.warn('  [!] expose_submit_input: submit anchor not found — programmatic submit disabled');
       return code;
     }
-    const [, varName, ReactNs, , innerFn] = m;
+    const [, varName, ReactNs] = m;
     const ucPrefix = `${ReactNs}.useCallback(`;
-    // Strip the trailing `{helpers:{` (it's not consumed by the wrap; only
-    // `let X=...await Y(` is rewritten so the original body continues unchanged).
-    const anchor = `let ${varName}=${ReactNs}.useCallback(async(${m[3]})=>{await ${innerFn}(`;
+    // Rewrite only the head (`let X=NS.useCallback(async(A)=>{`); the original
+    // callback body follows `=>{` unchanged.
+    const anchor = `let ${varName}=${ReactNs}.useCallback(async(${m[3]})=>{`;
     // The captured React useCallback expects a single arg of shape
     //   [{ value, preExpansionValue, mode: 'prompt', pastedContents, skipSlashCommands, uuid }]
     // (the "queuedCommands" array). External callers like headless_bridge pass

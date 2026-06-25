@@ -46,14 +46,17 @@ export const FIXTURES = {
   // Stream-anchor patches — share one fixture.
   loop_dynamic: streamAnchor,
   plan_mode_interview: streamAnchor,
-  // standup_command targets the React submit useCallback shape
-  //   let <v>=<R>.useCallback(async(<a>)=>{await <inner>({helpers:{ ... )
-  // Provide a minimal fragment carrying that exact anchor so Layer 1/2/3 run
-  // without a real bundle. The callback body is trivial but paren-balanced so
+  // standup_command targets the React submit useCallback shape. Through v2.1.185
+  // the dispatch (`await <inner>({helpers:{`) was the callback's first statement;
+  // v2.1.191 inserts a queued-command guard before it:
+  //   let <v>=<R>.useCallback(async(<a>)=>{ …guard… await <inner>({helpers:{ ... )
+  // Provide a minimal fragment carrying that exact (post-v2.1.191) anchor so
+  // Layer 1/2/3 run without a real bundle. The guard mimics the rotating-name
+  // body between the head and `{helpers:{`; the whole thing is paren-balanced so
   // the patch's paren-counter can find the matching close.
   standup_command: () =>
     shebang(
-      'let Sx8=R8.useCallback(async(v$)=>{await Hi8({helpers:{x:1},queuedCommands:v$})},[a,b]);',
+      'let Sx8=R8.useCallback(async(v$)=>{let q=v$.find((j)=>j.mode!=="task-notification");if(q)Z(void 0);await Hi8({helpers:{x:1},queuedCommands:v$})},[a,b]);',
     ),
   // ── scaffold-patch.mjs inserts new entries here ──
 };
