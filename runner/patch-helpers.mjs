@@ -323,16 +323,26 @@ export function injectAtModuleTop(code, snippet, opts = {}) {
   const onMissing = opts.onMissing ?? 'warn';
   const label = opts.label ?? 'patch';
 
-  if (code.startsWith(SHEBANG)) {
-    return code.replace(SHEBANG, () => SHEBANG + snippet);
-  }
-
   if (placement === 'after') {
+    // placement:'after' = inside the CJS-IIFE wrapper scope.
+    // Check CJS-IIFE-BRACE BEFORE shebang: a bundle with both shebang and
+    // CJS-IIFE must inject inside the IIFE, not at the outer shebang scope.
+    // Fall back to shebang only when no CJS-IIFE is present (shebang-only
+    // bundles, or native ESM bundles that ship a bare shebang with no wrapper).
     if (code.includes(CJS_IIFE_BRACE)) {
       return code.replace(CJS_IIFE_BRACE, () => CJS_IIFE_BRACE + snippet);
     }
-  } else if (code.includes(CJS_IIFE)) {
-    return code.replace(CJS_IIFE, () => snippet + CJS_IIFE);
+    if (code.startsWith(SHEBANG)) {
+      return code.replace(SHEBANG, () => SHEBANG + snippet);
+    }
+  } else {
+    // placement:'before' — outer scope: shebang first, then no-brace IIFE.
+    if (code.startsWith(SHEBANG)) {
+      return code.replace(SHEBANG, () => SHEBANG + snippet);
+    }
+    if (code.includes(CJS_IIFE)) {
+      return code.replace(CJS_IIFE, () => snippet + CJS_IIFE);
+    }
   }
 
   if (onMissing === 'throw') {

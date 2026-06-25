@@ -73,6 +73,7 @@ function spawnChild(bundlePath) {
 
   child.on('exit', () => {
     state.exited = true;
+    state.readyResolve(); // unblock :reload awaiter if child dies before sending ready
     for (const slot of state.pending.values()) {
       clearTimeout(slot.timer);
       slot.reject(new Error('child exited'));
@@ -157,7 +158,11 @@ export async function runRepl(bundlePath, io = {}) {
 
   rl.prompt();
 
-  rl.on('line', async (line) => {
+  // Serialize handlers: readline fires 'line' without waiting for async handlers,
+  // so without a queue, :reload can race with :list/:quit and output is lost.
+  let cmdQueue = Promise.resolve();
+  rl.on('line', (line) => {
+    cmdQueue = cmdQueue.then(async () => {
     const trimmed = line.trim();
     if (!trimmed) { rl.prompt(); return; }
 
@@ -221,12 +226,17 @@ export async function runRepl(bundlePath, io = {}) {
       }
     }
     rl.prompt();
+    }); // end cmdQueue.then
   });
 
   return new Promise(resolve => {
     rl.on('close', () => {
-      try { state.child.kill(); } catch {}
-      resolve(0);
+      // Wait for any in-flight commands to finish before killing the child,
+      // so :reload output isn't lost when readline closes on EOF/input.end().
+      cmdQueue.finally(() => {
+        try { state.child.kill(); } catch {}
+        resolve(0);
+      });
     });
   });
 }
