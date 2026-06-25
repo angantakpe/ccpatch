@@ -46,6 +46,14 @@ export function injectCoverageHit(preCode, postCode, marker, atSites) {
         }
       }
     }
-  } catch (_) { /* fall through */ }
+  } catch (err) {
+    // The line-diff fallback is best-effort instrumentation; a failure here
+    // just means this patch goes uninstrumented, never that apply breaks.
+    // Gate on CCPATCH_DEBUG so normal runs stay byte-identical and quiet.
+    if (process.env.CCPATCH_DEBUG) {
+      console.warn(`[ccpatch] coverage: diff-based instrumentation failed for marker "${marker}" (non-fatal): ${err.message}`);
+    }
+    /* fall through */
+  }
   return null;
 }

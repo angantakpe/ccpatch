@@ -65,7 +65,14 @@ let _writeCount = 0;
 function writeDiskCache(key, ast) {
   try {
     mkdirSync(DISK_CACHE_DIR, { recursive: true });
-    fsp.writeFile(join(DISK_CACHE_DIR, `ast-${key}.json`), JSON.stringify(ast)).catch(() => {});
+    fsp.writeFile(join(DISK_CACHE_DIR, `ast-${key}.json`), JSON.stringify(ast)).catch((err) => {
+      // Async write failure (disk full, permission) silently stops the disk
+      // cache from helping. The cache is opportunistic — never throw — but
+      // surface it under CCPATCH_DEBUG so a degraded cache isn't invisible.
+      if (process.env.CCPATCH_DEBUG) {
+        console.warn(`[ccpatch] ast-cache: disk write failed for ${key} (non-fatal): ${err.message}`);
+      }
+    });
   } catch {
     return; // disk cache is opportunistic; write failure must never throw
   }

@@ -211,7 +211,12 @@ export function applySinglePatch({
       } else if (probesCount === 0) {
         logger.warn(`      [drift] no anchor.literal or verify.present declared — cannot offer candidates. Add verify.present to "${name}" to enable drift hints.`);
       }
-    } catch (_) { /* non-fatal */ }
+    } catch (err) {
+      // Drift forensics is best-effort diagnostics; never let a scan/JSONL
+      // failure (disk full, permission, corrupt record) break apply. Surface
+      // it at debug level so systematic failures aren't fully invisible.
+      (logger.debug || logger.log)?.(`  [drift] ${name}: drift-forensics scan failed (non-fatal): ${err.message}`);
+    }
   } else {
     status = noChange ? 'no-change-ok' : 'applied';
   }
