@@ -1,5 +1,6 @@
 import { mkdirSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { PROJECT_ROOT } from './paths.mjs';
 
 /**
  * Lifecycle hooks (optional, declared on the patch module):
@@ -80,8 +81,8 @@ export async function fireHook(patch, hookName, ctx, logger) {
 
 export function writeLifecycleEntry(entry) {
   try {
-    mkdirSync('storage/diagnostics', { recursive: true });
-    appendFileSync(join('storage/diagnostics', 'patch-lifecycle.jsonl'),
+    mkdirSync(join(PROJECT_ROOT, 'storage', 'diagnostics'), { recursive: true });
+    appendFileSync(join(PROJECT_ROOT, 'storage', 'diagnostics', 'patch-lifecycle.jsonl'),
                    JSON.stringify(entry) + '\n', 'utf8');
   } catch (_) { /* non-fatal */ }
 }
