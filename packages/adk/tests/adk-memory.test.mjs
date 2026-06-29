@@ -506,6 +506,41 @@ test('an external write between load and flush is merged, not clobbered', async 
   assert.equal(onDisk.shared, 'v0', 'untouched key retains the concurrent disk value');
 });
 
+test('COD-310: a SAME-mtime concurrent write (coarse-clock) is still merged via the size discriminator', async () => {
+  // Regression for the strict `mtime > loadedMtimeMs` check: on filesystems with
+  // coarse mtime granularity two writes can share a tick, so the second writer
+  // would see `<=` and clobber the first. We pin the disk mtime back to exactly
+  // the value observed at load (no advance) but change the CONTENT — the size
+  // delta must now flag the file as changed-under-us and trigger the merge.
+  const dir = freshDir();
+  const file = join(dir, 'same-mtime.json');
+  writeFileSync(file, JSON.stringify({ shared: 'v0', ours: 'old' }, null, 2), 'utf8');
+
+  // Capture the exact mtime the store will load as its baseline.
+  const loadedAt = statSync(file).mtimeMs / 1000;
+
+  const mem = createMemory({ path: file });
+  assert.equal(mem.get('shared'), 'v0', 'loaded initial state');
+  mem.set('ours', 'new'); // our dirty key, debounced
+
+  // Another process writes a NEW key (so the byte size differs) but the mtime
+  // lands on the same tick — pin it back to the loaded baseline to simulate a
+  // coarse clock that did not advance.
+  writeFileSync(
+    file,
+    JSON.stringify({ shared: 'v0', theirs: 'external', ours: 'theirOld' }, null, 2),
+    'utf8',
+  );
+  utimesSync(file, loadedAt, loadedAt);
+
+  await mem.flush();
+
+  const onDisk = JSON.parse(readFileSync(file, 'utf8'));
+  assert.equal(onDisk.ours, 'new', 'our dirty key still wins under a same-tick merge');
+  assert.equal(onDisk.theirs, 'external', "the concurrent writer's key is NOT clobbered on a same-tick write");
+  assert.equal(onDisk.shared, 'v0', 'untouched key survives');
+});
+
 // ── concurrent write + local clear() merge semantics ──────────────────────────
 
 test('local clear() drops keys we knew but preserves a concurrent writer\'s foreign keys', async () => {

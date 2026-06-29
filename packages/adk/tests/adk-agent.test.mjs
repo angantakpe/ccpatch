@@ -98,6 +98,28 @@ test('frozen agent: changed redefine THROWS a clear error', () => {
   assert.equal(getAgentIn(scope, 'guard').systemPrompt, 'locked');
 });
 
+test('COD-310: a non-string systemPrompt THROWS at definition (not silently coerced to "")', () => {
+  const scope = createAgentScope();
+  // A misconfigured persona (object/number/etc.) would otherwise be coerced to
+  // an empty string downstream — a delegate target running with no persona,
+  // invisibly. Catch it at the definition boundary instead.
+  for (const bad of [{}, 42, ['a'], true]) {
+    assert.throws(
+      () => defineAgentIn(scope, { name: 'oops', systemPrompt: bad }),
+      /non-string `systemPrompt`/,
+      `systemPrompt=${JSON.stringify(bad)} must throw`,
+    );
+  }
+  // Nothing was registered by the rejected definitions.
+  assert.equal(getAgentIn(scope, 'oops'), null);
+});
+
+test('COD-310: an OMITTED systemPrompt is still valid (tool-only agent, no persona)', () => {
+  const scope = createAgentScope();
+  assert.doesNotThrow(() => defineAgentIn(scope, { name: 'toolonly', tools: ['Bash'] }));
+  assert.equal(getAgentIn(scope, 'toolonly').systemPrompt, undefined);
+});
+
 test('frozen agent: identical redefine is a no-op (no throw, no warn)', () => {
   const scope = createAgentScope();
   defineAgentIn(scope, { name: 'guard', systemPrompt: 'locked', frozen: true });

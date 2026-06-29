@@ -389,6 +389,14 @@ export function createMemory({ path: filePath, root: rootOpt, transform, maxByte
    */
   let loadedMtimeMs = -Infinity;
   /**
+   * On-disk byte size observed when we last loaded/wrote the file. Paired with
+   * loadedMtimeMs as a cheap concurrent-write discriminator: mtime alone can miss
+   * a same-tick write on filesystems with coarse mtime granularity (some ext4,
+   * FAT/Windows, network mounts), so a size delta also flags "disk changed under
+   * us". -1 = never observed.
+   */
+  let loadedSize = -1;
+  /**
    * The set of keys mutated by THIS instance since the last successful flush.
    * On a detected concurrent write we re-apply only these over the
    * fresher disk store (last-write-wins per dirty key, other processes' keys kept).
@@ -555,6 +563,7 @@ export function createMemory({ path: filePath, root: rootOpt, transform, maxByte
       // SIZE BOUND: guard before reading/parsing unbounded input.
       const st = statSync(resolved);
       loadedMtimeMs = st.mtimeMs;
+      loadedSize = st.size;
       if (st.size > capBytes) {
         host.report('warn', 'memory.read.oversized', {
           path: resolved,
@@ -896,7 +905,11 @@ export function createMemory({ path: filePath, root: rootOpt, transform, maxByte
     // we resolve it in favour of honouring the local clear for known names.
     try {
       const st = statSync(resolved);
-      if (st.mtimeMs > loadedMtimeMs && st.size <= capBytes) {
+      // Possibly-concurrent if the file changed under us by EITHER signal: a newer
+      // mtime, or a size that differs from our baseline. Size catches same-tick
+      // writes that a strict mtime compare misses on coarse-granularity clocks.
+      const changedUnderUs = st.mtimeMs > loadedMtimeMs || st.size !== loadedSize;
+      if (changedUnderUs && st.size <= capBytes) {
         const diskRaw = JSON.parse(onRead(readFileSync(resolved, 'utf8')));
         if (diskRaw !== null && typeof diskRaw === 'object' && !Array.isArray(diskRaw)) {
           if (dirtyClear) {
@@ -967,7 +980,9 @@ export function createMemory({ path: filePath, root: rootOpt, transform, maxByte
       // Record the mtime we just produced as our new "loaded" baseline so a
       // subsequent same-instance write doesn't see its OWN write as concurrent.
       try {
-        loadedMtimeMs = statSync(resolved).mtimeMs;
+        const st = statSync(resolved);
+        loadedMtimeMs = st.mtimeMs;
+        loadedSize = st.size;
       } catch {
         /* ignore: best-effort baseline refresh */
       }

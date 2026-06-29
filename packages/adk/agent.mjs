@@ -52,21 +52,28 @@ function warnAgentRedefined(scope, name, prevPrompt, nextPrompt) {
   const warned = scope.warnedRedefines || (scope.warnedRedefines = new Set());
   if (!warned.has(name)) {
     warned.add(name);
-    const debug = host.debug();
-    try {
-      if (debug) {
-        console.warn(
-          `[adk:agent] persona "${name}" redefined with a DIFFERENT systemPrompt (trust-boundary: this prompt is a swap-handoff target)\n  was: ${JSON.stringify(prevPrompt)}\n  now: ${JSON.stringify(nextPrompt)}`,
-        );
-      } else {
-        console.warn(
-          `[adk:agent] persona "${name}" redefined with a DIFFERENT systemPrompt (trust-boundary risk; set CLAUDE_DEBUG=1 for prompt previews, or { frozen: true } to forbid)`,
-        );
-      }
-    } catch (_) {}
+    // Route the once-per-name human warning through the unified observability
+    // seam (host.report) instead of a hand-rolled console.warn, so the trust-
+    // boundary signal lands on the same bus+console channel as every other ADK
+    // failure. It rides a SEPARATE topic ('agent.redefine.warning') from the
+    // audit event below — host.report always emits, and the `agent.redefined`
+    // audit contract is the bare `{ name }` payload, which must not change.
+    // Prompt previews are only meaningful (and only safe to log) under debug, so
+    // a 'debug' report carries them; otherwise a 'warn' report stays terse.
+    if (host.debug()) {
+      host.report('debug', 'agent.redefine.warning', {
+        name, prev: prevPrompt, next: nextPrompt,
+        message: `persona "${name}" redefined with a DIFFERENT systemPrompt (trust-boundary: swap-handoff target)\n  was: ${JSON.stringify(prevPrompt)}\n  now: ${JSON.stringify(nextPrompt)}`,
+      });
+    } else {
+      host.report('warn', 'agent.redefine.warning', {
+        name,
+        message: `persona "${name}" redefined with a DIFFERENT systemPrompt (trust-boundary risk; set CLAUDE_DEBUG=1 for prompt previews, or { frozen: true } to forbid)`,
+      });
+    }
   }
-  // Bus emit is independent of the once-per-name console dedupe so downstream
-  // auditors observe EVERY redefine; guard it like the other modules.
+  // Audit event, independent of the once-per-name human dedupe so downstream
+  // auditors observe EVERY redefine. Bare `{ name }` — the stable contract.
   host.emit('agent.redefined', { name });
 }
 
@@ -101,6 +108,15 @@ export function defineAgentIn(scope, { name, description, systemPrompt, tools = 
   if (typeof name !== 'string' || !name) {
     // PROGRAMMER error: a nameless agent can never be addressed.
     throw new Error('defineAgent: `name` must be a non-empty string');
+  }
+  if (systemPrompt != null && typeof systemPrompt !== 'string') {
+    // PROGRAMMER error, caught at definition rather than at runtime. A non-string
+    // systemPrompt would otherwise be silently coerced to '' downstream
+    // (toCcAgentDef) — a delegate target running with an empty, invisible persona.
+    // `undefined`/omitted is fine: a tool-only agent has no persona to swap to.
+    throw new Error(
+      `defineAgent: agent "${name}" has a non-string \`systemPrompt\` (${typeof systemPrompt}) — pass a string or omit it`,
+    );
   }
   // TRUST BOUNDARY: re-registering an EXISTING name is security-sensitive — a swap
   // handoff can later flip the live persona to this prompt. A byte-identical
