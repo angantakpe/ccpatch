@@ -1,0 +1,33 @@
+{
+  "ccVersion": "2.1.218",
+  "generatedAt": "2026-07-24T08:04:16.442Z",
+  "scanner": "regex-v1",
+  "note": "Bun API property names + occurrence counts only; no bundle content.",
+  "totalSites": 42,
+  "apis": {
+    "JSONL": 1,
+    "SQL": 1,
+    "TOML": 1,
+    "Terminal": 2,
+    "Transpiler": 1,
+    "WebView": 1,
+    "YAML": 2,
+    "connect": 1,
+    "deepEquals": 2,
+    "file": 1,
+    "gc": 2,
+    "generateHeapSnapshot": 1,
+    "hash": 9,
+    "isStandaloneExecutable": 1,
+    "listen": 1,
+    "semver": 2,
+    "serve": 1,
+    "spawn": 5,
+    "stdin": 1,
+    "stringWidth": 1,
+    "stripANSI": 1,
+    "version": 1,
+    "which": 2,
+    "wrapAnsi": 1
+  }
+}
