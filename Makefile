@@ -4,7 +4,7 @@ export
 include scripts/mk/vars.mk
 include scripts/mk/cli.mk
 
-.PHONY: help refmap refmap-check smoke-bridge smoke-integration \
+.PHONY: help refmap refmap-check smoke-bridge smoke-integration claude \
         smoke-integration-roundtrip test-tty canary \
         bridge-host bridge-host-stop bridge-tail bridge-submit \
         verticals-check lint lint-dead lint-unused lint-registry lint-capabilities lint-contracts \
@@ -191,3 +191,6 @@ help: ## Show this help
 	@echo "Targets:"
 	@grep -h -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | \
 		awk 'BEGIN {FS = ":.*##"}; {printf "  %-30s %s\n", $$1, $$2}' || true
+
+claude:
+	claude --dangerously-skip-permissions --dangerously-load-development-channels plugin:annotate@claude-annotate --model sonnet

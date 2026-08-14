@@ -19,6 +19,8 @@
     "YAML": { "status": "degraded", "caveat": "js-yaml when resolvable; otherwise a JSON-parse fallback that cannot read real YAML" },
     "embeddedFiles": { "status": "degraded", "caveat": "always an empty array; embedded-asset code paths see 'no embedded files'" },
     "Terminal": { "status": "throws", "caveat": "PTY emulator needs native bindings; throws by design so callers take their Node fallback path" },
+    "SQL": { "status": "throws", "caveat": "gateway-only Postgres client; throws by design — `claude gateway` is Bun-only upstream and unreachable from the interactive CLI" },
+    "serve": { "status": "throws", "caveat": "gateway-only HTTP server; throws by design — `claude gateway` is Bun-only upstream and unreachable from the interactive CLI" },
     "Transpiler": { "status": "degraded", "caveat": "transformSync/transform return input unchanged; no actual transpilation (REPL paths only)" },
     "env": { "status": "full", "caveat": "" },
     "argv": { "status": "degraded", "caveat": "Node argv shape: argv[0] is the node binary path, not 'bun'" },

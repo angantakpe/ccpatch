@@ -304,6 +304,25 @@ if (typeof globalThis.Bun === 'undefined') {
         throw new Error('Bun.Terminal unavailable (running under Node.js — use bg-pty-host)');
       }
 
+      // ── Bun.SQL / Bun.serve ──────────────────────────────────────────────
+      // Both are reached ONLY from the `claude gateway` server subcommand
+      // (startGateway → a5c() builds a Bun.SQL Postgres pool; qOm() stands up a
+      // Bun.serve HTTP listener). Upstream gates that whole path on
+      //   if (typeof Bun === "undefined") throw "claude gateway requires the native binary"
+      // — i.e. the gateway is Bun-only by design. Our polyfill DEFINES Bun, so
+      // that typeof guard now passes; without these stubs the next line would be
+      // a bare `Bun.SQL is not a constructor` / `Bun.serve is not a function`.
+      // We instead throw a clear, on-message error so anyone who runs the
+      // gateway under the Node-patched bundle gets the same "needs the native
+      // binary" signal upstream intends, rather than a cryptic TypeError. The
+      // interactive CLI never touches either, so this is correct, not a gap.
+      function _SQL() {
+        throw new Error('Bun.SQL unavailable under Node.js — `claude gateway` requires the native binary (https://claude.ai/install.sh)');
+      }
+      function _serve() {
+        throw new Error('Bun.serve unavailable under Node.js — `claude gateway` requires the native binary (https://claude.ai/install.sh)');
+      }
+
       // ── Bun.Transpiler ───────────────────────────────────────────────────
       // Used in REPL mode. Minimal shim: transformSync returns the input unchanged.
       function _Transpiler(_opts) {
@@ -419,6 +438,8 @@ if (typeof globalThis.Bun === 'undefined') {
         // Runtimes
         Terminal:             _Terminal,
         Transpiler:           _Transpiler,
+        SQL:                  _SQL,
+        serve:                _serve,
 
         // Misc APIs the bundle may reference
         env:                  process.env,

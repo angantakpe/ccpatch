@@ -95,6 +95,11 @@
       "cliSha256": "937bb887e9a0324b355310671b659f38da3c11b3b174a98d0551af7d35aa32c1",
       "sizeBytes": 17422885,
       "source": "auto-pin (TOFU: native-binary release, first verified build)"
+    },
+    "2.1.195": {
+      "cliSha256": "a147cf2b6105e81a5a3d28fc5c6082ca022dc699ab1a7b49026aa2918a2980f6",
+      "sizeBytes": 17939604,
+      "source": "auto-pin (TOFU: native-binary release, first verified build)"
     }
   }
 }
