@@ -72,7 +72,15 @@ Instructions:
 2. Only stop early for a true external blocker (missing required tools, auth, permissions, or secrets). If blocked, record it in the workpad and move the issue according to the workflow.
 3. Final message must report completed actions and blockers only. Do not include "next steps for user".
 
-Work only in the provided repository copy. Do not touch any other path.
+Work only inside your assigned workspace directory (the repository copy under
+`~/symphony-workspaces/ccpatch`). Treat every other path on this machine as off-limits, including
+sibling repos under `/home/anga/workspace/projects/`. Never `cd` out of your workspace root, never
+run `git` (or any command) against a `.git` directory outside it, and never run a script that
+iterates over other directories (e.g. a "checkpoint all repos" style script). If you believe
+cross-repo action is required, that is a sign you have the wrong scope — stop and record it as a
+blocker in the workpad instead of acting on it. This instruction is enforced by convention only
+(this host's sandbox does not guarantee filesystem confinement), so treat it as a hard rule, not a
+suggestion.
 
 ## Prerequisite: Linear MCP or `linear_graphql` tool is available
 
@@ -265,6 +273,7 @@ Use this only when completion is blocked by missing required tools or missing au
 
 ## Guardrails
 
+- Never operate outside your assigned workspace directory — no other repo, no cross-repo scripts, no exceptions; treat any such urge as a blocker to report, not an action to take.
 - If the branch PR is already closed/merged, do not reuse that branch or prior implementation state for continuation.
 - For closed/merged branch PRs, create a new branch from `origin/main` and restart from reproduction/planning as if starting fresh.
 - If issue state is `Backlog`, do not modify it; wait for human to move it to `Todo`.
