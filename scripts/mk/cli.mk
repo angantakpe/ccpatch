@@ -86,7 +86,7 @@ verify_launch = ( \
         coverage bun-all all beautify beautify-fast patch \
         patch-claude-code patch-list patch-applied doctor heal print-patch anchor-catalog \
         anchor-catalog-missing anchor-catalog-changed anchor-report repatch release run-extracted \
-        start start-unsafe dev verify \
+        start start-unsafe dev verify gateway \
         patch-claude-code-native \
         clean clean-patched clean-identifiers clean-all \
         test-patches test-patch patch-coverage new-patch
@@ -441,7 +441,13 @@ patch-coverage: ## Apply + smoke-run + cross-reference patch coverage: make patc
 	@echo "[patch-coverage] running smoke session..."
 	@$(NODE) bin/patch-cli.mjs coverage $(OUTPUT) --cc-version $(VERSION) $(if $(SMOKE),--smoke "$(SMOKE)",)
 
-start: ## Run the patched CLI, building first if needed: make start [VERSION=x.y.z] [CLI_ARGS='--help']
+$(CC_BRIDGE_TOKEN_FILE):
+	@mkdir -p $(dir $(CC_BRIDGE_TOKEN_FILE))
+	@openssl rand -hex 24 > $(CC_BRIDGE_TOKEN_FILE)
+	@chmod 600 $(CC_BRIDGE_TOKEN_FILE)
+	@echo "[bridge] generated a new token at $(CC_BRIDGE_TOKEN_FILE)"
+
+start: $(CC_BRIDGE_TOKEN_FILE) ## Run the patched CLI, building first if needed: make start [VERSION=x.y.z] [CLI_ARGS='--help']
 	@if [ ! -d node_modules/react ]; then \
 		echo "[start] react not found — running npm install..."; \
 		npm install --silent; \
@@ -451,7 +457,21 @@ start: ## Run the patched CLI, building first if needed: make start [VERSION=x.y
 		$(MAKE) patch-claude-code VERSION=$(VERSION); \
 	fi
 	@$(call verify_launch,$(OUTPUT)) || exit 1
-	node $(OUTPUT) $(CLI_ARGS)
+	@rm -f $(CC_BRIDGE_SOCK)
+	@echo "[bridge] $(CC_BRIDGE_ADDR) — only opens if this build's profile includes headless_bridge (e.g. PROFILE=daemon); otherwise these vars are simply unused."
+	CC_BRIDGE_ADDR=$(CC_BRIDGE_ADDR) CC_BRIDGE_TOKEN="$$(cat $(CC_BRIDGE_TOKEN_FILE))" node $(OUTPUT) $(CLI_ARGS)
+
+gateway: $(CC_BRIDGE_TOKEN_FILE) ## Run the ccpatch gateway against a `make start` session: make gateway [GATEWAY_ADAPTERS=stdio|telegram]
+	@if [ ! -S $(CC_BRIDGE_SOCK) ]; then \
+		echo "[gateway] $(CC_BRIDGE_SOCK) not found. Start a daemon-profile patched CLI first, in another terminal:"; \
+		echo "  make patch-claude-code PROFILE=daemon CCP_BUILD_FLAGS='--emit-revert --allow-capabilities=tools,network,telemetry'"; \
+		echo "  make start"; \
+		exit 1; \
+	fi
+	@if [ "$(GATEWAY_ADAPTERS)" = "telegram" ]; then \
+		echo "[gateway] telegram adapter needs grammy — run 'npm install' at the repo root first if you haven't (npm workspaces hoist packages/gateway's deps there)."; \
+	fi
+	cd packages/gateway && CC_BRIDGE_ADDR=$(CC_BRIDGE_ADDR) CC_BRIDGE_TOKEN="$$(cat $(CC_BRIDGE_TOKEN_FILE))" GATEWAY_ADAPTERS=$(GATEWAY_ADAPTERS) node run.mjs
 
 start-unsafe: ## Run the patched CLI with --dangerously-skip-permissions (opt-in unsafe mode): make start-unsafe [VERSION=x.y.z] [CLI_ARGS='...']
 	@echo "[start-unsafe] WARNING: running with --dangerously-skip-permissions — tool calls execute without prompts."

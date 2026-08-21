@@ -67,6 +67,19 @@ BUN_ARGS        ?= --version
 
 PROMPT          ?= "Say hello as JSON"
 
+# ── Headless bridge — used by `make start` / `make gateway` ─────────────────
+# `make start` opens the headless_bridge control socket automatically (needs
+# a daemon-profile build — see the `start` target) so `make gateway` in a
+# second terminal can find it without manually generating/copy-pasting a
+# token. Both default to repo-local paths so nothing needs sharing by hand;
+# override CC_BRIDGE_ADDR/CC_BRIDGE_TOKEN_FILE to point elsewhere.
+CC_BRIDGE_SOCK       ?= $(CURDIR)/storage/ccpatch-bridge.sock
+CC_BRIDGE_ADDR       ?= unix:$(CC_BRIDGE_SOCK)
+CC_BRIDGE_TOKEN_FILE ?= $(CURDIR)/storage/.bridge-token
+# `make gateway`'s adapter — override with GATEWAY_ADAPTERS=telegram (needs
+# TELEGRAM_BOT_TOKEN + TELEGRAM_ALLOWED_CHAT_IDS; see packages/gateway/README.md).
+GATEWAY_ADAPTERS     ?= stdio
+
 # ── VERBOSE — two-tier build output ──────────────────────────────────────────
 # The build is COMPACT by default: phase headers, one ✨ line per patch, the
 # summary box, and any warnings. Per-patch / per-shim sub-chatter (anchor
