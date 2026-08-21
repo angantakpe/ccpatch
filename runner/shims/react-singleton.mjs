@@ -67,10 +67,34 @@ export function applyReactSingletonShim(code, logger = console) {
   }
 
   logger.log('  [builtin] React module pattern not found. Injecting runtime React unification shim.');
-  const preloadEnd = code.indexOf('globalThis.__hm_require = __hm_require;');
-  if (preloadEnd === -1) return code;
+  // Anchor on the CJS wrapper's own opening brace — the same literal
+  // extraction itself anchors on (bin/extract-from-binary.mjs), so it's
+  // present in the RAW bundle before any patch runs, independent of phase
+  // order. Previously anchored on 'globalThis.__hm_require = __hm_require;',
+  // a literal esm_compat injects — but esm_compat is phase 'post' while this
+  // patch is phase 'pre' (dependsOn can't point forward across phases), so
+  // that anchor could be missing when this patch ran, silently no-oping the
+  // fallback (found live 2026-08-21 building v2.1.238, where all 3 static
+  // regex patterns above ALSO stopped matching for the first time, finally
+  // exercising this fallback path and exposing the ordering gap).
+  //
+  // Correctness of injecting here despite running before esm_compat: when
+  // esm_compat DOES apply later (every profile shipping react_singleton also
+  // ships esm_compat — see ccpatch.yml's bare/minimal lists), it rewrites the
+  // bundle as `esmHeader (with a top-level `await import('react')` that sets
+  // globalThis.__hm_react) + <original CJS wrapper, unmodified except its
+  // trailing invocation args> `. The wrapper is a function EXPRESSION —
+  // whatever we inject inside its body only runs once the wrapper is
+  // INVOKED, which is the last statement in the file, after esmHeader's
+  // await has already resolved. So __hm_react is guaranteed set by the time
+  // this shim's IIFE actually executes, regardless of textual injection
+  // order. (If esm_compat is absent from the profile, this guard makes the
+  // shim a no-op — same as the old anchor missing entirely; not a regression.)
+  const CJS_WRAPPER_OPEN = '(function(exports, require, module, __filename, __dirname) {';
+  const wrapperIdx = code.indexOf(CJS_WRAPPER_OPEN);
+  if (wrapperIdx === -1) return code;
 
-  const insertPoint = code.indexOf('\n', preloadEnd) + 1;
-  return code.slice(0, insertPoint) + REACT_UNIFY_SHIM + code.slice(insertPoint);
+  const insertPoint = wrapperIdx + CJS_WRAPPER_OPEN.length;
+  return code.slice(0, insertPoint) + '\n' + REACT_UNIFY_SHIM + code.slice(insertPoint);
 }
 
