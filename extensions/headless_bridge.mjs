@@ -79,6 +79,23 @@ export default {
     console.warn('[ccpatch] headless_bridge: CC_BRIDGE_TOOL_ALLOWLIST is unset — tool dispatch over the bridge is DENY-ALL by default. Set CC_BRIDGE_TOOL_ALLOWLIST=ToolA,ToolB to allow specific tools, or CC_BRIDGE_TOOL_ALLOWLIST="*" to allow every exposed tool. submit/subscribe/cancel are unaffected.');
   }
 
+  // Terminal-title status indicator (gateway on/off/connected). Deliberately
+  // NOT injected into the TUI's own footer: that footer is React-compiler-
+  // optimized, memoized JSX (cache-slot patterns like nhn.c(2), kCc[N]) —
+  // reverse-engineering a live-updating child into it is fragile in exactly
+  // the way react_singleton's anchor broke this same release. The terminal
+  // title (OSC 2) is a separate channel Ink's renderer never touches, so it
+  // can't be clobbered by a UI re-render (which happens on every keystroke/
+  // token and would otherwise overwrite a raw content-area ANSI write within
+  // a frame). Trade-off: if the CLI's own code also sets the title elsewhere,
+  // whichever write happens last wins — there's no portable way to read the
+  // current title back to merge with it, so this doesn't try to.
+  let __ccpGatewayConns = 0;
+  const __ccpSetGatewayTitle = (label) => {
+    try { process.stdout.write('\\x1b]2;[gateway: ' + label + '] Claude Code\\x07'); } catch (_) {}
+  };
+  process.on('exit', () => __ccpSetGatewayTitle('off'));
+
   const server = net.createServer((sock) => {
     let buf = '';
     let authed = false;
@@ -119,6 +136,8 @@ export default {
           return sock.destroy();
         }
         authed = true;
+        __ccpGatewayConns++;
+        __ccpSetGatewayTitle('connected (' + __ccpGatewayConns + ')');
         return send({
           id, ok: true, kind: 'ack',
           server: {
@@ -222,6 +241,10 @@ export default {
     });
 
     sock.on('close', () => {
+      if (authed) {
+        __ccpGatewayConns = Math.max(0, __ccpGatewayConns - 1);
+        __ccpSetGatewayTitle(__ccpGatewayConns > 0 ? 'connected (' + __ccpGatewayConns + ')' : 'listening');
+      }
       unsubAll();
       for (const { cancel } of inflight.values()) {
         try { cancel(); }
@@ -242,6 +265,7 @@ export default {
     try { fs.unlinkSync(sockPath); } catch (_) {}
     server.listen(sockPath, () => {
       try { fs.chmodSync(sockPath, 0o600); } catch (_) {}
+      __ccpSetGatewayTitle('listening');
     });
     process.on('exit', () => { try { fs.unlinkSync(sockPath); } catch (_) {} });
   } else if (ADDR.startsWith('tcp://')) {
@@ -261,6 +285,7 @@ export default {
       const a = server.address();
       const where = (a && typeof a === 'object') ? (a.address + ':' + a.port) : String(a);
       console.error('[ccpatch] headless_bridge: listening on tcp://' + where + (isLoopbackHost ? ' (loopback)' : ' (PUBLIC — CC_BRIDGE_ALLOW_PUBLIC=1)'));
+      __ccpSetGatewayTitle('listening');
     });
   } else {
     console.warn('[ccpatch] headless_bridge: invalid CC_BRIDGE_ADDR (use unix: or tcp://)');
