@@ -11,6 +11,7 @@
     ".": "./bridge-client.mjs",
     "./bridge-client": "./bridge-client.mjs",
     "./adapter": "./adapter.mjs",
+    "./streaming": "./streaming.mjs",
     "./adapters/telegram": "./adapters/telegram.mjs"
   },
   "engines": {
@@ -23,6 +24,7 @@
     "bridge-client.mjs",
     "adapter.mjs",
     "config.mjs",
+    "streaming.mjs",
     "adapters/telegram.mjs",
     "README.md",
     "LICENSE"
