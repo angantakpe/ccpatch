@@ -76,30 +76,71 @@ function readPath(buf, start) {
   return { path: buf.slice(start, nul).toString('utf8'), pathEnd: nul };
 }
 
+// A real bunfs module path is short and made of path-ish characters only
+// (word chars, dots, hyphens, slashes) — e.g. "src/entrypoints/cli.js",
+// "audio-capture.node", "cli". This rejects the false-positive case where a
+// BUNFS_PREFIX occurrence is actually a `require("/$bunfs/root/x.node")`
+// STRING LITERAL inside real JS source: with no real NUL nearby, readPath's
+// NUL search runs on for hundreds/thousands of bytes through ordinary code
+// and returns something like `x.node")});function foo(e){...` as "the
+// path" — printable ASCII (it's real source text) but obviously not a path.
+// Needed because the doubled-header check below no longer requires path1
+// === path2 (see its own comment), which removed the incidental filtering
+// exact-path-repetition used to provide against exactly this case.
+const PLAUSIBLE_PATH_RE = /^[\w.\-/]{1,200}$/;
+function isPlausiblePath(str) {
+  return PLAUSIBLE_PATH_RE.test(str);
+}
+
 function parseModuleAt(buf, markerStart) {
   // markerStart points to BUNFS_PREFIX occurrence.
   // Full header: /$bunfs/root/<path>\x00/$bunfs/root/<path>\x00// @bun <flags>\n
   const pathStart = markerStart + BUNFS_PREFIX.length;
   const first = readPath(buf, pathStart);
-  if (!first) return null;
+  if (!first || !isPlausiblePath(first.path)) return null;
   const modPath = first.path;
 
-  // Fix 2: use pre-built doubled-path needle (no Buffer.concat per call).
-  // Must be followed by a second occurrence of the same path.
-  const doubled = Buffer.from('//root/' + modPath + '\0//root/' + modPath + '\0');
-  if (buf.slice(markerStart, markerStart + doubled.length).equals(doubled)) {
-    // JS module — doubled path
-    const flagsStart = markerStart + doubled.length;
-    const newline = buf.indexOf(0x0A, flagsStart);
-    if (newline < 0) return null;
-    const flags = buf.slice(flagsStart, newline).toString('utf8');
-    return {
-      kind: 'js',
-      path: modPath,
-      markerStart,
-      contentStart: newline + 1,
-      flags,
-    };
+  // Doubled header: /$bunfs/root/<path1>\0/$bunfs/root/<path2>\0// @bun <flags>\n<content>
+  // path2 was always identical to path1 in every Bun build observed through
+  // Claude Code v2.1.195 (Fix 2's exact-byte-match check relied on that).
+  // Starting with the Bun build behind Claude Code v2.1.238, the entrypoint
+  // module's SECOND occurrence uses a short internal alias instead of the
+  // full path (observed: "src/entrypoints/cli.js" \0 "cli" \0 ...), so an
+  // exact-match check silently fails and the header falls through to the
+  // single-path branch below at the WRONG offset (it happens to find "@bun"
+  // inside the nested second marker's own header and mis-parses contentStart
+  // as pointing past that marker's flags line — plausible-looking but wrong,
+  // since the true content lives after the OUTER header, and the boundary
+  // computation in parseModules() then clips contentEnd using the inner
+  // marker's own markerStart, yielding a negative contentLength).
+  //
+  // Detect the doubled shape structurally instead of by path equality: is
+  // there a second real BUNFS_PREFIX marker immediately after the first
+  // path's NUL, itself followed by a genuine "// @bun" flags line? modPath
+  // is always taken from the FIRST (full, semantically meaningful) path —
+  // callers select modules by that path (e.g. "src/entrypoints/cli.js").
+  const afterFirstNul = first.pathEnd + 1;
+  if (buf.slice(afterFirstNul, afterFirstNul + BUNFS_PREFIX.length).equals(BUNFS_PREFIX)) {
+    const second = readPath(buf, afterFirstNul + BUNFS_PREFIX.length);
+    if (second && isPlausiblePath(second.path)) {
+      const flagsStart = second.pathEnd + 1;
+      const afterNul2 = buf.slice(flagsStart, flagsStart + 33);
+      if (afterNul2.indexOf(Buffer.from('@bun')) !== -1) {
+        const newline = buf.indexOf(0x0A, flagsStart);
+        if (newline >= 0) {
+          const flags = buf.slice(flagsStart, newline).toString('utf8');
+          if (flags.includes('@bun')) {
+            return {
+              kind: 'js',
+              path: modPath,
+              markerStart,
+              contentStart: newline + 1,
+              flags,
+            };
+          }
+        }
+      }
+    }
   }
 
   // Single-path JS module: /$bunfs/root/<path>\x00// @bun <flags>\n<content>
@@ -157,7 +198,16 @@ export function parseModules(buf) {
   }
   raw.sort((a, b) => a.markerStart - b.markerStart);
   for (let i = 0; i < raw.length; i++) {
-    const next = raw[i + 1];
+    // Skip any subsequent raw entry whose markerStart falls BEFORE our own
+    // contentStart — that's not a truly separate module, it's the inner
+    // marker nested inside our own doubled header (see parseModuleAt's
+    // comment on the v2.1.238+ short-alias case: the outer entry's
+    // contentStart already points past the inner marker, so treating the
+    // inner marker as "the next module" would clip contentEnd to BEFORE
+    // contentStart, yielding a negative contentLength).
+    let nextIdx = i + 1;
+    while (nextIdx < raw.length && raw[nextIdx].markerStart < raw[i].contentStart) nextIdx++;
+    const next = raw[nextIdx];
     const nextBoundary = next ? next.markerStart : buf.length;
     if (raw[i].kind === 'js') {
       // Bun NUL-terminates every JS module's source text. Using the first NUL after
