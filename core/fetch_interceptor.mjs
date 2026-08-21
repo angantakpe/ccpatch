@@ -25,7 +25,12 @@ globalThis.__ccpOnFetchBefore = (name, handler, priority = 50) => {
   }
 };
 
-// handler(event, abortFn) called per SSE event. abortFn() terminates the stream early.
+// handler(event, abortFn, meta) called per SSE event. abortFn() terminates the
+// stream early. meta = { url, options } — the request this stream came from,
+// e.g. to check options.body for the output_config.format field structured-
+// output calls (title/branch/session-name generation, hook prompts, etc.)
+// set, so a subscriber can tell those apart from the main conversation turn
+// (see assistant_stream_events.mjs, which does exactly this).
 globalThis.__ccpOnFetchStream = (name, handler) => {
   if (!globalThis.__ccpFetchStreamSubscribers.find(s => s.name === name)) {
     globalThis.__ccpFetchStreamSubscribers.push({ name, handler });
@@ -153,7 +158,7 @@ function _ccpFanOut(resp, urlStr, options, isApi) {
             events.push(ev);
             if (hasStream) {
               for (const sub of streamSubscribers) {
-                try { sub.handler(ev, () => streamAbort.abort()); } catch(e) { globalThis.__ccpBusWarn(sub.name, 'stream', e); }
+                try { sub.handler(ev, () => streamAbort.abort(), { url: urlStr, options }); } catch(e) { globalThis.__ccpBusWarn(sub.name, 'stream', e); }
               }
             }
           } catch(e) {}
@@ -165,7 +170,7 @@ function _ccpFanOut(resp, urlStr, options, isApi) {
           events.push(ev);
           if (hasStream) {
             for (const sub of streamSubscribers) {
-              try { sub.handler(ev, () => streamAbort.abort()); } catch(e) { globalThis.__ccpBusWarn(sub.name, 'stream', e); }
+              try { sub.handler(ev, () => streamAbort.abort(), { url: urlStr, options }); } catch(e) { globalThis.__ccpBusWarn(sub.name, 'stream', e); }
             }
           }
         } catch(e) {}

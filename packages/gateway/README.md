@@ -180,6 +180,23 @@ and a unit suite over the streaming/ordering/translation logic.
 - **Zero-dependency local adapter** — `adapters/stdio.mjs` needs no bot token,
   no credentials, and no `npm install` (stdlib `node:readline` only), so a
   patched session is reachable for manual testing immediately after cloning.
+- **`assistant.text` no longer mixes in auxiliary API calls** — found live on
+  2026-08-21 while verifying the fix above: a real turn's accumulated output
+  included stray `{"title": "..."}` JSON ahead of the actual answer. Claude
+  Code makes ~30 internal API calls beyond the human-facing turn (title
+  generation, branch naming, hook prompts, repl sampling, ...; grep the
+  extracted bundle for `querySource`) that were all streaming through the
+  same SSE tap and getting re-emitted as ordinary `assistant.text`. Fixed at
+  the source, not in this package: `core/fetch_interceptor.mjs`'s stream
+  subscribers now receive the originating request's `{url, options}`, and
+  `extensions/assistant_stream_events.mjs` uses that to skip any request
+  whose body sets `output_config.format` (the wire-level marker every one of
+  those internal calls sets when requesting schema-constrained JSON output —
+  the main conversation turn never does). Re-verified live against the real
+  patched CLI after the fix: clean `PONG`, no JSON noise. See both files'
+  module-header comments for the full trace, including a first attempt that
+  checked the wrong field path (`body.format` instead of the actual
+  `body.output_config.format`) and caught nothing until corrected.
 
 ### Known limitation: bridge events are not correlated to a submit
 
@@ -212,19 +229,6 @@ those three CLI-side patches, not working around it here.
   deliberately out of scope until asked for explicitly.
 - Streaming `tool.call` / `agent.*` activity (only `assistant.text` is
   streamed today); `run.mjs` already subscribes to those topics.
-- **`assistant.text` is contaminated by auxiliary API calls** — found live on
-  2026-08-21 while verifying the `resolveTurnText` fix above: a real turn's
-  accumulated output included stray `{"title": "..."}` fragments ahead of the
-  actual answer. Claude Code appears to make its own internal calls (at least
-  conversation-title generation) through the same `/v1/messages` path that
-  `extensions/assistant_stream_events.mjs` re-emits wholesale to `__ccpBus` —
-  there is nothing in the `assistant.text` payload (`{ text }` only, see the
-  known limitation above) that distinguishes "the turn's real answer" from
-  "some other internal call that happens to stream text." `resolveTurnText`
-  fixed "no answer at all"; it does not fix "the answer plus unrelated
-  noise." Not yet investigated further — may need `assistant_stream_events`
-  itself to scope which API calls it re-emits, which is outside this
-  package.
 
 ## Tests
 
