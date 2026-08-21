@@ -43,6 +43,7 @@ bridge-client.mjs      reusable, long-lived NDJSON client (connect/submit/dispat
 adapter.mjs             the ChannelAdapter contract every adapter implements
 streaming.mjs           channel-agnostic turn streaming: throttle, SerialQueue, streamTurn
 adapters/telegram.mjs   Telegram adapter (grammy-based)
+adapters/stdio.mjs      local terminal adapter (node:readline only, no deps/credentials)
 config.mjs              env -> config
 run.mjs                 CLI entrypoint: connect + start configured adapters
 tests/                  node:test suite
@@ -73,6 +74,17 @@ tests/                  node:test suite
    ```
    `GATEWAY_ADAPTERS` (default `telegram`) picks which adapters to start,
    comma-separated.
+
+For a quick smoke test with no bot token and no `npm install`, use the stdio
+adapter instead — one stdin line per turn, the turn's final result on stdout:
+
+```
+CC_BRIDGE_ADDR=unix:/run/ccpatch.sock CC_BRIDGE_TOKEN=<shared secret> \
+GATEWAY_ADAPTERS=stdio node run.mjs          # interactive
+
+echo 'summarize the repo' | CC_BRIDGE_ADDR=… CC_BRIDGE_TOKEN=… \
+GATEWAY_ADAPTERS=stdio node run.mjs          # piped; exits at EOF
+```
 
 ## Security posture
 
@@ -131,8 +143,9 @@ ordering.
 
 ## Status
 
-Scaffold stage: one real adapter (Telegram), a protocol-level smoke test
-against a real socket, and a unit suite over the streaming/ordering logic.
+Scaffold stage: two adapters (Telegram, and the zero-dependency stdio adapter
+for local manual testing), a protocol-level smoke test against a real socket,
+and a unit suite over the streaming/ordering/translation logic.
 
 ### Done
 
@@ -142,10 +155,19 @@ against a real socket, and a unit suite over the streaming/ordering logic.
   leading+trailing throttle (~1.2s, `editThrottleMs`) so a 300-delta turn
   costs a handful of `editMessageText` calls rather than 300 — Telegram
   rate-limits edits. A rejected `submit()` edits the placeholder to the error
-  instead of leaving it stuck on `…`.
+  instead of leaving it stuck on `…`. The stdio adapter keeps the simpler
+  submit-wait-print form deliberately (see `adapters/stdio.mjs`'s header) —
+  streaming to the same stdout that also prints the final result would either
+  duplicate output or break the piping contract that makes it useful for
+  `echo … | node run.mjs`.
 - **Per-chat ordering** — a `Map<chatId, Promise>` chain (`SerialQueue`) means
   two messages from the same chat are handled strictly in arrival order rather
-  than racing each other's placeholders and edits.
+  than racing each other's placeholders and edits. The stdio adapter has the
+  same property for free — one stdin, lines read and awaited strictly in
+  order.
+- **Zero-dependency local adapter** — `adapters/stdio.mjs` needs no bot token,
+  no credentials, and no `npm install` (stdlib `node:readline` only), so a
+  patched session is reachable for manual testing immediately after cloning.
 
 ### Known limitation: bridge events are not correlated to a submit
 
@@ -172,7 +194,10 @@ those three CLI-side patches, not working around it here.
 - **Multi-user session routing** — explicitly *not* solved. All chats still
   share one CLI session and one conversation; see
   [the security section](#all-chats-share-one-conversation--there-is-no-per-user-isolation).
-- A stdio/local adapter for zero-dependency manual testing.
+  True isolation means one patched CLI process + one bridge socket per user,
+  routed by chat id — a materially bigger undertaking than this scaffold
+  (process lifecycle, port/socket allocation, per-user config) and
+  deliberately out of scope until asked for explicitly.
 - Streaming `tool.call` / `agent.*` activity (only `assistant.text` is
   streamed today); `run.mjs` already subscribes to those topics.
 
@@ -182,9 +207,13 @@ those three CLI-side patches, not working around it here.
 node --test packages/gateway/tests/*.test.mjs   # from the repo root
 ```
 
-`tests/bridge-client.test.mjs` drives the real protocol over a real Unix
-socket via `tests/bridge_host.mjs` at the repo root.
-`tests/telegram-adapter.test.mjs` needs neither grammy nor a socket — the
-adapter's logic takes its Telegram and bridge surfaces as plain objects, so a
-fake `ctx` (`reply` + `api.editMessageText`) and a fake bridge (`on`/`off`/
-`submit`) exercise the real code paths.
+- `tests/bridge-client.test.mjs` drives the real protocol over a real Unix
+  socket via `tests/bridge_host.mjs` at the repo root.
+- `tests/telegram-adapter.test.mjs` needs neither grammy nor a socket — the
+  adapter's logic takes its Telegram and bridge surfaces as plain objects, so
+  a fake `ctx` (`reply` + `api.editMessageText`) and a fake bridge (`on`/`off`/
+  `submit`) exercise the real code paths.
+- `tests/stdio-adapter.test.mjs` needs neither a TTY nor a socket — a fake
+  `Readable` stands in for stdin and a stub bridge stands in for
+  `BridgeClient`, covering the translation layer (one submit per line, the
+  `final`/`text`/JSON fallback, a rejected submit not killing the loop).

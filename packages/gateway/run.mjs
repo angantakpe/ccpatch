@@ -22,9 +22,11 @@ import { BridgeClient } from './bridge-client.mjs';
 import { loadConfig } from './config.mjs';
 import { isChannelAdapter } from './adapter.mjs';
 import { createTelegramAdapter } from './adapters/telegram.mjs';
+import { createStdioAdapter } from './adapters/stdio.mjs';
 
 const ADAPTER_FACTORIES = {
   telegram: createTelegramAdapter,
+  stdio: createStdioAdapter,
 };
 
 async function main() {
