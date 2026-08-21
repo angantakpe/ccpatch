@@ -30,6 +30,7 @@ const drive = async (lines, submit) => {
   const bridge = {
     submit: (prompt) => { submitted.push(prompt); return submit(prompt); },
     on: () => {},
+    off: () => {},
   };
   const out = collector();
   const logs = [];
@@ -67,6 +68,34 @@ test('stdio adapter: falls back to result.text, then to JSON, like telegram.mjs'
   assert.equal(stdout, 'from text\n{"weird":1}\n');
 });
 
+test('stdio adapter: prints the accumulated assistant.text stream, not submit()\'s return value', async () => {
+  // Confirmed live against a real patched CLI on 2026-08-21: submit() never
+  // returns the answer there (extensions/expose_submit_input.mjs captures a
+  // void UI event handler). Only the assistant.text stream carries it. This
+  // stub emits chunks the way the real bridge does, then resolves submit()
+  // with something that must be IGNORED once anything has streamed.
+  let onText;
+  const bridge = {
+    on: (topic, fn) => { if (topic === 'assistant.text') onText = fn; },
+    off: () => { onText = undefined; },
+    submit: async (prompt) => {
+      onText({ text: `real ` });
+      onText({ text: `answer:${prompt}` });
+      return { final: 'THIS MUST NOT WIN' };
+    },
+  };
+  const out = collector();
+  let done;
+  const ended = new Promise((resolve) => { done = resolve; });
+  const adapter = createStdioAdapter({ onEnd: done, banner: collector().stream });
+
+  adapter.start({ bridge, log: () => {}, input: Readable.from(['hi\n']), output: out.stream });
+  await ended;
+  await adapter.stop();
+
+  assert.equal(out.text(), 'real answer:hi\n');
+});
+
 test('stdio adapter: a rejected submit is reported but does not stop later lines', async () => {
   const { submitted, stdout, logs } = await drive(
     ['boom\n', 'still here\n'],
@@ -94,7 +123,7 @@ test('stdio adapter: satisfies the ChannelAdapter contract and stops cleanly mid
   const input = new Readable({ read() {} });
   input.push('one\n');
   adapter.start({
-    bridge: { submit: async () => ({ final: 'ok' }), on: () => {} },
+    bridge: { submit: async () => ({ final: 'ok' }), on: () => {}, off: () => {} },
     log: () => {},
     input,
     output: collector().stream,

@@ -85,17 +85,21 @@ test('createThrottle: serializes fn invocations rather than overlapping them', a
   assert.deepEqual(order, ['start:a', 'end:a', 'start:b', 'end:b']);
 });
 
-test('streamTurn: streams mid-turn text as throttled edits, not one edit per event', async () => {
+test('streamTurn: streams mid-turn text as throttled edits, settling on the accumulated stream', async () => {
   const calls = [];
   const ctx = fakeCtx(1, 'hi', calls);
+  const chunks = Array.from({ length: 40 }, (_, i) => `chunk${i} `);
 
   const bridge = fakeBridge(async (emit) => {
-    // 40 deltas over ~200ms — far more events than allowed edits.
-    for (let i = 0; i < 40; i++) {
-      emit(`chunk${i} `);
+    // 40 deltas over ~200ms — far more events than allowed edits. submit()'s
+    // own return value must be ignored once anything has streamed — confirmed
+    // live against a real patched CLI (see streaming.mjs's resolveTurnText):
+    // the real submit() never returns the answer, only assistant.text does.
+    for (const chunk of chunks) {
+      emit(chunk);
       await sleep(5);
     }
-    return { final: 'FINAL ANSWER' };
+    return { final: 'THIS MUST NOT WIN — real submit() returns nothing usable' };
   });
 
   await streamTurn({ bridge, prompt: 'hi', message: createMessageSurface(ctx), throttleMs: 50 });
@@ -107,7 +111,7 @@ test('streamTurn: streams mid-turn text as throttled edits, not one edit per eve
   assert.equal(replies[0].text, '…');
   assert.ok(edits.length >= 2, `expected several streaming edits, got ${edits.length}`);
   assert.ok(edits.length < 12, `expected throttling well below 40 events, got ${edits.length}`);
-  assert.equal(edits.at(-1).text, 'FINAL ANSWER', 'final result supersedes partial text');
+  assert.equal(edits.at(-1).text, chunks.join(''), 'settles on the full accumulated stream, not submit()\'s return');
   assert.ok(edits[0].text.startsWith('chunk0 '), 'mid-turn edits carry accumulated text');
   assert.ok(edits.every((e) => e.message_id === replies[0].message_id), 'all edits target the placeholder');
 });
@@ -181,12 +185,13 @@ test('per-chat serialization: two messages from one chat are handled strictly in
   const started = [];
 
   // Deliberately slow submit, so message 2 would overtake message 1 without
-  // the per-chat queue.
+  // the per-chat queue. submit()'s `final` is deliberately never surfaced —
+  // it must be ignored once the turn has streamed (see resolveTurnText).
   const bridge = fakeBridge(async (emit, prompt) => {
     started.push(prompt);
     emit(`streaming for ${prompt} `);
     await sleep(60);
-    return { final: `done:${prompt}` };
+    return { final: `THIS MUST NOT WIN:${prompt}` };
   });
 
   const handler = createMessageHandler({
@@ -208,11 +213,11 @@ test('per-chat serialization: two messages from one chat are handled strictly in
   // The whole of message 1's exchange precedes any of message 2's — including
   // the placeholder, which is what proves the handler (not just submit) queued.
   const texts = calls.map((c) => c.text);
-  const firstDone = texts.indexOf('done:first');
+  const firstStreamed = texts.indexOf('streaming for first ');
   const secondPlaceholder = calls.findIndex((c, i) => c.op === 'reply' && i > 0);
-  assert.ok(firstDone >= 0 && secondPlaceholder >= 0);
-  assert.ok(firstDone < secondPlaceholder, `message 1 finished at ${firstDone} before message 2 started at ${secondPlaceholder}`);
-  assert.equal(texts.at(-1), 'done:second');
+  assert.ok(firstStreamed >= 0 && secondPlaceholder >= 0);
+  assert.ok(firstStreamed < secondPlaceholder, `message 1 finished at ${firstStreamed} before message 2 started at ${secondPlaceholder}`);
+  assert.equal(texts.at(-1), 'streaming for second ', 'settles on the accumulated stream, not submit()\'s return');
 });
 
 test('no-correlation fallback: concurrent chats are serialized so streamed text is never mixed', async () => {

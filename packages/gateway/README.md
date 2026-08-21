@@ -156,10 +156,22 @@ and a unit suite over the streaming/ordering/translation logic.
   costs a handful of `editMessageText` calls rather than 300 — Telegram
   rate-limits edits. A rejected `submit()` edits the placeholder to the error
   instead of leaving it stuck on `…`. The stdio adapter keeps the simpler
-  submit-wait-print form deliberately (see `adapters/stdio.mjs`'s header) —
-  streaming to the same stdout that also prints the final result would either
-  duplicate output or break the piping contract that makes it useful for
-  `echo … | node run.mjs`.
+  submit-wait-print form deliberately (no incremental stdout writes) — see
+  `adapters/stdio.mjs`'s header — streaming to the same stdout that also
+  prints the final result would either duplicate output or break the piping
+  contract that makes it useful for `echo … | node run.mjs`.
+- **The real answer comes from the event stream, not `submit()`'s return
+  value** — confirmed live against a real patched CLI on 2026-08-21, not just
+  the test stub. `extensions/expose_submit_input.mjs` captures React's
+  `submit` useCallback, a void UI event handler that dispatches into the chat
+  UI and resolves with nothing usable — it is not a request/response
+  function. `tests/bridge_host.mjs`'s stub fabricates a `{final: ...}` return
+  the real CLI never produces, which is exactly how the original bug (both
+  adapters printing `null`/the literal string `"null"`) shipped past a green
+  test suite undetected. Fixed by `streaming.mjs`'s `resolveTurnText` /
+  `submitAndCollect`: both adapters now accumulate `assistant.text` and treat
+  that as the answer, falling back to `submit()`'s return value only when
+  nothing streamed at all (e.g. a tool-only turn, or a test double).
 - **Per-chat ordering** — a `Map<chatId, Promise>` chain (`SerialQueue`) means
   two messages from the same chat are handled strictly in arrival order rather
   than racing each other's placeholders and edits. The stdio adapter has the
@@ -200,6 +212,19 @@ those three CLI-side patches, not working around it here.
   deliberately out of scope until asked for explicitly.
 - Streaming `tool.call` / `agent.*` activity (only `assistant.text` is
   streamed today); `run.mjs` already subscribes to those topics.
+- **`assistant.text` is contaminated by auxiliary API calls** — found live on
+  2026-08-21 while verifying the `resolveTurnText` fix above: a real turn's
+  accumulated output included stray `{"title": "..."}` fragments ahead of the
+  actual answer. Claude Code appears to make its own internal calls (at least
+  conversation-title generation) through the same `/v1/messages` path that
+  `extensions/assistant_stream_events.mjs` re-emits wholesale to `__ccpBus` —
+  there is nothing in the `assistant.text` payload (`{ text }` only, see the
+  known limitation above) that distinguishes "the turn's real answer" from
+  "some other internal call that happens to stream text." `resolveTurnText`
+  fixed "no answer at all"; it does not fix "the answer plus unrelated
+  noise." Not yet investigated further — may need `assistant_stream_events`
+  itself to scope which API calls it re-emits, which is outside this
+  package.
 
 ## Tests
 

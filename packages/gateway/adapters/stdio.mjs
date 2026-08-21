@@ -21,8 +21,18 @@
  *
  * Lines are processed strictly one at a time — the next line is not read until
  * the previous submit settles, since the bridge runs one turn at a time.
+ *
+ * The "final result" is the accumulated `assistant.text` stream, not
+ * `bridge.submit()`'s return value — confirmed live against a real patched
+ * CLI on 2026-08-21 that submit() resolves with nothing usable (see
+ * streaming.mjs's `resolveTurnText` header for why). `submitAndCollect`
+ * (../streaming.mjs) does that accumulation and also holds the same
+ * gateway-wide submit lock `streamTurn` uses, so a submit from this adapter
+ * and a concurrent submit from telegram.mjs (if both are running against the
+ * same bridge) still can't have their assistant.text interleave.
  */
 import readline from 'node:readline';
+import { submitAndCollect } from '../streaming.mjs';
 
 /**
  * @param {object} [opts]
@@ -67,13 +77,9 @@ export function createStdioAdapter({
         for await (const raw of rl) {
           const line = raw.trim();
           if (!line) { prompt(); continue; }
-          try {
-            const result = await bridge.submit(line);
-            const text = (result && (result.final ?? result.text)) ?? JSON.stringify(result ?? null);
-            output.write(`${String(text)}\n`);
-          } catch (e) {
-            log(`[stdio] submit failed: ${e.message}`);
-          }
+          const { ok, text } = await submitAndCollect({ bridge, prompt: line });
+          if (ok) output.write(`${text}\n`);
+          else log(`[stdio] submit failed: ${text}`);
           prompt();
         }
       })();

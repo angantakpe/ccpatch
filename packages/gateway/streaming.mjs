@@ -156,6 +156,63 @@ export const bridgeTurns = new SerialQueue();
 export const BRIDGE_TURN_KEY = 'bridge';
 
 /**
+ * Resolve a turn's real answer.
+ *
+ * Confirmed live against a real patched CLI (not just the test stub) on
+ * 2026-08-21: `bridge.submit()`'s resolved value is NOT the assistant's
+ * answer. `extensions/expose_submit_input.mjs` captures React's `submit`
+ * useCallback — a void UI event handler that dispatches into the chat UI and
+ * returns nothing usable, not a request/response function. The ONLY reliable
+ * source of the turn's actual text is the accumulated `assistant.text`
+ * stream. `submit()`'s return value is a fallback for the case where nothing
+ * streamed at all (a tool-only turn with no text deltas, or a test double
+ * that fabricates a `{final}`/`{text}` return instead of emitting events —
+ * e.g. tests/bridge_host.mjs), not the primary source.
+ *
+ * @param {any} result - whatever bridge.submit() resolved with
+ * @param {string} accumulated - text accumulated from assistant.text events
+ * @returns {string}
+ */
+export function resolveTurnText(result, accumulated) {
+  if (accumulated) return accumulated;
+  const final = (result && (result.final ?? result.text)) ?? JSON.stringify(result ?? null);
+  return String(final);
+}
+
+/**
+ * Submit a prompt and return its real text, with no message-surface/UI
+ * concerns (no placeholder, no throttled edits) — for adapters like stdio
+ * that just want "the turn's answer" once, at the end. Still goes through
+ * the gateway-wide `bridgeTurns` lock, same as streamTurn, for the same
+ * correlation-safety reason (see the module header): assistant.text events
+ * are unattributed, so only one submit — from ANY adapter sharing this
+ * bridge connection — may be in flight at a time.
+ *
+ * @param {object} o
+ * @param {{ on: Function, off: Function, submit: (p: string) => Promise<any> }} o.bridge
+ * @param {string} o.prompt
+ * @returns {Promise<{ ok: boolean, text: string }>}
+ */
+export async function submitAndCollect({ bridge, prompt }) {
+  return bridgeTurns.run(BRIDGE_TURN_KEY, async () => {
+    let accumulated = '';
+    const onText = (payload) => {
+      const chunk = payload && typeof payload.text === 'string' ? payload.text : '';
+      if (chunk) accumulated += chunk;
+    };
+    bridge.on('assistant.text', onText);
+    try {
+      const result = await bridge.submit(prompt);
+      return { ok: true, text: resolveTurnText(result, accumulated) };
+    } catch (e) {
+      return { ok: false, text: `error: ${e.message}` };
+    } finally {
+      bridge.off('assistant.text', onText);
+    }
+  });
+}
+
+/**
  * Post a placeholder, stream the turn's assistant text into it, and settle it
  * on the final result (or the error).
  *
@@ -204,8 +261,7 @@ export async function streamTurn({
     bridge.on('assistant.text', onText);
     try {
       const result = await bridge.submit(prompt);
-      const final = (result && (result.final ?? result.text)) ?? JSON.stringify(result ?? null);
-      const text = String(final);
+      const text = resolveTurnText(result, accumulated);
       // Drop any trailing partial edit — the final text supersedes it.
       pushEdit.cancel();
       await pushEdit.settled();
